@@ -215,13 +215,48 @@ impl Envelope {
                 out.push_str(&format!("already_imported: {already_imported}\n"));
                 out.push_str(&format!("tasks: {}\n", report.task_count));
                 out.push_str(&format!("rules: {}\n", report.rules.len()));
-                out.push_str(&format!("duplicates: {:?}\n", report.duplicate_ids));
+                let duplicates = report
+                    .duplicate_ids
+                    .iter()
+                    .map(|id| format!("T-{id:03}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                out.push_str(&format!(
+                    "duplicates: {}\n",
+                    if duplicates.is_empty() { "none" } else { &duplicates }
+                ));
                 out.push_str(&format!("source_sha256: {}\n", report.source_sha256));
-                out.push_str(&format!("preview_tasks: {:?}\n", report.tasks));
-                out.push_str(&format!("sections: {:?}\n", report.sections));
-                out.push_str(&format!("unassigned_ranges: {:?}\n", report.unassigned_ranges));
-                out.push_str(&format!("ambiguous_sections: {:?}\n", report.ambiguous_sections));
+                for task in &report.tasks {
+                    let consumed = task.consumed_metadata.join(",");
+                    out.push_str(&format!(
+                        "T-{0:03} {1} {2} consumed=[{3}] {4}\n",
+                        task.id, task.status, task.section, consumed, task.title
+                    ));
+                }
+                for section in &report.sections {
+                    let status = section
+                        .status
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "unmapped".to_string());
+                    out.push_str(&format!(
+                        "section: {} status={} contains_tasks={}\n",
+                        section.heading, status, section.contains_tasks
+                    ));
+                }
+                for range in &report.unassigned_ranges {
+                    out.push_str(&format!(
+                        "unassigned: {}-{} {}\n",
+                        range.start_byte, range.end_byte, range.preview
+                    ));
+                }
+                let ambiguous = report.ambiguous_sections.join(",");
+                out.push_str(&format!(
+                    "ambiguous_sections: {}\n",
+                    if ambiguous.is_empty() { "none" } else { &ambiguous }
+                ));
                 out.push_str(&format!("has_unknown_content: {}\n", report.has_unknown_content));
+                out.push_str(&format!("has_bom: {}\n", report.has_bom));
                 out
             }
             CommandPayload::Export { out, task_count } => {
@@ -283,5 +318,51 @@ mod tests {
         let text = envelope.text();
         assert!(text.contains("title"));
         assert!(!text.contains("body:"));
+    }
+
+    #[test]
+    fn import_text_preview_is_line_oriented() {
+        let envelope = Envelope {
+            schema_version: 1,
+            project_id: None,
+            data: CommandPayload::Import {
+                path: "input.md".to_string(),
+                report: ImportReport {
+                    source_sha256: "hash".to_string(),
+                    has_bom: true,
+                    task_count: 1,
+                    tasks: vec![crate::model::ImportTaskPreview {
+                        id: 1,
+                        title: "Title".to_string(),
+                        section: "ready".to_string(),
+                        status: crate::model::TaskStatus::Ready,
+                        consumed_metadata: vec!["Status".to_string(), "Body".to_string()],
+                    }],
+                    sections: vec![crate::model::ImportSectionPreview {
+                        heading: "ready".to_string(),
+                        status: Some(crate::model::TaskStatus::Ready),
+                        contains_tasks: true,
+                    }],
+                    rules: String::new(),
+                    duplicate_ids: Vec::new(),
+                    unmapped_sections: Vec::new(),
+                    ambiguous_sections: Vec::new(),
+                    unassigned_ranges: vec![crate::model::SourceRange {
+                        start_byte: 4,
+                        end_byte: 8,
+                        preview: "leftover".to_string(),
+                    }],
+                    has_unknown_content: true,
+                },
+                already_imported: false,
+                applied: false,
+            },
+        };
+        let text = envelope.text();
+        assert!(text.contains("T-001 ready ready consumed=[Status,Body] Title"));
+        assert!(text.contains("section: ready status=ready contains_tasks=true"));
+        assert!(text.contains("unassigned: 4-8 leftover"));
+        assert!(text.contains("has_bom: true"));
+        assert!(!text.contains("ImportTaskPreview"));
     }
 }
