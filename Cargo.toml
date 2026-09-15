@@ -1,0 +1,39 @@
+[package]
+name = "tasks-cli"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+
+[features]
+default = []
+test-hooks = []
+
+[[bin]]
+name = "tasks"
+path = "src/main.rs"
+
+[[bin]]
+name = "tasks-test-writer"
+path = "src/bin/tasks-test-writer.rs"
+required-features = ["test-hooks"]
+
+[[bin]]
+name = "tasks-test-fixture"
+path = "src/bin/tasks-test-fixture.rs"
+required-features = ["test-hooks"]
+
+[dependencies]
+clap = { version = "4.5.4", features = ["derive"] }
+fs2 = "0.4.3"
+rusqlite = { version = "0.32.1", features = ["bundled", "backup", "trace"] }
+serde = { version = "1.0.211", features = ["derive"] }
+serde_json = "1.0.128"
+sha2 = "0.10.8"
+thiserror = "1.0.64"
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.12.0"
+
+[package.metadata.cargo-machete]
+ignored = ["trace"]
