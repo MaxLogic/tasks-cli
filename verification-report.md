@@ -62,17 +62,19 @@ Executed inside Ubuntu 22.04 WSL with CARGO_TARGET_DIR=target/linux:
 
 The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
 
+The earlier WSL run used the shared default target directory and was repeated here with CARGO_TARGET_DIR=target/linux in the same shell.
+
 For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 65 passed, 0 failed, and 0 ignored. This is 16 unit tests and 49 nonzero integration tests; the additional result line is the zero-test doctest target.
 
 Evidence:
 
-- target/evidence/item-2-wsl-gates/fmt.log
-- target/evidence/item-2-wsl-gates/clippy.log
-- target/evidence/item-2-wsl-gates/test.log
-- target/evidence/item-2-wsl-gates/serial.log
-- target/evidence/item-2-wsl-gates/build.log
-- target/evidence/item-2-wsl-gates/status.txt
-- target/evidence/item-2-gate-summary.txt
+- target/evidence/item-2-correction-wsl-gates/fmt.log
+- target/evidence/item-2-correction-wsl-gates/clippy.log
+- target/evidence/item-2-correction-wsl-gates/test.log
+- target/evidence/item-2-correction-wsl-gates/serial.log
+- target/evidence/item-2-correction-wsl-gates/build.log
+- target/evidence/item-2-correction-wsl-gates/status.txt
+- target/evidence/item-2-correction-wsl-gates/artifact.txt
 
 ## Release artifacts
 
@@ -80,8 +82,8 @@ Evidence:
   - Size: 2,998,784 bytes
   - SHA-256: 04B4E0A4DE1DE03F6F090273425EB9F1286EB9566B57492D6CE044E8A75F9B16
 - Linux x64 target/linux/release/tasks
-  - Size: 3,976,472 bytes
-  - SHA-256: ECCF95D8464F97E15949981523A8A1F1255E08EF7D4DA5EE2CF512713183F4D5
+  - Size: 3,992,160 bytes
+  - SHA-256: A7593D59A328A3B003B7F1E20DBCA2984D878AC48D2DD396C0CA9C68F8988F36
 
 ## Current-binary PFM and DelphiAiKit trials
 
@@ -106,14 +108,14 @@ The real current Linux wrapper and current Windows executable were used. Native 
 
 The clean summary records:
 
-    project_one=7d444545-9f60-478a-af5b-6908eb135fca
-    project_two=becb8aaa-45ac-4886-80b0-36e7e325b76d
+    project_one=9b77499b-6fb3-46e5-b611-e7868628fe56
+    project_two=25ca0c35-6b95-4c20-966e-a889acf7ec79
     init_one_status=0
     init_two_status=0
     projects_after_init=2
-    closest_project=7d444545-9f60-478a-af5b-6908eb135fca
-    precedence_project=7d444545-9f60-478a-af5b-6908eb135fca
-    route_two_project=becb8aaa-45ac-4886-80b0-36e7e325b76d
+    closest_project=9b77499b-6fb3-46e5-b611-e7868628fe56
+    precedence_project=9b77499b-6fb3-46e5-b611-e7868628fe56
+    route_two_project=25ca0c35-6b95-4c20-966e-a889acf7ec79
     unknown_status=3
     explicit_unknown_status=0
     broken_interop_status=6
@@ -132,10 +134,10 @@ The known invalid first race probe used an /mnt path directly with the Windows e
 
 Evidence:
 
-- target/evidence/item-2-wsl-smoke/summary.txt
-- target/evidence/item-2-wsl-smoke/artifact-sha256.txt
-- target/evidence/item-2-wsl-smoke/smoke.sh
-- target/evidence/item-2-wsl-smoke/race.sh
+- target/evidence/item-2-correction-wsl-smoke/summary.txt
+- target/evidence/item-2-correction-wsl-smoke/artifact-sha256.txt
+- target/evidence/item-2-correction-wsl-smoke/smoke.sh
+- target/evidence/item-2-correction-wsl-smoke/race.sh
 
 ## Implementation coverage
 
