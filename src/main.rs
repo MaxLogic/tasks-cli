@@ -174,12 +174,13 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Command::Migrate => {
             let project_id = resolved_project(&cli, &data_root)?;
             let mut store = Store::open_for_migration(&data_root, &project_id)?;
-            let (from_version, to_version) = store.migrate()?;
+            let (from_version, to_version, backup_path) = store.migrate()?;
             envelope(
                 Some(project_id),
                 CommandPayload::Migrate {
                     from_version,
                     to_version,
+                    backup_path: backup_path.map(|path| path.display().to_string()),
                 },
                 cli.format,
             );

@@ -62,6 +62,7 @@ pub enum CommandPayload {
     Migrate {
         from_version: i32,
         to_version: i32,
+        backup_path: Option<String>,
     },
     Doctor {
         db_path: String,
@@ -232,7 +233,11 @@ impl Envelope {
             CommandPayload::Migrate {
                 from_version,
                 to_version,
-            } => format!("migrated: {from_version} -> {to_version}\n"),
+                backup_path,
+            } => format!(
+                "migrated: {from_version} -> {to_version}\nbackup_path: {}\n",
+                backup_path.as_deref().unwrap_or("null")
+            ),
             CommandPayload::Doctor {
                 db_path,
                 project_id,

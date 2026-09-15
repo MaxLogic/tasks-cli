@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 use std::{
     fs,
+    path::PathBuf,
     process::{Command, Stdio},
 };
 use tasks_cli::store::{data_root_project_path, Store};
@@ -41,11 +42,29 @@ fn legacy_fixture(status: &str) -> (TempDir, Uuid, std::path::PathBuf) {
     (root, project_id, db_path)
 }
 
+fn migration_backups(root: &TempDir, project_id: &Uuid) -> Vec<PathBuf> {
+    let project_dir = root.path().join("projects").join(project_id.to_string());
+    let mut backups = fs::read_dir(project_dir)
+        .expect("project directory")
+        .map(|entry| entry.expect("directory entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("TASKS.v0-pre-migrate-") && name.ends_with(".sqlite"))
+        })
+        .collect::<Vec<_>>();
+    backups.sort();
+    backups
+}
+
 #[test]
 fn genuine_v0_schema_migrates_and_preserves_data() {
-    let (root, project_id, db_path) = legacy_fixture("ready");
+    let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
-    assert_eq!(store.migrate().expect("migrate"), (0, 1));
+    let (from, to, backup_path) = store.migrate().expect("migrate");
+    assert_eq!((from, to), (0, 1));
+    let backup = backup_path.expect("backup path");
+    assert!(backup.is_file());
 
     let reopened = Store::open_readonly(root.path(), &project_id.to_string()).expect("reopen");
     let mut reopened = reopened;
@@ -57,8 +76,6 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
     assert_eq!(detail.body, "old body Ω");
     assert_eq!(detail.version, 1);
 
-    let backup = db_path.with_extension("v0-pre-migrate.sqlite");
-    assert!(backup.is_file());
     let backup_conn =
         Connection::open_with_flags(backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("pre-upgrade backup");
@@ -75,6 +92,87 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
             .expect("backup data"),
         "old body Ω"
     );
+}
+
+#[test]
+fn every_migration_attempt_backups_the_current_live_database() {
+    let (root, project_id, db_path) = legacy_fixture("ready");
+    let mut first = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
+    let (_, _, first_backup) = first.migrate().expect("first migrate");
+    let first_backup = first_backup.expect("first backup");
+    drop(first);
+
+    let conn = Connection::open(&db_path).expect("current database");
+    conn.execute(
+        "INSERT INTO tasks(id, title, body, status, version, created_ms, updated_ms) VALUES (8, 'new title', 'new body', 'backlog', 1, 0, 0)",
+        [],
+    )
+    .expect("new live task");
+    conn.pragma_update(None, "user_version", 0i64)
+        .expect("reset version for reproduction");
+    drop(conn);
+
+    let mut second = Store::open_for_migration(root.path(), &project_id.to_string()).expect("reopen");
+    let (_, _, second_backup) = second.migrate().expect("second migrate");
+    let second_backup = second_backup.expect("second backup");
+    assert_ne!(first_backup, second_backup);
+    assert_eq!(migration_backups(&root, &project_id).len(), 2);
+    let mut current = Store::open_rw(root.path(), &project_id.to_string()).expect("current");
+    let published = root.path().join("published.sqlite");
+    current.backup(&published).expect("published backup");
+    for path in [&first_backup, &second_backup, &published] {
+        assert!(
+            !PathBuf::from(format!("{}-wal", path.display())).exists(),
+            "unexpected WAL sidecar for {}",
+            path.display()
+        );
+        assert!(
+            !PathBuf::from(format!("{}-shm", path.display())).exists(),
+            "unexpected SHM sidecar for {}",
+            path.display()
+        );
+    }
+    let second_conn = Connection::open_with_flags(
+        &second_backup,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("second backup");
+    assert_eq!(
+        second_conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+            .expect("second backup count"),
+        2
+    );
+    drop(second_conn);
+}
+
+#[test]
+fn migrate_output_reports_backup_path_in_text_and_json() {
+    for format in ["text", "json"] {
+        let (root, project_id, _) = legacy_fixture("ready");
+        let project_text = project_id.to_string();
+        let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+            .args([
+                "--data-root",
+                root.path().to_str().expect("UTF-8 root"),
+                "--project",
+                project_text.as_str(),
+                "--format",
+                format,
+                "migrate",
+            ])
+            .output()
+            .expect("migrate command");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+        if format == "text" {
+            assert!(stdout.contains("backup_path: "));
+            assert!(stdout.contains("pre-migrate-"));
+        } else {
+            let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON output");
+            assert!(value["data"]["backup_path"].as_str().is_some());
+        }
+    }
 }
 
 #[test]
@@ -106,18 +204,15 @@ fn failed_v0_migration_rolls_back_schema_and_data() {
             .expect("data"),
         "old body Ω"
     );
-    assert!(root
-        .path()
-        .join("projects")
-        .join(project_id.to_string())
-        .join("TASKS.v0-pre-migrate.sqlite")
-        .is_file());
+    assert_eq!(migration_backups(&root, &project_id).len(), 1);
 
+    assert_eq!(migration_backups(&root, &project_id).len(), 1);
     let mut retry = Store::open_for_migration(root.path(), &project_id.to_string()).expect("retry");
     let retry_error = retry
         .migrate()
         .expect_err("invalid legacy data remains invalid");
     assert!(!retry_error.to_string().contains("destination exists"));
+    assert_eq!(migration_backups(&root, &project_id).len(), 2);
 }
 
 #[test]

@@ -9,6 +9,7 @@ use crate::storage::{acquire_exclusive_lock, validate_storage_root, ExclusiveLoc
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -690,6 +691,32 @@ fn validate_backup(
     Ok(())
 }
 
+fn remove_backup_sidecars(path: &Path) -> Result<(), AppError> {
+    let Some(file_name) = path.file_name() else {
+        return Ok(());
+    };
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar_name = OsString::from(file_name);
+        sidecar_name.push(suffix);
+        let sidecar = path.with_file_name(sidecar_name);
+        match fs::remove_file(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn remove_backup_artifacts(path: &Path) -> Result<(), AppError> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AppError::Io(error)),
+    }
+    remove_backup_sidecars(path)
+}
+
 fn publish_backup(
     conn: &Connection,
     out: &Path,
@@ -723,6 +750,7 @@ fn publish_backup(
             None::<fn(rusqlite::backup::Progress)>,
         )?;
         validate_backup(&temp, expected_project, expected_schema)?;
+        remove_backup_sidecars(&temp)?;
         match std::fs::hard_link(&temp, &out) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -730,9 +758,10 @@ fn publish_backup(
             }
             Err(error) => return Err(AppError::Io(error)),
         }
+        remove_backup_sidecars(&out)?;
         Ok(std::fs::metadata(out)?.len())
     })();
-    let cleanup = std::fs::remove_file(&temp);
+    let cleanup = remove_backup_artifacts(&temp);
     match (result, cleanup) {
         (Ok(bytes), Ok(())) => Ok(bytes),
         (Ok(bytes), Err(_)) => Ok(bytes),
@@ -1781,7 +1810,30 @@ impl Store {
         Ok(count)
     }
 
-    pub fn migrate(&mut self) -> Result<(i32, i32), AppError> {
+    fn migration_backup_path(&self, version: i32) -> PathBuf {
+        let stem = self
+            .db_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("TASKS");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        loop {
+            let sequence = BACKUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = format!(
+                "{stem}.v{version}-pre-migrate-{timestamp}-{}-{sequence}.sqlite",
+                std::process::id()
+            );
+            let path = self.db_path.with_file_name(name);
+            if !path.exists() {
+                return path;
+            }
+        }
+    }
+
+    pub fn migrate(&mut self) -> Result<(i32, i32, Option<PathBuf>), AppError> {
         let _lock = match self.migration_lock.take() {
             Some(lock) => lock,
             None => acquire_exclusive_lock(&self.db_path.with_extension("migrate.lock"))?,
@@ -1794,27 +1846,15 @@ impl Store {
         }
         if current == CURRENT_SCHEMA_VERSION {
             validate_current_schema(&self.conn, &self.project_id)?;
-            return Ok((current, current));
+            return Ok((current, current, None));
         }
-        let pre_upgrade = self
-            .db_path
-            .with_extension(format!("v{current}-pre-migrate.sqlite"));
+        let pre_upgrade = self.migration_backup_path(current);
         let backup_project = if table_exists(&self.conn, "project")? {
             Some(&self.project_id)
         } else {
             None
         };
-        if pre_upgrade.is_file() {
-            validate_backup(&pre_upgrade, backup_project, Some(current))?;
-        } else {
-            match publish_backup(&self.conn, &pre_upgrade, backup_project, Some(current)) {
-                Ok(_) => {}
-                Err(AppError::Usage(_)) if pre_upgrade.is_file() => {
-                    validate_backup(&pre_upgrade, backup_project, Some(current))?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        publish_backup(&self.conn, &pre_upgrade, backup_project, Some(current))?;
         configure_writer(&self.conn)?;
         let tx = self
             .conn
@@ -1828,7 +1868,7 @@ impl Store {
         migrate_v0_to_v1(&tx, &self.project_id)?;
         tx.commit()?;
         validate_current_schema(&self.conn, &self.project_id)?;
-        Ok((current, CURRENT_SCHEMA_VERSION))
+        Ok((current, CURRENT_SCHEMA_VERSION, Some(pre_upgrade)))
     }
 
     pub fn doctor(&mut self) -> Result<(String, String, i32, String), AppError> {
