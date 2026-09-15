@@ -1551,6 +1551,7 @@ impl Store {
     fn import_report(parsed: &ParsedImport) -> ImportReport {
         ImportReport {
             source_sha256: parsed.source_hash.clone(),
+            has_bom: parsed.has_bom,
             task_count: parsed.tasks.len(),
             tasks: parsed.task_previews.clone(),
             sections: parsed.sections.clone(),

@@ -223,3 +223,31 @@ fn tasks_without_a_section_are_unmapped_and_cannot_apply() {
         .items
         .is_empty());
 }
+
+#[test]
+fn leading_bom_is_structural_and_does_not_block_apply() {
+    let plain = b"## ready\n### T-1 BOM-safe\nBody:\nbody \xCE\xA9\n## Rules\nshared rule\n".to_vec();
+    let mut with_bom = vec![0xef, 0xbb, 0xbf];
+    with_bom.extend_from_slice(&plain);
+    let without = markdown::parse("plain.md", plain, None).expect("plain parse");
+    let parsed = markdown::parse("bom.md", with_bom.clone(), None).expect("BOM parse");
+
+    assert!(!without.has_bom);
+    assert!(parsed.has_bom);
+    assert_eq!(parsed.source, with_bom);
+    assert_eq!(parsed.source_hash, markdown::sha256(&parsed.source));
+    assert_eq!(parsed.tasks.len(), without.tasks.len());
+    assert_eq!(parsed.tasks[0].id, without.tasks[0].id);
+    assert_eq!(parsed.tasks[0].title, without.tasks[0].title);
+    assert_eq!(parsed.tasks[0].body, without.tasks[0].body);
+    assert_eq!(parsed.rules, without.rules);
+
+    let (_root, mut store) = store();
+    let expected = parsed.source_hash.clone();
+    let (report, already) = store
+        .import_apply(parsed, Some(&expected))
+        .expect("BOM apply");
+    assert!(!already);
+    assert!(report.has_bom);
+    assert_eq!(store.show_task("T-1").expect("task").body, "body Ω");
+}

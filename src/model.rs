@@ -139,6 +139,7 @@ pub struct InitResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportReport {
     pub source_sha256: String,
+    pub has_bom: bool,
     pub task_count: usize,
     pub tasks: Vec<ImportTaskPreview>,
     pub sections: Vec<ImportSectionPreview>,
