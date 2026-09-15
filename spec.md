@@ -102,9 +102,11 @@ delegating CLI forwards it as an explicit project argument so the Windows child
 does not depend on cross-OS environment propagation. An explicit `--project`
 takes precedence over `TASKS_PROJECT`, and both take precedence over directory
 routing. An unknown translated directory fails without creating a database or
-backlog. Explicit
-flags override environment values. `init`/`bind` may omit UUID where their normal
-contract permits it. Reject delegation on non-WSL Linux or from Windows, and do
+backlog. Explicit flags override environment values. These `TASKS_PROJECT` and
+hidden `--route-root` routing defaults apply only to routed project commands.
+Native and delegated `init`/`bind` never consume them; those commands follow
+their own root-binding and project-creation contract. Reject delegation on
+non-WSL Linux or from Windows, and do
 not forward the delegation option to the child. Failure to start the configured
 executable must fail, never fall back to a local store.
 
@@ -245,7 +247,9 @@ validate -> perform one store operation -> close transaction -> render result.
 Initial importer supports the existing `### T-N ...` task layout with surrounding
 `##` status sections. Use Markdown-aware heading recognition (including fenced
 code handling), not a broad regex that mistakes code examples for task boundaries.
-Preserve each task's content and capture original bytes. Preview reports IDs,
+Preserve each task's content and capture original bytes. A leading UTF-8 BOM at
+byte 0 is structural input: preview reports `has_bom: true`, while the original
+bytes and source SHA-256 remain unchanged. Preview reports IDs,
 titles, section/status mappings, duplicate IDs, ambiguous content and every
 unassigned non-whitespace range. Provide an explicit mapping file option
 `--map-file PATH` for section-to-status choices; do not guess ambiguous statuses.
@@ -269,7 +273,11 @@ form, and preview lists the consumed metadata fields. A task before the first
 `##` heading is reported under the pseudo-section `<no section>` and blocks
 apply unless that exact pseudo-section is explicitly mapped.
 
-Apply only to a project with no tasks and no nonempty rules. Validate every byte
+Each actual schema migration creates and validates a fresh pre-upgrade backup
+named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`; older
+pre-migration backups are retained, and migrate output reports the new path.
+If the database is already current, no backup is created and the reported path
+is null. Apply only to a project with no tasks and no nonempty rules. Validate every byte
 range is assigned to a task, shared rules or documented structural markup; unknown
 content blocks apply. Re-read/check the expected source hash before applying.
 The whole import, initial events, rules and provenance commit together. A repeated

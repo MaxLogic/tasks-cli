@@ -45,6 +45,10 @@ ancestor of the current directory. `TASKS_PROJECT` is the environment default;
 an explicit flag wins over it. An unknown directory fails and does not create a
 database.
 
+`TASKS_PROJECT` and the hidden `--route-root` option are routing context for
+routed project commands only. Native and delegated `init` and `bind` never use
+either value; they follow their own root-binding and project-creation contract.
+
 ## Daily use
 
 ```text
@@ -99,6 +103,9 @@ accepted only as part of that block. For compatibility, the older ordered
 are also accepted. `Body:` ends metadata and everything after it is body text.
 A body line beginning with a metadata label is therefore preserved unless an
 ordered metadata form is present.
+If the source starts with a UTF-8 BOM, it is treated as structural input;
+preview and JSON report `has_bom: true`, while the original bytes and source
+SHA-256 remain unchanged.
 Tasks before the first level-two section are reported as `<no section>` and
 block apply; a map may explicitly assign that pseudo-section when such input
 is intentional.
@@ -118,6 +125,12 @@ Linux rejects /mnt/<drive> and UNC/remote roots rather than opening a
 Windows-owned SQLite file. To recover, validate a backup in a new isolated data
 root, then recreate the registry entry with init/bind; there is no in-place
 destructive restore command.
+
+Every actual schema migration creates and validates a fresh pre-upgrade backup
+named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`. Older
+pre-migration backups are retained, and the migrate output reports the new
+backup path. A migration that is already at the current schema reports no
+backup path.
 
 ## WSL delegation
 
