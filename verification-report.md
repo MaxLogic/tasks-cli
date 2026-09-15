@@ -1,61 +1,31 @@
 # tasks-cli verification report
 
 Date: 2026-09-15
-Scope: current source tree, Windows x64 release binary, and Ubuntu 22.04 WSL x64 release binary.
+Candidate: main after numbered maintenance commits
+Scope: Windows x64 release binary and Ubuntu 22.04 WSL x64 release binary.
 
-## 1. Summary
+## Summary
 
-The release-blocking and correctness findings from the review were fixed or independently verified against the current implementation. The importer now preserves metadata-like body prefixes, sectionless tasks are unmapped, delegated init/bind do not inherit unrelated project context, legacy migration rejects cycles safely, limits are validated, diagnostics and read-only paths work on old schemas, and the required Windows/WSL routing and race evidence is present.
+The seven requested maintenance items are implemented in separate commits. Migration now creates a new validated pre-upgrade backup for every actual migration attempt, reports its path, and does not reuse or delete older backups. Import BOM handling, readable text previews, routing documentation, dead-code removal, and batched list/search dependency reads are complete.
 
-The release judgment is **Ready with minor fixes**. The remaining qualification is repository hygiene: this environment was instructed not to use Git, so no initial commit was created. Cargo.lock exists and was used by every locked build/test command, project.zip is ignored, and the stray control-character directory was removed. A few low-priority maintainability and preview-polish items remain explicitly listed below.
+All current-binary checks below are measured from the candidate after the item commits. No prior trial counts are reused. No live TASKS.md file or live task backlog was modified.
 
-## 2. Findings and implementation status
+## Numbered commits
 
-| Finding | Status | Relevant implementation and evidence |
+| Item | Commit | Result |
 | --- | --- | --- |
-| H1. Metadata-like lines lost from imported task bodies | Fixed | src/markdown.rs uses an ordered metadata block, treats Body: as a hard boundary, records consumed metadata, and preserves non-matching prefix lines. Regression tests are in tests/import_contract.rs; executable smoke evidence is in target/evidence/assessment-import-exe-windows-2. |
-| M1. Delegated init inherited TASKS_PROJECT | Fixed | src/interop.rs injects project context only for routed project commands, not init or bind. target/evidence/assessment-wsl-fixes-3/summary.txt proves two delegated init roots receive two projects while explicit routing and TASKS_PROJECT precedence work for routed commands. |
-| M2. Tasks outside a section defaulted to backlog | Fixed | src/markdown.rs represents this as the explicit <no section> pseudo-section and blocks apply unless mapped. Covered by tests/import_contract.rs and the executable smoke summary. |
-| M3. Unversioned repository and stray files | Partially fixed | The stray control-character directory is gone and /project.zip is in .gitignore. No commit was made because Git operations are outside this execution scope; the lockfile is present but not committed. |
-| M4. Missing delegated race and broken-interop evidence | Fixed | target/evidence/assessment-wsl-fixes-3/summary.txt records closest-ancestor routing, explicit-project precedence, unknown-directory no-creation, broken interop with no Linux fallback, and a corrected native-Windows versus delegated-Windows optimistic-update race. |
-| M5. Exponential/unterminated dependency cycle walk | Fixed | Live and legacy cycle checks use recursive UNION, and v0 migration validates legacy dependencies before commit. Covered by tests/migrations.rs; the legacy cyclic fixture rolls back. |
-| L1. Global options failed after a subcommand | Fixed | src/cli.rs marks the common options global. tests/interop.rs covers tasks list --format json. |
-| L2. Reads were read-write and doctor rejected old schemas | Fixed | Rules preview, export, and import preview use read-only opening; diagnostics use a schema-tolerant read-only opener and report old/new schema state. Covered by tests/reads.rs and tests/migrations.rs. |
-| L3. Failed migration left an unusable retry backup | Fixed | Migration reuses and validates an existing pre-upgrade backup rather than failing with an opaque destination-exists error. Covered by tests/migrations.rs. |
-| L4. Limits were silently clamped | Fixed | List, search, and history reject values outside 1..=100. Covered by tests/reads.rs. |
-| L5. Help went to stderr | Fixed | Help/version output is written to stdout in src/main.rs. |
-| L6. Error classification and input error shape | Fixed for reviewed paths | Validation/file-input errors use the documented usage class; schema/open failures use the database class; the stable JSON envelope and conflict details remain covered by subprocess tests. |
-| L7. Dead code and nominal module boundaries | Partially fixed | The backup wrapper is now used by the command path. A broad split of store.rs, removal of the unused alternate renderer, and a dedicated migrations directory were not undertaken because they do not improve the release proof enough to justify a broad refactor. |
-| L8. Noisy previews for BOM/summary content | Partially fixed | Import accounting and explicit unknown/unmapped reporting are enforced, and metadata handling is documented. BOM and project-specific summary conventions remain visible as source content/unknown content rather than being guessed away. |
-| L9. Readers had no busy timeout | Fixed | Read-only open configures a bounded SQLite busy timeout. |
-| L10. Lock contention mapping was Windows-specific | Fixed | OS error 32/33 are treated as lock contention only on Windows; Unix tests cover the distinction. |
-| Priority 2. Backup validation/publication | Fixed and verified | Online backup output is validated for integrity, foreign keys, schema version, and project UUID, then published with no-overwrite race protection. Concurrent backup tests pass. |
-| Priority 2. Test-only failure hooks | Fixed and verified | Failure injection is behind the test-hooks feature/helper and is not enabled by the normal release binary. |
-| Priority 2. Dependency replacement/no-op semantics | Fixed and verified | Replacement is set-semantic, ordering-independent, mutually exclusive with clear, and no-op updates create no version/event. |
-| Priority 2. Text/JSON and delegation path syntax | Fixed and verified | Routing identity, dependency summaries, bounded reads, JSON errors, and both --flag value and --flag=value delegation forms are covered by tests/probes. |
-| Priority 3. Toolchain pin | Fixed | rust-toolchain.toml pins the project toolchain. |
-| Priority 3. Documentation | Fixed for current behavior | README.md, spec.md, AGENTS.md, and this report describe the importer contract, routing, storage ownership, build/use/recovery commands, and verification scope. |
+| 1 | 46806e1 | Fresh unique migration backups, output path, sidecar cleanup, and migration regression coverage |
+| 2 | Final report commit | Current measured gate counts, hashes, ledger trials, and WSL smoke evidence |
+| 3 | 37689bd | Dead code removal; Clippy verified |
+| 4 | c1f79f7 | BOM structural parsing, has_bom report field, and parity/apply coverage |
+| 5 | 9be3434 | Readable line-oriented import text preview |
+| 6 | 0047be0 | Routing, migration-backup, and BOM documentation |
+| 7 | 7826d53 | One parameterized dependency query for each list/search page |
+| Formatting | 7396607 | Mechanical rustfmt changes recorded separately |
 
-## 3. Tests added or retained
+## Verification commands and exact results
 
-- Import metadata-prefix preservation for Title:, Status:, Depends on:, Version:, and Body:.
-- Export/import round-trip preservation for metadata-like body prefixes.
-- Sectionless tasks reported as unmapped and rejected during apply.
-- Strict page-limit validation.
-- Doctor reporting for an actual v0 schema without migrating it.
-- Cyclic legacy dependency migration rollback.
-- Delegated init/bind argument-context regression.
-- Global option parsing after a subcommand.
-- Unix lock-error classification.
-- Existing durable coverage retained for SQLite transactions, same-version single-winner updates, unique concurrent IDs, failed-write rollback, killed writers/WAL recovery, dependency cycles, bounded pagination, body omission in list, complete show text, malformed import atomicity, concurrent backups, newer schemas, CRLF/Unicode, literal search metacharacters, history event ownership, and structured subprocess errors.
-
-Windows test result: 14 unit tests and 51 integration tests passed; 0 failed and 0 ignored.
-Ubuntu/WSL test result: 15 unit tests and 52 integration tests passed; 0 failed and 0 ignored.
-The test harness reported no selected doctests and no zero-test selection was used.
-
-## 4. Verification actually executed
-
-### Windows gates
+### Windows
 
 Executed in F:\projects\MaxLogic\tasks-cli:
 
@@ -65,17 +35,22 @@ Executed in F:\projects\MaxLogic\tasks-cli:
     cargo test --locked -- --test-threads=1
     cargo build --release --locked
 
-All passed. Combined status is recorded in target/evidence/assessment-windows-gates.log as:
+The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
 
-    STATUS fmt=0 clippy=0 test=0 serial=0 build=0
+For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 63 passed, 0 failed, and 0 ignored. This is 15 unit tests and 48 nonzero integration tests; the additional result line is the zero-test doctest target.
 
-The test-hooks helper was also built with:
+Evidence:
 
-    cargo build --release --locked --features test-hooks --bin tasks-test-fixture
+- target/evidence/item-2-windows-gates/fmt.log
+- target/evidence/item-2-windows-gates/clippy.log
+- target/evidence/item-2-windows-gates/test.log
+- target/evidence/item-2-windows-gates/serial.log
+- target/evidence/item-2-windows-gates/build.log
+- target/evidence/item-2-windows-gates/status.txt
 
-### Ubuntu/WSL gates
+### Ubuntu/WSL
 
-Executed inside Ubuntu 22.04 WSL with a separate target directory:
+Executed inside Ubuntu 22.04 WSL with CARGO_TARGET_DIR=target/linux:
 
     cd /mnt/f/projects/MaxLogic/tasks-cli
     export CARGO_TARGET_DIR=target/linux
@@ -85,82 +60,100 @@ Executed inside Ubuntu 22.04 WSL with a separate target directory:
     cargo test --locked -- --test-threads=1
     cargo build --release --locked
 
-All passed. The test-hooks helper was also built with:
+The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
 
-    CARGO_TARGET_DIR=target/linux cargo build --release --locked --features test-hooks --bin tasks-test-fixture
+For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 65 passed, 0 failed, and 0 ignored. This is 16 unit tests and 49 nonzero integration tests; the additional result line is the zero-test doctest target.
 
-### Release artifacts
+Evidence:
 
-- Windows: target/release/tasks.exe
-  - Size: 2,980,864 bytes
-  - SHA-256: F43A465077235EAF936F9DAC6792ABA653FE8926EFA57DD4D2B406798139B3BD
-- Linux x64: target/linux/release/tasks
+- target/evidence/item-2-wsl-gates/fmt.log
+- target/evidence/item-2-wsl-gates/clippy.log
+- target/evidence/item-2-wsl-gates/test.log
+- target/evidence/item-2-wsl-gates/serial.log
+- target/evidence/item-2-wsl-gates/build.log
+- target/evidence/item-2-wsl-gates/status.txt
+- target/evidence/item-2-gate-summary.txt
+
+## Release artifacts
+
+- Windows target/release/tasks.exe
+  - Size: 2,998,784 bytes
+  - SHA-256: 04B4E0A4DE1DE03F6F090273425EB9F1286EB9566B57492D6CE044E8A75F9B16
+- Linux x64 target/linux/release/tasks
   - Size: 3,976,472 bytes
   - SHA-256: ECCF95D8464F97E15949981523A8A1F1255E08EF7D4DA5EE2CF512713183F4D5
 
-### Executable and interoperability evidence
+## Current-binary PFM and DelphiAiKit trials
 
-- Windows CRUD/import/sectionless smoke: target/evidence/assessment-import-exe-windows-2/summary.txt
-- Native Linux-owned storage, CRUD, backup, doctor, /mnt rejection, and UNC rejection: target/evidence/assessment-linux-native-fixes/summary.txt
-- WSL delegation, routing precedence, no-fallback failure, and cross-client optimistic conflict: target/evidence/assessment-wsl-fixes-3/summary.txt
-- Windows gates: target/evidence/assessment-windows-gates.log
+Each live source was copied into an operation-owned evidence directory before reading. The copied TASKS.md was marked read-only. The test used independently parsed expected task headings, titles, bodies, and shared rules, then used the current Windows release binary for init, preview, apply, and per-task show comparisons.
 
-The WSL evidence uses the real shipped Linux wrapper and Windows tasks.exe; it does not open the Windows-owned SQLite file from native Linux. Native Linux tests use a Linux-owned /tmp data root.
+- PFM: 132 tasks, 132/132 title matches, 132/132 body matches, 2,345 shared-rule bytes, source SHA-256 1743BABDD43A5767C86E9931F1FEBC7E84CFEBABEAB5277E220B5E861BD0CEC7.
+- DelphiAiKit: 107 tasks, 107/107 title matches, 107/107 body matches, 110 shared-rule bytes, source SHA-256 C795D8E0B8B5A6434583E968924B355770359EB20227ADC9186BC6ED0BB727D4.
 
-### Isolated ledger trials
+The binary used for both trials was SHA-256 04B4E0A4DE1DE03F6F090273425EB9F1286EB9566B57492D6CE044E8A75F9B16.
 
-Read-only copies of PFM and DelphiAiKit TASKS.md were imported into isolated stores. The prior independent comparisons recorded:
+Evidence:
 
-- PFM: 133/133 task IDs and bodies matched; shared rules length 2,328 bytes; source SHA-256 8C488BC6C609755F184DA3B1CE67BD7BBB1E21167F410DCA741C276EB0532039.
-- DelphiAiKit: 107/107 task IDs and bodies matched; shared rules length 110 bytes; source SHA-256 68CCBE5DF2F38456F378F2C8FD718E853BDD59CC81AC21F8B717F9CDA25939B0.
+- target/evidence/item-2-import-trials/summary.txt
+- target/evidence/item-2-import-trials/PFM-task-comparison.csv
+- target/evidence/item-2-import-trials/DelphiAiKit-task-comparison.csv
+- target/evidence/item-2-import-trials/PFM-input/TASKS.md
+- target/evidence/item-2-import-trials/DelphiAiKit-input/TASKS.md
 
-These were copies only. No live TASKS.md or live backlog was modified or migrated.
+## WSL delegation smoke
 
-### Performance
+The real current Linux wrapper and current Windows executable were used. Native Linux used a separate Linux-owned data root. The Windows-owned SQLite database was accessed only by Windows tasks.exe, including delegated calls.
 
-Each case used five warmups and 50 measured release-binary samples against an operation-owned synthetic fixture. Measurements include process startup and are reported separately for native and delegated paths.
+The clean summary records:
 
-Windows fixture size: 44,294,144 bytes.
+    project_one=7d444545-9f60-478a-af5b-6908eb135fca
+    project_two=becb8aaa-45ac-4886-80b0-36e7e325b76d
+    init_one_status=0
+    init_two_status=0
+    projects_after_init=2
+    closest_project=7d444545-9f60-478a-af5b-6908eb135fca
+    precedence_project=7d444545-9f60-478a-af5b-6908eb135fca
+    route_two_project=becb8aaa-45ac-4886-80b0-36e7e325b76d
+    unknown_status=3
+    explicit_unknown_status=0
+    broken_interop_status=6
+    projects_before_unknown=2
+    projects_after_unknown=2
+    linux_owned_exists=no
+    race_create_status=0
+    race_native_status=0
+    race_delegated_status=4
+    race_history_status=0
+    race_show_status=0
+    race_history_events=2
+    race_show_version=2
 
-| Command | P50 ms | P95 ms | Output bytes |
-| --- | ---: | ---: | ---: |
-| list --limit 20 | 18.655 | 25.096 | 862 |
-| search Performance --limit 20 | 18.033 | 22.794 | 872 |
-| show T-00001 | 18.151 | 25.004 | 2,218 |
-| update T-00001 | 35.632 | 40.580 | 104 |
+The known invalid first race probe used an /mnt path directly with the Windows executable. Its artifacts were removed before the summary was retained; the summary contains only the corrected race result set.
 
-Native Linux fixture size: 43,606,016 bytes.
+Evidence:
 
-| Command | P50 ms | P95 ms | Output bytes | Peak RSS KiB |
-| --- | ---: | ---: | ---: | ---: |
-| list --limit 20 | 27.472 | 29.788 | 870 | 5,036 |
-| search Performance --limit 20 | 27.940 | 34.657 | 870 | 4,988 |
-| show T-00001 | 27.004 | 29.038 | 2,227 | 4,964 |
-| update | 42.424 | 45.469 | 103 | 5,140 |
+- target/evidence/item-2-wsl-smoke/summary.txt
+- target/evidence/item-2-wsl-smoke/artifact-sha256.txt
+- target/evidence/item-2-wsl-smoke/smoke.sh
+- target/evidence/item-2-wsl-smoke/race.sh
 
-Delegated WSL-to-Windows fixture measurements:
+## Implementation coverage
 
-| Command | P50 ms | P95 ms | Output bytes |
-| --- | ---: | ---: | ---: |
-| list --limit 20 | 65.640 | 74.855 | 864 |
-| search Performance --limit 20 | 59.985 | 77.880 | 872 |
-| show T-00001 | 59.860 | 80.707 | 2,220 |
-| update | 75.091 | 92.824 | 104 |
+- Fresh migration backups use TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite, are validated before the migration transaction, and older backups remain untouched.
+- Backup validation and publication remove temporary and published WAL/SHM sidecars.
+- Dead symbols listed in item 3 are removed; backup.rs remains the used SQLite backup wrapper.
+- A UTF-8 BOM at byte 0 is structural only; original bytes and source hash are retained, and ImportReport exposes has_bom.
+- Text import previews contain one readable line per task, section, and unassigned range; JSON remains structured.
+- README.md and spec.md document that TASKS_PROJECT and --route-root affect routed commands only, never init or bind, both natively and through delegation.
+- List and search dependency IDs are fetched in one bounded parameterized query per page.
 
-Performance evidence is retained under target/evidence/assessment-performance-windows/, target/evidence/assessment-performance-linux-2/, and target/evidence/assessment-performance-wsl-2/. These are observed results, not renamed targets.
+## Remaining limitations
 
-## 5. Remaining limitations
+- Performance measurements were not rerun for this maintenance batch; prior candidate metrics are intentionally not repeated here.
+- Evidence covers Windows x64 and Ubuntu 22.04 WSL x64. Other distributions, architectures, and unusual network/cloud filesystems remain untested.
+- Private ledger checks use isolated read-only copies. Live projects remain unchanged.
+- Restore remains an offline recovery workflow rather than an in-place replacement.
 
-- No initial Git commit was created in this run, so the lockfile is durable in the working tree but not committed.
-- Windows/WSL proof covers Windows x64 and Ubuntu 22.04 WSL x64. Other Linux distributions, native Windows ARM, and other filesystems were not tested.
-- WSL delegation is intentionally same-host Windows ownership; native Linux must use its own data root.
-- The private ledger trials used isolated read-only copies, not live projects.
-- Restore remains an offline recovery workflow rather than an in-place database replacement.
-- The broad store.rs module split and alternate-renderer cleanup remain maintainability work, not release correctness blockers.
-- Platform-specific behavior on unusual network/cloud-synced filesystems remains outside the evidence matrix.
+## Release judgment
 
-## 6. Release judgment
-
-**Ready with minor fixes**
-
-The binaries, transaction/migration/import/backup contracts, routing boundary, failure paths, and platform gates have executable evidence. The remaining minor qualification is repository versioning: create and review the initial local commits, including Cargo.lock, before publishing or distributing the release.
+Ready with minor fixes. The requested maintenance changes and current-binary platform evidence are complete; no push was performed.
