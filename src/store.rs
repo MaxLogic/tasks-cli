@@ -863,23 +863,6 @@ impl Store {
         })
     }
 
-    pub fn open_for_init(data_root: &Path, project: &Uuid) -> Result<Self, AppError> {
-        let info = create_project_db(data_root, project)?;
-        let conn = Connection::open_with_flags(
-            &info.db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        validate_current_schema(&conn, project)?;
-        Ok(Self {
-            project_id: *project,
-            db_path: info.db_path,
-            conn,
-            migration_lock: None,
-        })
-    }
-
     pub fn open_for_migration(data_root: &Path, project: &str) -> Result<Self, AppError> {
         let data_root = validate_storage_root(data_root)?;
         let db_path = data_root_project_path(&data_root, project);
@@ -918,10 +901,6 @@ impl Store {
             conn,
             migration_lock: Some(migration_lock),
         })
-    }
-
-    pub fn project_id_text(&self) -> String {
-        self.project_id.to_string()
     }
 
     pub fn project_rules(&mut self) -> Result<RuleRecord, AppError> {

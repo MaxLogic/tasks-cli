@@ -1,5 +1,4 @@
 use rusqlite::Error as SqliteError;
-use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,12 +29,8 @@ pub enum AppError {
     Interop(String),
     #[error("sha mismatch: expected {expected}, got {actual}")]
     ShaMismatch { expected: String, actual: String },
-    #[error("timeout: {0}")]
-    Timeout(String),
     #[error("serde: {0}")]
     Serde(String),
-    #[error("internal: {0}")]
-    Internal(String),
 }
 
 impl From<SqliteError> for AppError {
@@ -72,9 +67,7 @@ impl AppError {
             Self::Registry(_) => "registry",
             Self::Interop(_) => "interop",
             Self::ShaMismatch { .. } => "source_hash_mismatch",
-            Self::Timeout(_) => "timeout",
             Self::Serde(_) => "serialization",
-            Self::Internal(_) => "internal",
         }
     }
 
@@ -89,9 +82,7 @@ impl AppError {
             | Self::Io(_)
             | Self::Registry(_)
             | Self::Interop(_)
-            | Self::Timeout(_)
-            | Self::Serde(_)
-            | Self::Internal(_) => 6,
+            | Self::Serde(_) => 6,
         }
     }
 
@@ -101,22 +92,6 @@ impl AppError {
 
     pub fn usage(message: impl Into<String>) -> Self {
         Self::Usage(message.into())
-    }
-
-    pub fn busy_if_timeout(err: rusqlite::Error, timeout: Duration) -> Self {
-        if let rusqlite::Error::SqliteFailure(sqlite_err, _) = err {
-            if matches!(
-                sqlite_err.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            ) {
-                return Self::Busy;
-            }
-        }
-        if timeout.is_zero() {
-            Self::Database(err.to_string())
-        } else {
-            Self::LockTimeout
-        }
     }
 
     pub fn json(&self) -> String {
