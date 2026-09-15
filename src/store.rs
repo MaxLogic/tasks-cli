@@ -1,0 +1,1899 @@
+use crate::error::AppError;
+use crate::markdown::{ParsedImport, ParsedTask};
+use crate::model::{
+    parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportReport, Pagination,
+    RuleRecord, TaskDetail, TaskStatus, TaskSummary, TaskUpdate, BODY_MAX_BYTES, ID_PREFIX,
+    MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
+};
+use crate::storage::{acquire_exclusive_lock, validate_storage_root, ExclusiveLock};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde_json::json;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+
+#[derive(Debug)]
+pub struct Store {
+    pub project_id: Uuid,
+    pub db_path: PathBuf,
+    pub conn: Connection,
+    migration_lock: Option<ExclusiveLock>,
+}
+
+pub struct StoreInfo {
+    pub project_id: Uuid,
+    pub db_path: PathBuf,
+}
+
+pub fn data_root_project_path(data_root: &Path, project_id: &str) -> PathBuf {
+    data_root
+        .join("projects")
+        .join(project_id)
+        .join("TASKS.sqlite")
+}
+
+pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInfo, AppError> {
+    let data_root = validate_storage_root(data_root)?;
+    let db_path = data_root_project_path(&data_root, &project_id.to_string());
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _lock = acquire_exclusive_lock(&db_path.with_extension("create.lock"))?;
+    if db_path.exists() {
+        let mut conn = Connection::open(&db_path)?;
+        let version = schema_version(&conn)?;
+        if version == 0 && !table_exists(&conn, "project")? && !table_exists(&conn, "tasks")? {
+            configure_writer(&conn)?;
+            initialize_new_database(&mut conn, project_id)?;
+        } else {
+            let info = verify_existing_project(&db_path, project_id)?;
+            return Ok(info);
+        }
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&db_path)?;
+        let mut conn = Connection::open(&db_path)?;
+        configure_writer(&conn)?;
+        initialize_new_database(&mut conn, project_id)?;
+    }
+    let info = verify_existing_project(&db_path, project_id)?;
+    Ok(info)
+}
+
+fn schema_version(conn: &Connection) -> Result<i32, AppError> {
+    Ok(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool, AppError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )? != 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn configure_writer(conn: &Connection) -> Result<(), AppError> {
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    Ok(())
+}
+
+fn validate_limit(limit: usize) -> Result<usize, AppError> {
+    if (1..=100).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(AppError::Validation(
+            "limit must be between 1 and 100".to_string(),
+        ))
+    }
+}
+
+fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE project(
+            project_id TEXT PRIMARY KEY,
+            rules_markdown TEXT NOT NULL DEFAULT '',
+            rules_version INTEGER NOT NULL DEFAULT 1,
+            next_task_number INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE tasks(
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            created_ms INTEGER NOT NULL,
+            updated_ms INTEGER NOT NULL,
+            CHECK (version > 0),
+            CHECK (status IN ('backlog','ready','in-progress','blocked','done','cancelled'))
+        );
+        CREATE TABLE dependencies(
+            task_id INTEGER NOT NULL,
+            depends_on_id INTEGER NOT NULL,
+            PRIMARY KEY(task_id, depends_on_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY(depends_on_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE TABLE events(
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER,
+            entity_type TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            resulting_version INTEGER NOT NULL,
+            created_ms INTEGER NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE TABLE imports(
+            input_sha256 TEXT PRIMARY KEY,
+            source_name TEXT NOT NULL,
+            original_source BLOB NOT NULL,
+            report_json TEXT NOT NULL,
+            imported_ms INTEGER NOT NULL
+        );
+        CREATE INDEX idx_tasks_status_id ON tasks(status, id);
+        CREATE INDEX idx_dependencies_depends_on_id ON dependencies(depends_on_id);
+        CREATE INDEX idx_events_task_id ON events(task_id, event_id);
+        ",
+    )?;
+    Ok(())
+}
+
+fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(), AppError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    create_schema_objects(&tx)?;
+    tx.execute(
+        "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
+        [project_id.to_string()],
+    )?;
+    tx.execute_batch("PRAGMA user_version = 1")?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn validate_current_schema(conn: &Connection, expected: &Uuid) -> Result<(), AppError> {
+    if schema_version(conn)? != CURRENT_SCHEMA_VERSION {
+        return Err(AppError::Database("schema is not current".to_string()));
+    }
+    for table in ["project", "tasks", "dependencies", "events", "imports"] {
+        if !table_exists(conn, table)? {
+            return Err(AppError::Database(format!("missing table {table}")));
+        }
+    }
+    for column in [
+        "project_id",
+        "rules_markdown",
+        "rules_version",
+        "next_task_number",
+    ] {
+        if !column_exists(conn, "project", column)? {
+            return Err(AppError::Database(format!(
+                "missing project column {column}"
+            )));
+        }
+    }
+    for column in [
+        "id",
+        "title",
+        "body",
+        "status",
+        "version",
+        "created_ms",
+        "updated_ms",
+    ] {
+        if !column_exists(conn, "tasks", column)? {
+            return Err(AppError::Database(format!("missing tasks column {column}")));
+        }
+    }
+    for (table, columns) in [
+        ("dependencies", ["task_id", "depends_on_id"].as_slice()),
+        (
+            "events",
+            [
+                "event_id",
+                "task_id",
+                "entity_type",
+                "operation",
+                "resulting_version",
+                "created_ms",
+                "snapshot_json",
+            ]
+            .as_slice(),
+        ),
+        (
+            "imports",
+            [
+                "input_sha256",
+                "source_name",
+                "original_source",
+                "report_json",
+                "imported_ms",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for column in columns {
+            if !column_exists(conn, table, column)? {
+                return Err(AppError::Database(format!(
+                    "missing {table} column {column}"
+                )));
+            }
+        }
+    }
+    let project_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))?;
+    if project_count != 1 {
+        return Err(AppError::Database(
+            "project metadata is not singleton".to_string(),
+        ));
+    }
+    let project: String = conn.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
+    let actual = Uuid::parse_str(&project)
+        .map_err(|_| AppError::Database("invalid project identity".to_string()))?;
+    if actual != *expected {
+        return Err(AppError::Usage("project mismatch".to_string()));
+    }
+    Ok(())
+}
+
+fn verify_existing_project(db_path: &Path, expected: &Uuid) -> Result<StoreInfo, AppError> {
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version = schema_version(&conn)?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(AppError::Database(format!(
+            "unsupported newer schema {version} in {}",
+            db_path.display()
+        )));
+    }
+    if version < CURRENT_SCHEMA_VERSION {
+        return Err(AppError::Database(format!(
+            "schema {version} requires explicit migration"
+        )));
+    }
+    validate_current_schema(&conn, expected)?;
+    Ok(StoreInfo {
+        project_id: *expected,
+        db_path: db_path.to_path_buf(),
+    })
+}
+
+fn ensure_column(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    if !column_exists(tx, table, column)? {
+        tx.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+    }
+    Ok(())
+}
+
+fn migrate_v0_to_v1(
+    tx: &rusqlite::Transaction<'_>,
+    expected_project: &Uuid,
+) -> Result<(), AppError> {
+    if !table_exists(tx, "project")? {
+        tx.execute_batch(
+            "CREATE TABLE project(
+                project_id TEXT PRIMARY KEY,
+                rules_markdown TEXT NOT NULL DEFAULT '',
+                rules_version INTEGER NOT NULL DEFAULT 1,
+                next_task_number INTEGER NOT NULL DEFAULT 1
+            )",
+        )?;
+    } else {
+        if !column_exists(tx, "project", "project_id")? {
+            return Err(AppError::Database(
+                "legacy project table has no project_id".to_string(),
+            ));
+        }
+        ensure_column(tx, "project", "rules_markdown", "TEXT NOT NULL DEFAULT ''")?;
+        ensure_column(tx, "project", "rules_version", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_column(
+            tx,
+            "project",
+            "next_task_number",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+    }
+    if !table_exists(tx, "tasks")? {
+        tx.execute_batch(
+            "CREATE TABLE tasks(
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                created_ms INTEGER NOT NULL,
+                updated_ms INTEGER NOT NULL,
+                CHECK (version > 0),
+                CHECK (status IN ('backlog','ready','in-progress','blocked','done','cancelled'))
+            )",
+        )?;
+    } else {
+        for required in ["id", "title", "body", "status"] {
+            if !column_exists(tx, "tasks", required)? {
+                return Err(AppError::Database(format!(
+                    "legacy tasks table has no {required} column"
+                )));
+            }
+        }
+        ensure_column(tx, "tasks", "version", "INTEGER NOT NULL DEFAULT 1")?;
+        ensure_column(tx, "tasks", "created_ms", "INTEGER NOT NULL DEFAULT 0")?;
+        ensure_column(tx, "tasks", "updated_ms", "INTEGER NOT NULL DEFAULT 0")?;
+    }
+    if !table_exists(tx, "dependencies")? {
+        tx.execute_batch(
+            "CREATE TABLE dependencies(
+                task_id INTEGER NOT NULL,
+                depends_on_id INTEGER NOT NULL,
+                PRIMARY KEY(task_id, depends_on_id),
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                FOREIGN KEY(depends_on_id) REFERENCES tasks(id) ON DELETE CASCADE
+            )",
+        )?;
+    }
+    if !table_exists(tx, "events")? {
+        tx.execute_batch(
+            "CREATE TABLE events(
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER,
+                entity_type TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                resulting_version INTEGER NOT NULL,
+                created_ms INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            )",
+        )?;
+    }
+    if !table_exists(tx, "imports")? {
+        tx.execute_batch(
+            "CREATE TABLE imports(
+                input_sha256 TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL,
+                original_source BLOB NOT NULL,
+                report_json TEXT NOT NULL,
+                imported_ms INTEGER NOT NULL
+            )",
+        )?;
+    }
+    for (table, columns) in [
+        ("dependencies", ["task_id", "depends_on_id"].as_slice()),
+        (
+            "events",
+            [
+                "event_id",
+                "task_id",
+                "entity_type",
+                "operation",
+                "resulting_version",
+                "created_ms",
+                "snapshot_json",
+            ]
+            .as_slice(),
+        ),
+        (
+            "imports",
+            [
+                "input_sha256",
+                "source_name",
+                "original_source",
+                "report_json",
+                "imported_ms",
+            ]
+            .as_slice(),
+        ),
+    ] {
+        for column in columns {
+            if !column_exists(tx, table, column)? {
+                return Err(AppError::Database(format!(
+                    "legacy {table} table has no {column} column"
+                )));
+            }
+        }
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status_id ON tasks(status, id);
+         CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_id ON dependencies(depends_on_id);
+         CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id, event_id);",
+    )?;
+
+    let mut dependency_rows = tx.prepare(
+        "SELECT task_id, depends_on_id FROM dependencies ORDER BY task_id, depends_on_id",
+    )?;
+    let dependency_iter =
+        dependency_rows.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    let mut dependency_edges = Vec::new();
+    for row in dependency_iter {
+        dependency_edges.push(row?);
+    }
+    drop(dependency_rows);
+    for (task_id, depends_on_id) in dependency_edges {
+        if task_id <= 0 || depends_on_id <= 0 {
+            return Err(AppError::Database(
+                "legacy dependency contains an invalid task id".to_string(),
+            ));
+        }
+        let exists: i64 = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [depends_on_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(AppError::Database(format!(
+                "legacy dependency T-{task_id:03} references missing T-{depends_on_id:03}"
+            )));
+        }
+    }
+    let has_cycle: Option<i64> = tx
+        .query_row(
+            "WITH RECURSIVE reach(root, node) AS (
+                 SELECT task_id, depends_on_id FROM dependencies
+                 UNION
+                 SELECT reach.root, dependencies.depends_on_id
+                 FROM reach
+                 JOIN dependencies ON dependencies.task_id = reach.node
+             )
+             SELECT 1 FROM reach WHERE root = node LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_cycle.is_some() {
+        return Err(AppError::Database(
+            "legacy dependency graph contains a cycle".to_string(),
+        ));
+    }
+
+    let project_count: i64 = tx.query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))?;
+    if project_count > 1 {
+        return Err(AppError::Database(
+            "legacy project table is not singleton".to_string(),
+        ));
+    }
+    if project_count == 0 {
+        tx.execute(
+            "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
+            [expected_project.to_string()],
+        )?;
+    } else {
+        let project: String =
+            tx.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
+        let actual = Uuid::parse_str(&project)
+            .map_err(|_| AppError::Database("invalid legacy project identity".to_string()))?;
+        if actual != *expected_project {
+            return Err(AppError::Usage("project mismatch".to_string()));
+        }
+    }
+
+    let mut legacy_tasks = Vec::new();
+    let mut rows = tx.prepare(
+        "SELECT id, title, body, status, version, created_ms, updated_ms FROM tasks ORDER BY id",
+    )?;
+    let iter = rows.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    for row in iter {
+        legacy_tasks.push(row?);
+    }
+    drop(rows);
+    let mut max_id = 0i64;
+    for (id, title, body, status, version, created_ms, _) in legacy_tasks {
+        if id <= 0 || version <= 0 {
+            return Err(AppError::Database(
+                "invalid legacy task identity/version".to_string(),
+            ));
+        }
+        validate_status(&status)?;
+        max_id = max_id.max(id);
+        let event_exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM events WHERE task_id=?1 AND entity_type='task'",
+            [id],
+            |row| row.get(0),
+        )?;
+        if event_exists == 0 {
+            let mut dependency_rows = tx.prepare(
+                "SELECT depends_on_id FROM dependencies WHERE task_id=?1 ORDER BY depends_on_id",
+            )?;
+            let dependencies = dependency_rows
+                .query_map([id], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|value| value as u64)
+                .collect::<Vec<_>>();
+            tx.execute(
+                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+                 VALUES (?1,'task','migrated',?2,?3,?4)",
+                params![
+                    id,
+                    version,
+                    created_ms,
+                    json!({"id": id, "title": title, "body": body, "status": status, "version": version, "deps": dependencies}).to_string()
+                ],
+            )?;
+        }
+    }
+    let next = max_id
+        .checked_add(1)
+        .ok_or_else(|| AppError::Database("task id overflow during migration".to_string()))?;
+    tx.execute(
+        "UPDATE project SET next_task_number = CASE WHEN next_task_number <= ?1 THEN ?1 ELSE next_task_number END",
+        [next],
+    )?;
+    tx.execute_batch("PRAGMA user_version = 1")?;
+    validate_current_schema(tx, expected_project)?;
+    Ok(())
+}
+
+fn sqlite_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+fn validate_status(raw: &str) -> Result<TaskStatus, AppError> {
+    TaskStatus::from_str(raw).map_err(AppError::Validation)
+}
+
+fn validate_title_body(title: &str, body: &str) -> Result<(), AppError> {
+    let title_len = title.chars().count();
+    if title_len == 0 {
+        return Err(AppError::Validation("title must not be empty".to_string()));
+    }
+    if title_len > TITLE_MAX_CHARS {
+        return Err(AppError::Validation(format!(
+            "title exceeds {} characters",
+            TITLE_MAX_CHARS
+        )));
+    }
+    if body.len() > BODY_MAX_BYTES {
+        return Err(AppError::Validation(format!(
+            "body exceeds {} bytes",
+            BODY_MAX_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rules(body: &str) -> Result<(), AppError> {
+    if body.len() > RULES_MAX_BYTES {
+        return Err(AppError::Validation(format!(
+            "rules exceed {} bytes",
+            RULES_MAX_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_dependencies(mut deps: Vec<u64>) -> Vec<u64> {
+    deps.sort_unstable();
+    deps
+}
+
+fn escape_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+#[cfg(feature = "test-hooks")]
+fn maybe_precommit_fail(_operation: &str) -> Result<(), AppError> {
+    if let Some(marker) = std::env::var_os("TASKS_PRECOMMIT_READY_FILE") {
+        fs::write(marker, b"ready")?;
+    }
+    if let Ok(raw) = std::env::var("TASKS_HOLD_PRECOMMIT_MS") {
+        let milliseconds = raw
+            .parse::<u64>()
+            .map_err(|_| AppError::Usage("invalid TASKS_HOLD_PRECOMMIT_MS".to_string()))?;
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
+    if std::env::var("TASKS_PRECOMMIT_FAIL").is_ok() {
+        return Err(AppError::Usage("injected precommit failure".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn maybe_precommit_fail(_operation: &str) -> Result<(), AppError> {
+    Ok(())
+}
+
+static BACKUP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn validate_backup(
+    path: &Path,
+    expected_project: Option<&Uuid>,
+    expected_schema: Option<i32>,
+) -> Result<(), AppError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(AppError::Database(format!(
+            "backup quick_check returned {quick_check}"
+        )));
+    }
+    let mut foreign_rows = conn.prepare("PRAGMA foreign_key_check")?;
+    if foreign_rows.query([])?.next()?.is_some() {
+        return Err(AppError::Database(
+            "backup foreign_key_check reported violations".to_string(),
+        ));
+    }
+    let schema = schema_version(&conn)?;
+    if let Some(expected_schema) = expected_schema {
+        if schema != expected_schema {
+            return Err(AppError::Database(format!(
+                "backup schema {schema} does not match expected {expected_schema}"
+            )));
+        }
+    }
+    if let Some(expected_project) = expected_project {
+        if expected_schema == Some(CURRENT_SCHEMA_VERSION) {
+            validate_current_schema(&conn, expected_project)?;
+        } else {
+            let project = conn
+                .query_row("SELECT project_id FROM project LIMIT 1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?
+                .ok_or_else(|| {
+                    AppError::Database("backup is missing project identity".to_string())
+                })?;
+            let actual = Uuid::parse_str(&project).map_err(|_| {
+                AppError::Database("backup has invalid project identity".to_string())
+            })?;
+            if actual != *expected_project {
+                return Err(AppError::Usage("backup project mismatch".to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn publish_backup(
+    conn: &Connection,
+    out: &Path,
+    expected_project: Option<&Uuid>,
+    expected_schema: Option<i32>,
+) -> Result<u64, AppError> {
+    let out = out.to_path_buf();
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    validate_storage_root(parent)?;
+    if out.exists() {
+        return Err(AppError::Usage("destination exists".to_string()));
+    }
+    let name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::InvalidPath("backup destination has no filename".to_string()))?;
+    let temp = parent.join(format!(
+        ".{name}.tasks-cli-tmp-{}-{}",
+        std::process::id(),
+        BACKUP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let reserved = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    drop(reserved);
+    let result = (|| {
+        conn.backup(
+            rusqlite::DatabaseName::Main,
+            &temp,
+            None::<fn(rusqlite::backup::Progress)>,
+        )?;
+        validate_backup(&temp, expected_project, expected_schema)?;
+        match std::fs::hard_link(&temp, &out) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(AppError::Usage("destination exists".to_string()));
+            }
+            Err(error) => return Err(AppError::Io(error)),
+        }
+        Ok(std::fs::metadata(out)?.len())
+    })();
+    let cleanup = std::fs::remove_file(&temp);
+    match (result, cleanup) {
+        (Ok(bytes), Ok(())) => Ok(bytes),
+        (Ok(bytes), Err(_)) => Ok(bytes),
+        (Err(error), _) => Err(error),
+    }
+}
+
+impl Store {
+    pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        let data_root = validate_storage_root(data_root)?;
+        let db_path = data_root_project_path(&data_root, project);
+        if !db_path.is_file() {
+            return Err(AppError::NotFoundCode(format!(
+                "project database not found: {}",
+                db_path.display()
+            )));
+        }
+        let project_id = Uuid::parse_str(project)
+            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let user_version = schema_version(&conn)?;
+        if user_version > CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "unsupported schema {user_version}"
+            )));
+        }
+        if user_version < CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "schema {user_version} requires explicit migration"
+            )));
+        }
+        validate_current_schema(&conn, &project_id)?;
+        Ok(Self {
+            project_id,
+            db_path,
+            conn,
+            migration_lock: None,
+        })
+    }
+
+    pub fn open_for_diagnostics(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        let data_root = validate_storage_root(data_root)?;
+        let db_path = data_root_project_path(&data_root, project);
+        if !db_path.is_file() {
+            return Err(AppError::NotFoundCode(format!(
+                "project database not found: {}",
+                db_path.display()
+            )));
+        }
+        let project_id = Uuid::parse_str(project)
+            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(Self {
+            project_id,
+            db_path,
+            conn,
+            migration_lock: None,
+        })
+    }
+
+    pub fn open_rw(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        let data_root = validate_storage_root(data_root)?;
+        let db_path = data_root_project_path(&data_root, project);
+        if !db_path.is_file() {
+            return Err(AppError::NotFoundCode(format!(
+                "project database not found: {}",
+                db_path.display()
+            )));
+        }
+        let project_id = Uuid::parse_str(project)
+            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let user_version = schema_version(&conn)?;
+        if user_version > CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "unsupported schema {user_version}"
+            )));
+        }
+        if user_version < CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "schema {user_version} requires explicit migration"
+            )));
+        }
+        validate_current_schema(&conn, &project_id)?;
+        Ok(Self {
+            project_id,
+            db_path,
+            conn,
+            migration_lock: None,
+        })
+    }
+
+    pub fn open_for_init(data_root: &Path, project: &Uuid) -> Result<Self, AppError> {
+        let info = create_project_db(data_root, project)?;
+        let conn = Connection::open_with_flags(
+            &info.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        validate_current_schema(&conn, project)?;
+        Ok(Self {
+            project_id: *project,
+            db_path: info.db_path,
+            conn,
+            migration_lock: None,
+        })
+    }
+
+    pub fn open_for_migration(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        let data_root = validate_storage_root(data_root)?;
+        let db_path = data_root_project_path(&data_root, project);
+        if !db_path.is_file() {
+            return Err(AppError::NotFoundCode(format!(
+                "project database not found: {}",
+                db_path.display()
+            )));
+        }
+        let project_id = Uuid::parse_str(project)
+            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let migration_lock = acquire_exclusive_lock(&db_path.with_extension("migrate.lock"))?;
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let version = schema_version(&conn)?;
+        if version > CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!("unsupported schema {version}")));
+        }
+        if table_exists(&conn, "project")? {
+            let existing: Option<String> = conn
+                .query_row("SELECT project_id FROM project LIMIT 1", [], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing != project {
+                    return Err(AppError::Usage("project mismatch".to_string()));
+                }
+            }
+        }
+        Ok(Self {
+            project_id,
+            db_path,
+            conn,
+            migration_lock: Some(migration_lock),
+        })
+    }
+
+    pub fn project_id_text(&self) -> String {
+        self.project_id.to_string()
+    }
+
+    pub fn project_rules(&mut self) -> Result<RuleRecord, AppError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT rules_version, rules_markdown FROM project LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let (version, body) =
+            row.ok_or_else(|| AppError::Usage("no project metadata".to_string()))?;
+        Ok(RuleRecord {
+            version: version as u64,
+            body,
+        })
+    }
+
+    pub fn list_tasks(
+        &mut self,
+        status: Option<&str>,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Pagination<TaskSummary>, AppError> {
+        let page_size = validate_limit(limit)?;
+        let fetch = page_size + 1;
+        let mut summaries = Vec::new();
+        let mut stmt = if status.is_some() {
+            self.conn.prepare(
+                "SELECT id, status, version, title
+                 FROM tasks
+                 WHERE status = ?1 AND id > ?2
+                 ORDER BY id ASC LIMIT ?3",
+            )?
+        } else {
+            self.conn.prepare(
+                "SELECT id, status, version, title
+                 FROM tasks
+                 WHERE status NOT IN ('done','cancelled') AND id > ?1
+                 ORDER BY id ASC LIMIT ?2",
+            )?
+        };
+        let mut rows = if let Some(status) = status {
+            stmt.query(params![status, after.unwrap_or(0), fetch as i64])?
+        } else {
+            stmt.query(params![after.unwrap_or(0), fetch as i64])?
+        };
+        while let Some(row) = rows.next()? {
+            let status_text: String = row.get(1)?;
+            let task_status = TaskStatus::from_row(&status_text).ok_or_else(|| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "status".to_string(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+            summaries.push(TaskSummary {
+                id: row.get::<_, i64>(0)? as u64,
+                status: task_status,
+                version: row.get::<_, i64>(2)? as u64,
+                title: row.get::<_, String>(3)?,
+                deps: Vec::new(),
+            });
+        }
+        drop(rows);
+        drop(stmt);
+        let mut has_more = false;
+        let next_after = if summaries.len() > page_size {
+            has_more = true;
+            summaries.pop();
+            summaries.last().map(|task| task.id)
+        } else {
+            summaries.last().map(|task| task.id)
+        };
+        let next_after = if has_more { next_after } else { None };
+        for row in summaries.iter_mut() {
+            row.deps = self.task_dependencies(row.id)?;
+        }
+        Ok(Pagination {
+            items: summaries,
+            has_more,
+            next_after,
+        })
+    }
+
+    pub fn search_tasks(
+        &mut self,
+        needle: &str,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Pagination<TaskSummary>, AppError> {
+        if needle.is_empty() {
+            return Err(AppError::Validation("search text required".to_string()));
+        }
+        let page_size = validate_limit(limit)?;
+        let fetch = page_size + 1;
+        let mut rows = self.conn.prepare(
+            "
+            SELECT id, status, version, title
+            FROM tasks
+             WHERE id > ?1 AND (LOWER(title) LIKE ?2 ESCAPE '\\' OR LOWER(body) LIKE ?2 ESCAPE '\\')
+            ORDER BY id ASC LIMIT ?3
+            ",
+        )?;
+        let mut out = Vec::new();
+        let pattern = format!("%{}%", escape_like_literal(&needle.to_ascii_lowercase()));
+        let mut iter = rows.query(params![after.unwrap_or(0), pattern, fetch as i64])?;
+        while let Some(row) = iter.next()? {
+            let status_text: String = row.get(1)?;
+            let task_status = TaskStatus::from_row(&status_text).ok_or_else(|| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "status".to_string(),
+                    rusqlite::types::Type::Text,
+                )
+            })?;
+            out.push(TaskSummary {
+                id: row.get::<_, i64>(0)? as u64,
+                status: task_status,
+                version: row.get::<_, i64>(2)? as u64,
+                title: row.get::<_, String>(3)?,
+                deps: Vec::new(),
+            });
+        }
+        drop(iter);
+        drop(rows);
+        let mut has_more = false;
+        let mut next_after = out.last().map(|t| t.id);
+        if out.len() > page_size {
+            has_more = true;
+            out.pop();
+            next_after = out.last().map(|t| t.id);
+        }
+        for row in out.iter_mut() {
+            row.deps = self.task_dependencies(row.id)?;
+        }
+        Ok(Pagination {
+            items: out,
+            has_more,
+            next_after,
+        })
+    }
+
+    fn task_dependencies_from(conn: &Connection, task_id: u64) -> Result<Vec<u64>, AppError> {
+        let mut rows = conn.prepare(
+            "SELECT depends_on_id
+             FROM dependencies
+             WHERE task_id = ?1
+             ORDER BY depends_on_id ASC",
+        )?;
+        let mut out = Vec::new();
+        let iter = rows.query_map([task_id], |row| row.get::<_, i64>(0))?;
+        for dep in iter {
+            out.push(dep? as u64);
+        }
+        Ok(out)
+    }
+
+    fn task_dependencies(&self, task_id: u64) -> Result<Vec<u64>, AppError> {
+        Self::task_dependencies_from(&self.conn, task_id)
+    }
+
+    fn dependency_summaries(&self, task_id: u64) -> Result<Vec<DependencySummary>, AppError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tasks.id, tasks.status, tasks.version, tasks.title
+             FROM dependencies
+             JOIN tasks ON tasks.id = dependencies.depends_on_id
+             WHERE dependencies.task_id = ?1
+             ORDER BY tasks.id ASC",
+        )?;
+        let rows = statement.query_map([task_id as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut summaries = Vec::new();
+        for row in rows {
+            let (id, status, version, title) = row?;
+            summaries.push(DependencySummary {
+                id,
+                status: validate_status(&status)?,
+                version,
+                title,
+            });
+        }
+        Ok(summaries)
+    }
+
+    pub fn show_task(&mut self, raw_id: &str) -> Result<TaskDetail, AppError> {
+        let id = parse_task_id(raw_id).map_err(AppError::Validation)?;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT status, version, title, body FROM tasks WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (status_text, version, title, body) = row
+            .ok_or_else(|| AppError::NotFound(format!("task {} not found", render_task_id(id))))?;
+        let rule = self.project_rules()?;
+        Ok(TaskDetail {
+            id,
+            status: validate_status(&status_text)?,
+            version: version as u64,
+            title,
+            body,
+            deps: self.task_dependencies(id)?,
+            dependency_summaries: self.dependency_summaries(id)?,
+            rule_version: rule.version,
+            rules: rule.body,
+        })
+    }
+
+    pub fn history(
+        &mut self,
+        task_id: u64,
+        after: Option<u64>,
+        limit: usize,
+        event: Option<u64>,
+    ) -> Result<(Pagination<HistoryEvent>, Option<HistoryEvent>), AppError> {
+        if let Some(event_id) = event {
+            let row = self
+                .conn
+                .query_row(
+                    "SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, snapshot_json
+                     FROM events
+                     WHERE event_id = ?1 AND task_id = ?2 AND entity_type = 'task'",
+                    params![event_id, task_id as i64],
+                    |r| {
+                        Ok(HistoryEvent {
+                            event_id: r.get::<_, i64>(0)? as u64,
+                            task_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                            entity_type: r.get::<_, String>(2)?,
+                            operation: r.get::<_, String>(3)?,
+                            resulting_version: r.get::<_, i64>(4)?,
+                            created_ms: r.get::<_, i64>(5)?,
+                            snapshot_json: r.get::<_, String>(6).ok(),
+                        })
+                    },
+                )
+                .optional()?;
+            let single = row.ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "event {event_id} not found for task {}",
+                    render_task_id(task_id)
+                ))
+            })?;
+            return Ok((
+                Pagination {
+                    items: Vec::new(),
+                    has_more: false,
+                    next_after: None,
+                },
+                Some(single),
+            ));
+        }
+        let page_size = validate_limit(limit)?;
+        let fetch = page_size + 1;
+        let mut rows = self.conn.prepare(
+            "
+            SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, snapshot_json
+            FROM events
+            WHERE task_id = ?1 AND event_id > ?2
+            ORDER BY event_id ASC LIMIT ?3
+            ",
+        )?;
+        let mut list = Vec::new();
+        let iter = rows.query_map(
+            params![task_id as i64, after.unwrap_or(0), fetch as i64],
+            |r| {
+                Ok(HistoryEvent {
+                    event_id: r.get::<_, i64>(0)? as u64,
+                    task_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                    entity_type: r.get::<_, String>(2)?,
+                    operation: r.get::<_, String>(3)?,
+                    resulting_version: r.get::<_, i64>(4)?,
+                    created_ms: r.get::<_, i64>(5)?,
+                    snapshot_json: None,
+                })
+            },
+        )?;
+        for item in iter {
+            let mut ev = item?;
+            ev.snapshot_json = None;
+            list.push(ev);
+        }
+        let mut has_more = false;
+        let next_after = if list.len() > page_size {
+            has_more = true;
+            list.pop();
+            list.last().map(|r| r.event_id)
+        } else {
+            list.last().map(|r| r.event_id)
+        };
+        Ok((
+            Pagination {
+                items: list,
+                has_more,
+                next_after,
+            },
+            None,
+        ))
+    }
+
+    pub fn rules_set(&mut self, body: &str, expect_version: u64) -> Result<u64, AppError> {
+        validate_rules(body)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_version: i64 = tx.query_row("SELECT rules_version FROM project", [], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        if current_version as u64 != expect_version {
+            return Err(AppError::VersionConflict {
+                expected: expect_version,
+                current: current_version as u64,
+            });
+        }
+        tx.execute(
+            "UPDATE project SET rules_markdown=?1, rules_version=rules_version+1 WHERE project_id=?2",
+            params![body, self.project_id.to_string()],
+        )?;
+        let new_version: i64 = tx.query_row(
+            "SELECT rules_version FROM project WHERE project_id=?1",
+            [self.project_id.to_string()],
+            |r| r.get::<_, i64>(0),
+        )?;
+        let snapshot = json!({
+            "rules_version": new_version,
+            "rules": body,
+        });
+        tx.execute(
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+             VALUES(NULL,'rules','set',?1,?2,?3)",
+            params![new_version, sqlite_now_ms(), snapshot.to_string()],
+        )?;
+        maybe_precommit_fail("rules")?;
+        tx.commit()?;
+        Ok(new_version as u64)
+    }
+
+    pub fn rules_show(&mut self) -> Result<RuleRecord, AppError> {
+        self.project_rules()
+    }
+
+    fn ensure_task_ids_unique(items: &[ParsedTask]) -> Result<(), AppError> {
+        let mut seen = HashSet::new();
+        for t in items {
+            if !seen.insert(t.id) {
+                return Err(AppError::Validation(format!("duplicate id {}", t.id)));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_task_dependencies_exist(
+        conn: &Connection,
+        deps: &[u64],
+        known: &HashSet<u64>,
+    ) -> Result<(), AppError> {
+        for dep in deps {
+            if known.contains(dep) {
+                continue;
+            }
+            let exists: Option<i64> = conn
+                .query_row("SELECT id FROM tasks WHERE id = ?1", [*dep as i64], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?;
+            if exists.is_none() {
+                return Err(AppError::Validation(format!(
+                    "missing dependency T-{dep:03}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_dependency_cycle(
+        conn: &Connection,
+        task_id: u64,
+        deps: &[u64],
+    ) -> Result<(), AppError> {
+        for dep in deps {
+            if *dep == task_id {
+                return Err(AppError::Validation(
+                    "dependency cycle self-reference".to_string(),
+                ));
+            }
+            let query = "
+                WITH RECURSIVE chain(x) AS (
+                    SELECT ?1 AS x
+                    UNION
+                    SELECT depends_on_id
+                    FROM dependencies
+                    JOIN chain ON dependencies.task_id = chain.x
+                )
+                SELECT 1 FROM chain WHERE x = ?2 LIMIT 1
+            ";
+            let mut stmt = conn.prepare(query)?;
+            let found: Option<i64> = stmt
+                .query_row(params![*dep as i64, task_id as i64], |r| r.get::<_, i64>(0))
+                .optional()?;
+            if found.is_some() {
+                return Err(AppError::Validation(format!(
+                    "dependency cycle via {}",
+                    render_task_id(*dep)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn replace_dependencies(tx: &Connection, task_id: u64, deps: &[u64]) -> Result<(), AppError> {
+        tx.execute(
+            "DELETE FROM dependencies WHERE task_id = ?1",
+            [task_id as i64],
+        )?;
+        for dep in deps {
+            tx.execute(
+                "INSERT INTO dependencies(task_id, depends_on_id) VALUES (?1, ?2)",
+                [task_id as i64, *dep as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn create_task(
+        &mut self,
+        title: &str,
+        body: &str,
+        status: TaskStatus,
+        deps: Vec<u64>,
+    ) -> Result<(u64, u64, Option<u64>), AppError> {
+        validate_title_body(title, body)?;
+        let deps = normalize_dependencies(deps);
+        if deps.len() > MAX_DEPENDENCIES {
+            return Err(AppError::Validation("too many dependencies".to_string()));
+        }
+        let unique_count = deps.len();
+        let dep_set = deps.iter().collect::<HashSet<_>>();
+        if dep_set.len() != unique_count {
+            return Err(AppError::Validation("duplicate dependencies".to_string()));
+        }
+        let now = sqlite_now_ms();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
+             VALUES(
+                (SELECT next_task_number FROM project),
+                ?1, ?2, ?3, 1, ?4, ?4
+             )",
+            params![title, body, status.to_string(), now],
+        )?;
+        let id: u64 = tx.query_row("SELECT id FROM tasks ORDER BY id DESC LIMIT 1", [], |r| {
+            r.get::<_, i64>(0)
+        })? as u64;
+        tx.execute(
+            "UPDATE project SET next_task_number = next_task_number + 1 WHERE project_id = ?1",
+            [self.project_id.to_string()],
+        )?;
+        Self::validate_task_dependencies_exist(&tx, &deps, &HashSet::new())?;
+        Self::validate_dependency_cycle(&tx, id, &deps)?;
+        Self::replace_dependencies(&tx, id, &deps)?;
+        let snapshot = json!({
+            "id": id,
+            "title": title,
+            "body": body,
+            "status": status.to_string(),
+            "version": 1,
+            "deps": deps,
+        });
+        tx.execute(
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+             VALUES (?1,'task','create',1,?2,?3)",
+            params![id as i64, now, snapshot.to_string()],
+        )?;
+        let event_id: i64 = tx.query_row(
+            "SELECT event_id FROM events WHERE task_id=?1 AND operation='create' ORDER BY event_id DESC LIMIT 1",
+            [id as i64],
+            |r| r.get::<_, i64>(0),
+        )?;
+        maybe_precommit_fail("create")?;
+        tx.commit()?;
+        Ok((id, 1, Some(event_id as u64)))
+    }
+
+    pub fn update_task(
+        &mut self,
+        id: u64,
+        expect_version: u64,
+        changes: TaskUpdate,
+    ) -> Result<(u64, TaskStatus, u64, Option<u64>), AppError> {
+        if changes.title.is_none()
+            && changes.body.is_none()
+            && changes.status.is_none()
+            && changes.deps.is_none()
+            && !changes.clear_deps
+        {
+            return Err(AppError::Usage(
+                "update requires at least one change".to_string(),
+            ));
+        }
+        if changes.deps.is_some() && changes.clear_deps {
+            return Err(AppError::Usage(
+                "--deps and --clear-deps are mutually exclusive".to_string(),
+            ));
+        }
+        let requested_deps = changes.deps.clone().map(normalize_dependencies);
+        if let Some(deps) = requested_deps.as_ref() {
+            if deps.len() > MAX_DEPENDENCIES {
+                return Err(AppError::Validation("too many dependencies".to_string()));
+            }
+            let unique = deps.iter().collect::<HashSet<_>>();
+            if unique.len() != deps.len() {
+                return Err(AppError::Validation("duplicate dependencies".to_string()));
+            }
+            for dep in deps {
+                if *dep == id {
+                    return Err(AppError::Validation("self dependency".to_string()));
+                }
+            }
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT title, body, status, version FROM tasks WHERE id = ?1",
+                [id as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let current = current
+            .ok_or_else(|| AppError::NotFound(format!("task {} not found", render_task_id(id))))?;
+        let (cur_title, cur_body, cur_status, cur_version) = current;
+        if cur_version as u64 != expect_version {
+            return Err(AppError::VersionConflict {
+                expected: expect_version,
+                current: cur_version as u64,
+            });
+        }
+        let next_title = changes.title.as_deref().unwrap_or(&cur_title).to_string();
+        let next_body = changes.body.as_deref().unwrap_or(&cur_body).to_string();
+        let next_status = changes
+            .status
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or(cur_status.clone());
+        let next_status_value = validate_status(&next_status)?;
+        validate_title_body(&next_title, &next_body)?;
+
+        let current_deps = Self::task_dependencies_from(&tx, id)?;
+        let no_change = next_title == cur_title
+            && next_body == cur_body
+            && next_status == cur_status
+            && match (&requested_deps, changes.clear_deps) {
+                (Some(d), false) => d == &current_deps,
+                (None, false) => true,
+                (_, true) => current_deps.is_empty(),
+            };
+        if no_change {
+            return Ok((id, next_status_value, cur_version as u64, None));
+        }
+        if let Some(replacement) = requested_deps.as_deref() {
+            Self::validate_task_dependencies_exist(&tx, replacement, &HashSet::new())?;
+            Self::validate_dependency_cycle(&tx, id, replacement)?;
+        }
+        tx.execute(
+            "UPDATE tasks
+             SET title = ?1, body = ?2, status = ?3, version = version + 1, updated_ms = ?4
+             WHERE id = ?5 AND version = ?6",
+            params![
+                next_title,
+                next_body,
+                next_status,
+                sqlite_now_ms(),
+                id as i64,
+                expect_version as i64
+            ],
+        )?;
+        if tx.changes() != 1 {
+            return Err(AppError::VersionConflict {
+                expected: expect_version,
+                current: cur_version as u64,
+            });
+        }
+        if let Some(replacement) = requested_deps {
+            Self::replace_dependencies(&tx, id, &replacement)?;
+        } else if changes.clear_deps {
+            Self::replace_dependencies(&tx, id, &[])?;
+        }
+        let new_version: i64 = tx.query_row(
+            "SELECT version FROM tasks WHERE id = ?1",
+            [id as i64],
+            |r| r.get::<_, i64>(0),
+        )?;
+        let snapshot = json!({
+            "id": id,
+            "title": next_title,
+            "body": next_body,
+            "status": next_status,
+            "version": new_version,
+            "deps": Self::task_dependencies_from(&tx, id)?,
+        });
+        tx.execute(
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+             VALUES (?1,'task','update',?2,?3,?4)",
+            params![id as i64, new_version, sqlite_now_ms(), snapshot.to_string()],
+        )?;
+        let event_id: i64 = tx.query_row(
+            "SELECT event_id FROM events WHERE task_id=?1 AND operation='update' ORDER BY event_id DESC LIMIT 1",
+            [id as i64],
+            |r| r.get::<_, i64>(0),
+        )?;
+        maybe_precommit_fail("update")?;
+        tx.commit()?;
+        Ok((
+            id,
+            next_status_value,
+            new_version as u64,
+            Some(event_id as u64),
+        ))
+    }
+
+    fn import_report(parsed: &ParsedImport) -> ImportReport {
+        ImportReport {
+            source_sha256: parsed.source_hash.clone(),
+            task_count: parsed.tasks.len(),
+            tasks: parsed.task_previews.clone(),
+            sections: parsed.sections.clone(),
+            rules: parsed.rules.clone(),
+            duplicate_ids: parsed.duplicate_ids.clone(),
+            unmapped_sections: parsed.unmapped_sections.clone(),
+            ambiguous_sections: parsed.ambiguous_sections.clone(),
+            unassigned_ranges: parsed.unassigned_ranges.clone(),
+            has_unknown_content: parsed.has_unknown_content,
+        }
+    }
+
+    pub fn import_preview(&mut self, parsed: ParsedImport) -> ImportReport {
+        Self::import_report(&parsed)
+    }
+
+    pub fn import_apply(
+        &mut self,
+        parsed: ParsedImport,
+        expect_sha256: Option<&str>,
+    ) -> Result<(ImportReport, bool), AppError> {
+        let actual = parsed.source_hash.clone();
+        let expected = expect_sha256.ok_or_else(|| {
+            AppError::Usage("--expect-sha256 is required with --apply".to_string())
+        })?;
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Err(AppError::ShaMismatch {
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+        let report = Self::import_report(&parsed);
+        if !report.duplicate_ids.is_empty()
+            || !report.unmapped_sections.is_empty()
+            || !report.ambiguous_sections.is_empty()
+            || report.has_unknown_content
+        {
+            return Err(AppError::Validation(
+                "import contains duplicate IDs, unmapped sections, or unknown content".to_string(),
+            ));
+        }
+        let existing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM imports WHERE input_sha256 = ?1",
+            [actual.clone()],
+            |r| r.get::<_, i64>(0),
+        )?;
+        if existing > 0 {
+            return Ok((self.import_preview(parsed), true));
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task_rows: i64 = tx.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+        if task_rows > 0 {
+            return Err(AppError::Usage(
+                "import requires empty task table".to_string(),
+            ));
+        }
+        let existing_rules = tx.query_row(
+            "SELECT COUNT(*) FROM project WHERE TRIM(rules_markdown) != '' OR rules_version > 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        if existing_rules > 0 {
+            return Err(AppError::Usage(
+                "import requires empty shared rules".to_string(),
+            ));
+        }
+        Self::ensure_task_ids_unique(&parsed.tasks)?;
+        let known = parsed
+            .tasks
+            .iter()
+            .map(|task| task.id)
+            .collect::<HashSet<_>>();
+        let mut max_id = 0u64;
+        for task in &parsed.tasks {
+            if task.id > max_id {
+                max_id = task.id;
+            }
+            validate_title_body(&task.title, &task.body)?;
+            if task.deps.len() > MAX_DEPENDENCIES
+                || task.deps.iter().collect::<HashSet<_>>().len() != task.deps.len()
+            {
+                return Err(AppError::Validation(
+                    "invalid import dependency list".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
+                 VALUES (?1,?2,?3,?4,1,?5,?5)",
+                params![
+                    task.id,
+                    task.title,
+                    task.body,
+                    task.status.to_string(),
+                    sqlite_now_ms()
+                ],
+            )?;
+        }
+        for task in &parsed.tasks {
+            Self::validate_task_dependencies_exist(&tx, &task.deps, &known)?;
+            Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
+            Self::replace_dependencies(&tx, task.id, &task.deps)?;
+        }
+        for task in &parsed.tasks {
+            tx.execute(
+                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+                 VALUES (?1,'task','create',1,?2,?3)",
+                params![
+                    task.id as i64,
+                    sqlite_now_ms(),
+                    json!({
+                        "id": task.id,
+                        "title": task.title,
+                        "body": task.body,
+                        "status": task.status.to_string(),
+                        "version": 1,
+                        "deps": task.deps
+                    })
+                    .to_string()
+                ],
+            )?;
+        }
+        if max_id > 0 {
+            tx.execute(
+                "UPDATE project SET next_task_number = ?1 WHERE project_id = ?2",
+                params![max_id + 1, self.project_id.to_string()],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO imports(input_sha256, source_name, original_source, report_json, imported_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                actual,
+                parsed.source_name,
+                parsed.source,
+                serde_json::to_string(&report)?,
+                sqlite_now_ms()
+            ],
+        )?;
+        if !parsed.rules.is_empty() {
+            tx.execute(
+                "UPDATE project SET rules_markdown = ?1, rules_version = 1 WHERE project_id = ?2",
+                params![parsed.rules, self.project_id.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+                 VALUES (NULL,'rules','update',1,?1,?2)",
+                params![sqlite_now_ms(), json!({"rules": parsed.rules}).to_string()],
+            )?;
+        }
+        maybe_precommit_fail("import")?;
+        tx.commit()?;
+        Ok((Self::import_report(&parsed), false))
+    }
+
+    pub fn backup(&mut self, out: &Path) -> Result<u64, AppError> {
+        publish_backup(
+            &self.conn,
+            out,
+            Some(&self.project_id),
+            Some(CURRENT_SCHEMA_VERSION),
+        )
+    }
+
+    pub fn export_markdown(&mut self, out: &Path) -> Result<usize, AppError> {
+        if out.exists() {
+            return Err(AppError::Usage("destination exists".to_string()));
+        }
+        let rules = self.project_rules()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, title, body, status, version FROM tasks ORDER BY id ASC")?;
+        let it = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut all = Vec::new();
+        for row in it {
+            all.push(row?);
+        }
+        drop(stmt);
+        let mut count = 0usize;
+        let mut sections = HashMap::<String, Vec<(u64, String, String, Vec<u64>, i64)>>::new();
+        for (id, title, body, status, version) in all {
+            count += 1;
+            let deps = Self::task_dependencies_from(&self.conn, id as u64)?;
+            sections
+                .entry(status)
+                .or_default()
+                .push((id as u64, title, body, deps, version));
+        }
+        let mut out_text = String::new();
+        out_text.push_str("# Task Backlog\n\n");
+        out_text.push_str("> Snapshot export; the SQLite database is the recovery authority.\n\n");
+        out_text.push_str(&format!("Project: {}\n\n", self.project_id));
+        out_text.push_str("## Rules\n\n");
+        out_text.push_str(&rules.body);
+        out_text.push_str("\n\n");
+        for status in [
+            "backlog",
+            "ready",
+            "in-progress",
+            "blocked",
+            "done",
+            "cancelled",
+        ] {
+            if let Some(list) = sections.remove(status) {
+                out_text.push_str(&format!("## {status}\n\n"));
+                for (id, title, body, deps, version) in list {
+                    out_text.push_str(&format!("### {ID_PREFIX}{id:03} {title}\n"));
+                    out_text.push_str(&format!("Status: {status}\n"));
+                    out_text.push_str(&format!("Version: {version}\n"));
+                    out_text.push_str(&format!(
+                        "Depends on: {}\n",
+                        deps.iter()
+                            .map(|dep| format!("{ID_PREFIX}{dep:03}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    out_text.push_str("Body:\n");
+                    out_text.push_str(&body);
+                    if !body.ends_with('\n') {
+                        out_text.push('\n');
+                    }
+                    out_text.push('\n');
+                }
+            }
+        }
+        std::fs::write(out, out_text)?;
+        Ok(count)
+    }
+
+    pub fn migrate(&mut self) -> Result<(i32, i32), AppError> {
+        let _lock = match self.migration_lock.take() {
+            Some(lock) => lock,
+            None => acquire_exclusive_lock(&self.db_path.with_extension("migrate.lock"))?,
+        };
+        let current = schema_version(&self.conn)?;
+        if current > CURRENT_SCHEMA_VERSION {
+            return Err(AppError::Database(format!(
+                "unsupported newer schema {current}"
+            )));
+        }
+        if current == CURRENT_SCHEMA_VERSION {
+            validate_current_schema(&self.conn, &self.project_id)?;
+            return Ok((current, current));
+        }
+        let pre_upgrade = self
+            .db_path
+            .with_extension(format!("v{current}-pre-migrate.sqlite"));
+        let backup_project = if table_exists(&self.conn, "project")? {
+            Some(&self.project_id)
+        } else {
+            None
+        };
+        if pre_upgrade.is_file() {
+            validate_backup(&pre_upgrade, backup_project, Some(current))?;
+        } else {
+            match publish_backup(&self.conn, &pre_upgrade, backup_project, Some(current)) {
+                Ok(_) => {}
+                Err(AppError::Usage(_)) if pre_upgrade.is_file() => {
+                    validate_backup(&pre_upgrade, backup_project, Some(current))?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        configure_writer(&self.conn)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let locked_version = schema_version(&tx)?;
+        if locked_version != current {
+            return Err(AppError::Database(
+                "schema changed while migration was preparing".to_string(),
+            ));
+        }
+        migrate_v0_to_v1(&tx, &self.project_id)?;
+        tx.commit()?;
+        validate_current_schema(&self.conn, &self.project_id)?;
+        Ok((current, CURRENT_SCHEMA_VERSION))
+    }
+
+    pub fn doctor(&mut self) -> Result<(String, String, i32, String), AppError> {
+        let quick_check: String = self
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if quick_check != "ok" {
+            return Err(AppError::Database(format!(
+                "quick_check returned {quick_check}"
+            )));
+        }
+        let mut foreign_rows = self.conn.prepare("PRAGMA foreign_key_check")?;
+        if foreign_rows.query([])?.next()?.is_some() {
+            return Err(AppError::Database(
+                "foreign_key_check reported violations".to_string(),
+            ));
+        }
+        let project_id = if table_exists(&self.conn, "project")? {
+            let stored: Option<String> = self
+                .conn
+                .query_row("SELECT project_id FROM project LIMIT 1", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?;
+            if let Some(stored) = stored {
+                let actual = Uuid::parse_str(&stored).map_err(|_| {
+                    AppError::Database("doctor found invalid project identity".to_string())
+                })?;
+                if actual != self.project_id {
+                    return Err(AppError::Usage("project mismatch".to_string()));
+                }
+                stored
+            } else {
+                self.project_id.to_string()
+            }
+        } else {
+            self.project_id.to_string()
+        };
+        let schema: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap_or(0);
+        let sqlite_version: String = self
+            .conn
+            .query_row("SELECT sqlite_version()", [], |r| r.get::<_, String>(0))?;
+        Ok((
+            self.db_path.to_string_lossy().to_string(),
+            project_id,
+            schema as i32,
+            sqlite_version,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_enforces_title_and_body_limits() {
+        assert!(validate_title_body("ok", "body").is_ok());
+        assert!(validate_title_body("", "body").is_err());
+        assert!(validate_title_body(&"x".repeat(TITLE_MAX_CHARS + 1), "body").is_err());
+        assert!(validate_title_body("ok", &"x".repeat(BODY_MAX_BYTES + 1)).is_err());
+        assert!(validate_status("in-progress").is_ok());
+        assert!(validate_status("unknown").is_err());
+    }
+}

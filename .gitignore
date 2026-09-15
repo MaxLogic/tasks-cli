@@ -1,0 +1,12 @@
+# Rust build output and verification evidence
+/target/
+
+# Local skill links supplied by the agent environment
+/.agents/skills/
+/.claude/skills/
+
+# Operation-local archive and host metadata
+/project.zip
+/*.zip
+.DS_Store
+Thumbs.db

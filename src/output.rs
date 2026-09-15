@@ -1,0 +1,282 @@
+use crate::model::{HistoryEvent, ImportReport, RuleRecord, TaskDetail, TaskSummary};
+use serde::Serialize;
+
+#[derive(Serialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum CommandPayload {
+    Init {
+        project_id: String,
+        db_path: String,
+    },
+    Bind {
+        project_id: String,
+        root: String,
+    },
+    List {
+        items: Vec<TaskSummary>,
+        has_more: bool,
+        next_after: Option<u64>,
+    },
+    Search {
+        items: Vec<TaskSummary>,
+        has_more: bool,
+        next_after: Option<u64>,
+    },
+    Show(TaskDetail),
+    Create {
+        id: u64,
+        status: String,
+        version: u64,
+        event_id: Option<u64>,
+    },
+    Update {
+        id: u64,
+        status: String,
+        version: u64,
+        event_id: Option<u64>,
+    },
+    History {
+        id: u64,
+        items: Vec<HistoryEvent>,
+        has_more: bool,
+        next_after: Option<u64>,
+    },
+    RulesShow(RuleRecord),
+    RulesSet {
+        version: u64,
+    },
+    Import {
+        path: String,
+        report: ImportReport,
+        already_imported: bool,
+        applied: bool,
+    },
+    Export {
+        out: String,
+        task_count: usize,
+    },
+    Backup {
+        out: String,
+        bytes: u64,
+    },
+    Migrate {
+        from_version: i32,
+        to_version: i32,
+    },
+    Doctor {
+        db_path: String,
+        project_id: String,
+        schema_version: i32,
+        sqlite_version: String,
+    },
+}
+
+#[derive(Serialize)]
+pub struct Envelope {
+    pub schema_version: u8,
+    pub project_id: Option<String>,
+    pub data: CommandPayload,
+}
+
+impl Envelope {
+    pub fn json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn bound_title(title: &str) -> String {
+        let trimmed = title.trim();
+        if trimmed.chars().count() > 120 {
+            trimmed.chars().take(120).collect::<String>()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    pub fn text(&self) -> String {
+        let mut out = match &self.data {
+            CommandPayload::Init { project_id, db_path } => {
+                format!("project_id: {project_id}\ndb_path: {db_path}\n")
+            }
+            CommandPayload::Bind { project_id, root } => {
+                format!("project_id: {project_id}\nroot: {root}\n")
+            }
+            CommandPayload::Create {
+                id,
+                status,
+                version,
+                event_id,
+            } => {
+                format!(
+                    "id: T-{id:03}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
+                    event_id.map_or_else(|| "null".to_string(), |id| id.to_string())
+                )
+            }
+            CommandPayload::Update {
+                id,
+                status,
+                version,
+                event_id,
+            } => {
+                format!(
+                    "id: T-{id:03}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
+                    event_id.map_or_else(|| "null".to_string(), |id| id.to_string())
+                )
+            }
+            CommandPayload::List {
+                items,
+                has_more,
+                next_after,
+            }
+            | CommandPayload::Search {
+                items,
+                has_more,
+                next_after,
+            } => {
+                let mut out = String::new();
+                for item in items {
+                    let deps = item
+                        .deps
+                        .iter()
+                        .map(|d| format!("T-{d:03}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    out.push_str(&format!(
+                        "T-{0:03}\t{1}\tv{2}\t{3}\t[{4}]\n",
+                        item.id,
+                        item.status,
+                        item.version,
+                        Self::bound_title(&item.title),
+                        deps
+                    ));
+                }
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_after {
+                    out.push_str(&format!("next_after: {next}\n"));
+                }
+                out
+            }
+            CommandPayload::Show(task) => {
+                let mut out = String::new();
+                out.push_str(&format!("id: T-{0:03}\n", task.id));
+                out.push_str(&format!("status: {}\n", task.status));
+                out.push_str(&format!("version: {}\n", task.version));
+                out.push_str(&format!("dependencies: {}\n", task.deps.len()));
+                for dependency in &task.dependency_summaries {
+                    out.push_str(&format!(
+                        "depends_on: T-{0:03}\t{1}\tv{2}\t{3}\n",
+                        dependency.id, dependency.status, dependency.version, dependency.title
+                    ));
+                }
+                out.push_str("title:\n");
+                out.push_str(&format!("{}\n", task.title));
+                out.push_str("body:\n");
+                out.push_str(&task.body);
+                out.push('\n');
+                out.push_str(&format!("rules(v{}):\n{}\n", task.rule_version, task.rules));
+                out
+            }
+            CommandPayload::History {
+                items,
+                has_more,
+                next_after,
+                ..
+            } => {
+                let mut out = String::new();
+                for e in items {
+                    out.push_str(&format!(
+                        "{}\tv{}\t{}\t{}\t{}\n",
+                        e.event_id, e.resulting_version, e.entity_type, e.operation, e.created_ms
+                    ));
+                    if let Some(snapshot) = &e.snapshot_json {
+                        out.push_str("snapshot_json: ");
+                        out.push_str(snapshot);
+                        out.push('\n');
+                    }
+                }
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_after {
+                    out.push_str(&format!("next_after: {next}\n"));
+                }
+                out
+            }
+            CommandPayload::RulesShow(rules) => {
+                format!("version: {}\n{}\n", rules.version, rules.body)
+            }
+            CommandPayload::RulesSet { version } => format!("version: {version}\n"),
+            CommandPayload::Import {
+                path,
+                report,
+                already_imported,
+                applied,
+            } => {
+                let mut out = format!("file: {path}\n");
+                out.push_str(&format!("applied: {applied}\n"));
+                out.push_str(&format!("already_imported: {already_imported}\n"));
+                out.push_str(&format!("tasks: {}\n", report.task_count));
+                out.push_str(&format!("rules: {}\n", report.rules.len()));
+                out.push_str(&format!("duplicates: {:?}\n", report.duplicate_ids));
+                out.push_str(&format!("source_sha256: {}\n", report.source_sha256));
+                out.push_str(&format!("preview_tasks: {:?}\n", report.tasks));
+                out.push_str(&format!("sections: {:?}\n", report.sections));
+                out.push_str(&format!("unassigned_ranges: {:?}\n", report.unassigned_ranges));
+                out.push_str(&format!("ambiguous_sections: {:?}\n", report.ambiguous_sections));
+                out.push_str(&format!("has_unknown_content: {}\n", report.has_unknown_content));
+                out
+            }
+            CommandPayload::Export { out, task_count } => {
+                format!("out: {out}\ntasks: {task_count}\n")
+            }
+            CommandPayload::Backup { out, bytes } => {
+                format!("out: {out}\nbytes: {bytes}\n")
+            }
+            CommandPayload::Migrate {
+                from_version,
+                to_version,
+            } => format!("migrated: {from_version} -> {to_version}\n"),
+            CommandPayload::Doctor {
+                db_path,
+                project_id,
+                schema_version,
+                sqlite_version,
+            } => format!(
+                "db_path: {db_path}\nproject_id: {project_id}\nschema_version: {schema_version}\nsqlite_version: {sqlite_version}\n"
+            ),
+        };
+        if let Some(project_id) = &self.project_id {
+            if !matches!(
+                &self.data,
+                CommandPayload::Init { .. } | CommandPayload::Bind { .. }
+            ) {
+                out = format!("project_id: {project_id}\n{out}");
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_text_does_not_render_task_bodies() {
+        let envelope = Envelope {
+            schema_version: 1,
+            project_id: None,
+            data: CommandPayload::List {
+                items: vec![TaskSummary {
+                    id: 1,
+                    status: crate::model::TaskStatus::Backlog,
+                    version: 1,
+                    title: "title".to_string(),
+                    deps: Vec::new(),
+                }],
+                has_more: false,
+                next_after: None,
+            },
+        };
+        let text = envelope.text();
+        assert!(text.contains("title"));
+        assert!(!text.contains("body:"));
+    }
+}
