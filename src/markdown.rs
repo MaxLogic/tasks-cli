@@ -23,6 +23,7 @@ pub struct ParsedImport {
     pub source_name: String,
     pub source: Vec<u8>,
     pub source_hash: String,
+    pub has_bom: bool,
     pub tasks: Vec<ParsedTask>,
     pub task_previews: Vec<ImportTaskPreview>,
     pub sections: Vec<ImportSectionPreview>,
@@ -40,6 +41,15 @@ struct Line<'a> {
     end: usize,
     raw: &'a str,
     text: &'a str,
+}
+
+fn line_text(raw: &str, start: usize) -> &str {
+    let text = raw.trim_end_matches('\n').trim_end_matches('\r');
+    if start == 0 {
+        text.strip_prefix('\u{feff}').unwrap_or(text)
+    } else {
+        text
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,7 +77,7 @@ fn lines_with_offsets(input: &str) -> Vec<Line<'_>> {
                 start,
                 end,
                 raw,
-                text: raw.trim_end_matches('\n').trim_end_matches('\r'),
+                text: line_text(raw, start),
             });
             start = end;
         }
@@ -78,7 +88,7 @@ fn lines_with_offsets(input: &str) -> Vec<Line<'_>> {
             start,
             end: input.len(),
             raw,
-            text: raw.trim_end_matches('\r'),
+            text: line_text(raw, start),
         });
     }
     result
@@ -430,6 +440,7 @@ pub fn parse(
     let text = std::str::from_utf8(&source)
         .map_err(|_| AppError::Validation("import is not valid UTF-8".to_string()))?;
     let source_hash = sha256(&source);
+    let has_bom = source.starts_with(&[0xef, 0xbb, 0xbf]);
     let mappings = load_mapping(map_file)?;
     let lines = lines_with_offsets(text);
     let mut fences = None;
@@ -650,6 +661,7 @@ pub fn parse(
         source_name: source_name.into(),
         source,
         source_hash,
+        has_bom,
         tasks,
         task_previews,
         sections: section_previews,
