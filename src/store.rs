@@ -977,8 +977,10 @@ impl Store {
             summaries.last().map(|task| task.id)
         };
         let next_after = if has_more { next_after } else { None };
+        let ids = summaries.iter().map(|task| task.id).collect::<Vec<_>>();
+        let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
         for row in summaries.iter_mut() {
-            row.deps = self.task_dependencies(row.id)?;
+            row.deps = dependencies.remove(&row.id).unwrap_or_default();
         }
         Ok(Pagination {
             items: summaries,
@@ -1035,14 +1037,51 @@ impl Store {
             out.pop();
             next_after = out.last().map(|t| t.id);
         }
+        let ids = out.iter().map(|task| task.id).collect::<Vec<_>>();
+        let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
         for row in out.iter_mut() {
-            row.deps = self.task_dependencies(row.id)?;
+            row.deps = dependencies.remove(&row.id).unwrap_or_default();
         }
         Ok(Pagination {
             items: out,
             has_more,
             next_after,
         })
+    }
+
+    fn task_dependencies_for_ids(
+        conn: &Connection,
+        task_ids: &[u64],
+    ) -> Result<HashMap<u64, Vec<u64>>, AppError> {
+        let mut dependencies = task_ids
+            .iter()
+            .copied()
+            .map(|id| (id, Vec::new()))
+            .collect::<HashMap<_, _>>();
+        if task_ids.is_empty() {
+            return Ok(dependencies);
+        }
+        let placeholders = std::iter::repeat_n("?", task_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT task_id, depends_on_id
+             FROM dependencies
+             WHERE task_id IN ({placeholders})
+             ORDER BY task_id, depends_on_id"
+        );
+        let mut rows = conn.prepare(&query)?;
+        let values = task_ids.iter().map(|id| *id as i64);
+        let mut iter = rows.query(rusqlite::params_from_iter(values))?;
+        while let Some(row) = iter.next()? {
+            let task_id = row.get::<_, i64>(0)? as u64;
+            let depends_on_id = row.get::<_, i64>(1)? as u64;
+            dependencies
+                .entry(task_id)
+                .or_default()
+                .push(depends_on_id);
+        }
+        Ok(dependencies)
     }
 
     fn task_dependencies_from(conn: &Connection, task_id: u64) -> Result<Vec<u64>, AppError> {
