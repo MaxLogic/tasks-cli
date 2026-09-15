@@ -1076,10 +1076,7 @@ impl Store {
         while let Some(row) = iter.next()? {
             let task_id = row.get::<_, i64>(0)? as u64;
             let depends_on_id = row.get::<_, i64>(1)? as u64;
-            dependencies
-                .entry(task_id)
-                .or_default()
-                .push(depends_on_id);
+            dependencies.entry(task_id).or_default().push(depends_on_id);
         }
         Ok(dependencies)
     }

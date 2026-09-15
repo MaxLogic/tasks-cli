@@ -50,7 +50,9 @@ fn migration_backups(root: &TempDir, project_id: &Uuid) -> Vec<PathBuf> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("TASKS.v0-pre-migrate-") && name.ends_with(".sqlite"))
+                .is_some_and(|name| {
+                    name.starts_with("TASKS.v0-pre-migrate-") && name.ends_with(".sqlite")
+                })
         })
         .collect::<Vec<_>>();
     backups.sort();
@@ -112,7 +114,8 @@ fn every_migration_attempt_backups_the_current_live_database() {
         .expect("reset version for reproduction");
     drop(conn);
 
-    let mut second = Store::open_for_migration(root.path(), &project_id.to_string()).expect("reopen");
+    let mut second =
+        Store::open_for_migration(root.path(), &project_id.to_string()).expect("reopen");
     let (_, _, second_backup) = second.migrate().expect("second migrate");
     let second_backup = second_backup.expect("second backup");
     assert_ne!(first_backup, second_backup);
@@ -132,11 +135,9 @@ fn every_migration_attempt_backups_the_current_live_database() {
             path.display()
         );
     }
-    let second_conn = Connection::open_with_flags(
-        &second_backup,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("second backup");
+    let second_conn =
+        Connection::open_with_flags(&second_backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("second backup");
     assert_eq!(
         second_conn
             .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
@@ -163,7 +164,11 @@ fn migrate_output_reports_backup_path_in_text_and_json() {
             ])
             .output()
             .expect("migrate command");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
         if format == "text" {
             assert!(stdout.contains("backup_path: "));
