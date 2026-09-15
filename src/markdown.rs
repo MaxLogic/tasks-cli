@@ -662,38 +662,6 @@ pub fn parse(
     })
 }
 
-pub fn render(tasks: &[crate::model::TaskDetail], rules: &str) -> String {
-    let mut out = String::new();
-    out.push_str("# Tasks\n\n");
-    for status in [
-        TaskStatus::Backlog,
-        TaskStatus::Ready,
-        TaskStatus::InProgress,
-        TaskStatus::Blocked,
-        TaskStatus::Done,
-        TaskStatus::Cancelled,
-    ] {
-        out.push_str(&format!("## {status}\n\n"));
-        for task in tasks.iter().filter(|task| task.status == status) {
-            out.push_str(&format!("### T-{:03} {}\n", task.id, task.title));
-            out.push_str(&format!(
-                "Depends on: {}\n\n",
-                task.deps
-                    .iter()
-                    .map(|id| format!("T-{id:03}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            out.push_str(&task.body);
-            out.push_str("\n\n");
-        }
-    }
-    out.push_str("## Rules\n\n");
-    out.push_str(rules);
-    out.push('\n');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
