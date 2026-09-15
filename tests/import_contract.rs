@@ -226,7 +226,8 @@ fn tasks_without_a_section_are_unmapped_and_cannot_apply() {
 
 #[test]
 fn leading_bom_is_structural_and_does_not_block_apply() {
-    let plain = b"## ready\n### T-1 BOM-safe\nBody:\nbody \xCE\xA9\n## Rules\nshared rule\n".to_vec();
+    let plain =
+        b"## ready\n### T-1 BOM-safe\nBody:\nbody \xCE\xA9\n## Rules\nshared rule\n".to_vec();
     let mut with_bom = vec![0xef, 0xbb, 0xbf];
     with_bom.extend_from_slice(&plain);
     let without = markdown::parse("plain.md", plain, None).expect("plain parse");
