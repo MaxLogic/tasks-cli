@@ -222,25 +222,22 @@ fn resolved_task_ids<'a>(parsed: impl Iterator<Item = &'a ParsedImport>) -> Hash
 }
 
 pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
-    let scan_root = options.scan_root.canonicalize().map_err(|error| {
-        AppError::Io(std::io::Error::new(
-            error.kind(),
-            format!(
-                "cannot resolve --scan-root {}: {error}",
-                options.scan_root.display()
-            ),
-        ))
-    })?;
+    let scan_root = options
+        .scan_root
+        .canonicalize()
+        .map_err(|error| AppError::io_path("resolve --scan-root", &options.scan_root, error))?;
     if !scan_root.is_dir() {
-        return Err(AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("--scan-root is not a directory: {}", scan_root.display()),
+        return Err(AppError::InvalidPath(format!(
+            "--scan-root {} is not a directory; pass the directory that contains the ledgers",
+            scan_root.display()
         )));
     }
     let report_dir = options.report_dir.clone();
-    fs::create_dir_all(&report_dir)?;
+    fs::create_dir_all(&report_dir)
+        .map_err(|error| AppError::io_path("create --report-dir", &report_dir, error))?;
     let probe = report_dir.join(format!(".tasks-cli-write-probe-{}", std::process::id()));
-    fs::write(&probe, b"tasks-cli bulk-import write probe")?;
+    fs::write(&probe, b"tasks-cli bulk-import write probe")
+        .map_err(|error| AppError::io_path("write the report-dir probe file", &probe, error))?;
     let _ = fs::remove_file(&probe);
 
     let map = markdown::load_section_map(&options.map_file)?.for_corpus();
@@ -407,16 +404,20 @@ fn write_reports(
         jsonl.push_str(&serde_json::to_string(candidate)?);
         jsonl.push('\n');
     }
-    fs::write(&run_path, jsonl)?;
+    fs::write(&run_path, jsonl)
+        .map_err(|error| AppError::io_path("write the run report", &run_path, error))?;
 
     let summary_path = report_dir.join(SUMMARY_MD);
     fs::write(
         &summary_path,
         render_summary(summary, candidates, excluded_paths),
-    )?;
+    )
+    .map_err(|error| AppError::io_path("write the summary report", &summary_path, error))?;
 
     let unrecognized_path = report_dir.join(UNRECOGNIZED_MD);
-    fs::write(&unrecognized_path, render_unmigrated(summary, candidates))?;
+    fs::write(&unrecognized_path, render_unmigrated(summary, candidates)).map_err(|error| {
+        AppError::io_path("write the unmigrated report", &unrecognized_path, error)
+    })?;
 
     let manifest_path = if options.apply && options.quarantine_dir.is_some() {
         let path = report_dir.join(MANIFEST_JSON);
@@ -433,7 +434,8 @@ fn write_reports(
             delete_quarantined: options.delete_quarantined,
             entries: manifest.to_vec(),
         };
-        fs::write(&path, serde_json::to_string_pretty(&document)?)?;
+        fs::write(&path, serde_json::to_string_pretty(&document)?)
+            .map_err(|error| AppError::io_path("write the quarantine manifest", &path, error))?;
         Some(path.display().to_string())
     } else {
         None
@@ -802,13 +804,18 @@ fn scan_directory(
     result: &mut ScanResult,
     visited: &mut HashSet<PathBuf>,
 ) -> Result<(), AppError> {
-    let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| AppError::io_path("read the scan directory", dir, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AppError::io_path("read the scan directory", dir, error))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         let relative = relative_text(scan_root, &path);
-        let file_type = entry.file_type()?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| AppError::io_path("inspect", &path, error))?;
         if file_type.is_symlink() {
             result.excluded.push(ExcludedPathRecord {
                 path: path.display().to_string(),
@@ -843,10 +850,7 @@ fn scan_directory(
                     }
                 }
                 Err(error) => {
-                    return Err(AppError::Io(std::io::Error::new(
-                        error.kind(),
-                        format!("cannot resolve {}: {error}", path.display()),
-                    )));
+                    return Err(AppError::io_path("resolve", &path, error));
                 }
             }
             scan_directory(scan_root, &path, excludes, result, visited)?;
@@ -1010,7 +1014,8 @@ fn process_candidate(
     let mut blockers: Vec<String> = Vec::new();
     let mut scanned: Vec<ScannedLedger> = Vec::with_capacity(ledger_files.len());
     for source in &ledger_files {
-        let bytes = fs::read(&source.path)?;
+        let bytes = fs::read(&source.path)
+            .map_err(|error| AppError::io_path("read the ledger", &source.path, error))?;
         let sha256 = markdown::sha256(&bytes);
         let relative = relative_text(scan_root, &source.path);
         let parsed =
@@ -1167,7 +1172,13 @@ fn process_candidate(
                     Ok(()) => {
                         let mut status = "moved".to_string();
                         if options.delete_quarantined {
-                            fs::remove_file(&destination)?;
+                            fs::remove_file(&destination).map_err(|error| {
+                                AppError::io_path(
+                                    "delete the quarantined copy",
+                                    &destination,
+                                    error,
+                                )
+                            })?;
                             status = "deleted".to_string();
                             outcome.deleted += 1;
                         }
@@ -1238,7 +1249,9 @@ fn apply_and_verify(
     let mut reparsed = Vec::with_capacity(ledger_files.len());
     let mut hashes = Vec::with_capacity(ledger_files.len());
     for (position, source) in ledger_files.iter().enumerate() {
-        let bytes = fs::read(&source.path)?;
+        let bytes = fs::read(&source.path).map_err(|error| {
+            AppError::io_path("re-read the ledger before apply", &source.path, error)
+        })?;
         let parsed = markdown::parse_with_map(
             preview[position].0.clone(),
             bytes,
@@ -1248,6 +1261,7 @@ fn apply_and_verify(
         let expected = &files[position].sha256;
         if !parsed.source_hash.eq_ignore_ascii_case(expected) {
             return Err(AppError::ShaMismatch {
+                file: source.path.display().to_string(),
                 expected: expected.clone(),
                 actual: parsed.source_hash,
             });
@@ -1260,23 +1274,36 @@ fn apply_and_verify(
         markdown::resolve_create_task_deps(parsed, &known);
     }
     let explicit_project = Uuid::parse_str(project_id)
-        .map_err(|_| AppError::Usage(format!("invalid project id '{project_id}'")))?;
+        .map_err(|error| {
+            AppError::Usage(format!(
+                "bulk-import produced project id '{project_id}', which is not a UUID ({error}); re-run the scan"
+            ))
+        })?;
     registry::init_root(&options.data_root, dir, Some(explicit_project))?;
     let mut store = Store::open_rw(&options.data_root, project_id)?;
     let (_, already_imported) = store.import_apply_many(reparsed, &hashes)?;
 
     let export_dir = options.report_dir.join(EXPORT_DIR);
-    fs::create_dir_all(&export_dir)?;
+    fs::create_dir_all(&export_dir).map_err(|error| {
+        AppError::io_path(
+            "create the verification export directory",
+            &export_dir,
+            error,
+        )
+    })?;
     let export_path = export_dir.join(format!(
         "{:03}-{}.md",
         index + 1,
         export_slug(relative_directory)
     ));
     if export_path.exists() {
-        fs::remove_file(&export_path)?;
+        fs::remove_file(&export_path).map_err(|error| {
+            AppError::io_path("remove the previous export", &export_path, error)
+        })?;
     }
     let exported_count = store.export_markdown(&export_path)?;
-    let exported_bytes = fs::read(&export_path)?;
+    let exported_bytes = fs::read(&export_path)
+        .map_err(|error| AppError::io_path("read the verification export", &export_path, error))?;
     let exported = markdown::parse(export_path.display().to_string(), exported_bytes, None)?;
     let verification = verify_project(&mut store, preview, &exported, exported_count);
     #[cfg(feature = "test-hooks")]
@@ -1390,26 +1417,36 @@ fn sorted_deps(deps: &[u64]) -> Vec<u64> {
 fn move_file(source: &Path, destination: &Path) -> Result<(), AppError> {
     if destination.exists() {
         return Err(AppError::Validation(format!(
-            "quarantine destination already exists: {}",
+            "quarantine: refusing to overwrite {}: it already exists; choose a different --quarantine-dir or remove the existing file",
             destination.display()
         )));
     }
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)
+            .map_err(|error| AppError::io_path("create the quarantine directory", parent, error))?;
     }
     if fs::rename(source, destination).is_ok() {
         return Ok(());
     }
-    fs::copy(source, destination)?;
-    let source_hash = markdown::sha256(&fs::read(source)?);
-    let destination_hash = markdown::sha256(&fs::read(destination)?);
+    fs::copy(source, destination).map_err(|error| {
+        AppError::io_path("copy the source into quarantine", destination, error)
+    })?;
+    let source_hash = markdown::sha256(&fs::read(source).map_err(|error| {
+        AppError::io_path("re-read the source before quarantine", source, error)
+    })?);
+    let destination_hash = markdown::sha256(
+        &fs::read(destination)
+            .map_err(|error| AppError::io_path("read the quarantined copy", destination, error))?,
+    );
     if source_hash != destination_hash {
         return Err(AppError::Validation(format!(
-            "quarantine copy of {} does not match the source bytes",
+            "quarantine copy {} does not match the source {} byte for byte; the source was left in place, copy it manually and investigate the filesystem",
+            destination.display(),
             source.display()
         )));
     }
-    fs::remove_file(source)?;
+    fs::remove_file(source)
+        .map_err(|error| AppError::io_path("remove the source after quarantine", source, error))?;
     Ok(())
 }
 
@@ -1419,7 +1456,10 @@ fn find_ledger_references(root: &Path) -> Result<Vec<LedgerReferenceRecord>, App
     visited.insert(root.to_path_buf());
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let mut entries = fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
+        let mut entries = fs::read_dir(&dir)
+            .map_err(|error| AppError::io_path("read the directory", &dir, error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::io_path("read the directory", &dir, error))?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -1450,7 +1490,9 @@ fn find_ledger_references(root: &Path) -> Result<Vec<LedgerReferenceRecord>, App
             {
                 continue;
             }
-            let Ok(text) = String::from_utf8(fs::read(&path)?) else {
+            let bytes = fs::read(&path)
+                .map_err(|error| AppError::io_path("read the reference file", &path, error))?;
+            let Ok(text) = String::from_utf8(bytes) else {
                 continue;
             };
             let lines = text

@@ -224,6 +224,8 @@ pub(crate) struct SectionMap {
     patterns: Vec<(regex::Regex, TaskStatus)>,
     default_status: Option<TaskStatus>,
     relaxed_missing_sections: bool,
+    /// The map file this map was loaded from, when it came from a file.
+    pub(crate) path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,41 +269,72 @@ impl SectionMap {
     }
 }
 
-fn parse_mapping_status_value(context: &str, value: &Value) -> Result<TaskStatus, AppError> {
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+fn parse_mapping_status_value(
+    map_path: &Path,
+    context: &str,
+    value: &Value,
+) -> Result<TaskStatus, AppError> {
     value
         .as_str()
         .and_then(parse_mapping_status)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "map {context} must be one of backlog, ready, in-progress, blocked, done, cancelled"
+                "map file {}: {context} must be one of backlog, ready, in-progress, blocked, done, cancelled; found {}",
+                map_path.display(),
+                value
             ))
         })
 }
 
 fn insert_literal_mapping(
     map: &mut SectionMap,
+    map_path: &Path,
     name: &str,
     status: &Value,
 ) -> Result<(), AppError> {
-    let status = parse_mapping_status_value(&format!("for section '{name}'"), status)?;
+    let status = parse_mapping_status_value(map_path, &format!("section '{name}' status"), status)?;
     if canonical_status(name).is_some_and(|canonical| canonical != status) {
         return Err(AppError::Validation(format!(
-            "mapping for canonical section '{name}' conflicts with its status"
+            "map file {}: mapping for canonical section '{name}' conflicts with its status; remove the mapping or map it to the status the canonical name already has",
+            map_path.display()
         )));
     }
     if map.literal.insert(name.to_string(), status).is_some() {
         return Err(AppError::Validation(format!(
-            "conflicting mapping for section '{name}'"
+            "map file {}: conflicting mapping for section '{name}'",
+            map_path.display()
         )));
     }
     Ok(())
 }
 
 pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
-    let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| AppError::Validation("map file must contain a JSON object".to_string()))?;
+    let bytes =
+        std::fs::read(path).map_err(|error| AppError::io_path("read map file", path, error))?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::Validation(format!(
+            "map file {} is not valid JSON: {error}",
+            path.display()
+        ))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        AppError::Validation(format!(
+            "map file {} must contain a JSON object; found {}",
+            path.display(),
+            json_kind(&value)
+        ))
+    })?;
     let structured = ["sections", "default_status", "section_patterns"]
         .iter()
         .any(|key| object.contains_key(*key));
@@ -313,36 +346,50 @@ pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
                 "sections" | "default_status" | "section_patterns"
             ) {
                 return Err(AppError::Validation(format!(
-                    "map file has unknown top-level key '{key}'; expected sections, default_status or section_patterns"
+                    "map file {}: unknown top-level key '{key}'; expected sections, default_status or section_patterns",
+                    path.display()
                 )));
             }
         }
         if let Some(sections) = object.get("sections") {
             let sections = sections.as_object().ok_or_else(|| {
-                AppError::Validation("map file sections must be an object".to_string())
+                AppError::Validation(format!(
+                    "map file {}: \"sections\" must be an object of section name to status; found {}",
+                    path.display(),
+                    json_kind(sections)
+                ))
             })?;
             for (name, status) in sections {
-                insert_literal_mapping(&mut map, name, status)?;
+                insert_literal_mapping(&mut map, path, name, status)?;
             }
         }
         if let Some(default_status) = object.get("default_status") {
             map.default_status = Some(parse_mapping_status_value(
+                path,
                 "default_status",
                 default_status,
             )?);
         }
         if let Some(patterns) = object.get("section_patterns") {
             let patterns = patterns.as_array().ok_or_else(|| {
-                AppError::Validation("map file section_patterns must be an array".to_string())
+                AppError::Validation(format!(
+                    "map file {}: section_patterns must be an array of {{pattern, status}} objects; found {}",
+                    path.display(),
+                    json_kind(patterns)
+                ))
             })?;
             for (index, entry) in patterns.iter().enumerate() {
                 let entry = entry.as_object().ok_or_else(|| {
-                    AppError::Validation(format!("section_patterns[{index}] must be an object"))
+                    AppError::Validation(format!(
+                        "map file {}: section_patterns[{index}] must be an object",
+                        path.display()
+                    ))
                 })?;
                 for key in entry.keys() {
                     if key != "pattern" && key != "status" {
                         return Err(AppError::Validation(format!(
-                            "section_patterns[{index}] has unknown key '{key}'; expected pattern and status"
+                            "map file {}: section_patterns[{index}] has unknown key '{key}'; expected pattern and status",
+                            path.display()
                         )));
                     }
                 }
@@ -351,19 +398,25 @@ pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
                         AppError::Validation(format!(
-                            "section_patterns[{index}] requires a string pattern"
+                            "map file {}: section_patterns[{index}] requires a string \"pattern\"",
+                            path.display()
                         ))
                     })?;
                 let status = entry.get("status").ok_or_else(|| {
-                    AppError::Validation(format!("section_patterns[{index}] requires a status"))
+                    AppError::Validation(format!(
+                        "map file {}: section_patterns[{index}] requires a \"status\"",
+                        path.display()
+                    ))
                 })?;
                 let status = parse_mapping_status_value(
+                    path,
                     &format!("section_patterns[{index}].status"),
                     status,
                 )?;
                 let compiled = regex::Regex::new(pattern).map_err(|error| {
                     AppError::Validation(format!(
-                        "section pattern '{pattern}' is not a valid regex: {error}"
+                        "map file {}: section pattern '{pattern}' is not a valid regex: {error}",
+                        path.display()
                     ))
                 })?;
                 map.patterns.push((compiled, status));
@@ -371,20 +424,25 @@ pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
         }
     } else {
         for (name, status) in object {
-            insert_literal_mapping(&mut map, name, status)?;
+            insert_literal_mapping(&mut map, path, name, status)?;
         }
     }
+    map.path = Some(path.display().to_string());
     Ok(map)
 }
 
-fn parse_dependencies(value: &str) -> Result<Vec<u64>, AppError> {
+fn parse_dependencies(value: &str) -> Result<Vec<u64>, String> {
     let value = value.trim();
     if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
         return Ok(Vec::new());
     }
     let mut deps = value
         .split(',')
-        .map(|raw| parse_task_id(raw.trim()).map_err(AppError::Validation))
+        .map(|raw| {
+            parse_task_id(raw.trim()).map_err(|error| {
+                format!("{error}; expected a comma-separated list of T-<digits> IDs, '-' or 'none'")
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     deps.sort_unstable();
     Ok(deps)
@@ -622,6 +680,7 @@ fn metadata_block(
     lines: &[Line<'_>],
     start: usize,
     end: usize,
+    source_name: &str,
 ) -> Result<Option<MetadataBlock>, AppError> {
     let mut cursor = start;
     let mut title = None;
@@ -691,20 +750,36 @@ fn metadata_block(
         (None, deps_value, cursor + 2)
     };
 
-    let status = status_value
-        .parse::<TaskStatus>()
-        .map_err(AppError::Validation)?;
+    let status = status_value.parse::<TaskStatus>().map_err(|error| {
+        AppError::Validation(format!(
+            "{source_name}:{}: invalid Status value '{status_value}': {error}",
+            cursor + 1
+        ))
+    })?;
     if let Some(version_value) = version_value {
         let version = version_value.parse::<u64>().map_err(|_| {
-            AppError::Validation(format!("invalid task metadata version '{version_value}'"))
+            AppError::Validation(format!(
+                "{source_name}:{}: invalid task metadata version '{version_value}': expected a positive integer",
+                cursor + 2
+            ))
         })?;
         if version == 0 {
-            return Err(AppError::Validation(
-                "task metadata version must be positive".to_string(),
-            ));
+            return Err(AppError::Validation(format!(
+                "{source_name}:{}: task metadata version must be a positive integer",
+                cursor + 2
+            )));
         }
     }
-    let deps = parse_dependencies(deps_value)?;
+    let deps_line = if version_value.is_some() {
+        cursor + 3
+    } else {
+        cursor + 2
+    };
+    let deps = parse_dependencies(deps_value).map_err(|message| {
+        AppError::Validation(format!(
+            "{source_name}:{deps_line}: invalid 'Depends on:' value '{deps_value}': {message}"
+        ))
+    })?;
     consumed.push("Status".to_string());
     if version_value.is_some() {
         consumed.push("Version".to_string());
@@ -827,8 +902,12 @@ pub(crate) fn parse_with_map(
     schema: SourceSchema,
 ) -> Result<ParsedImport, AppError> {
     let source_name: String = source_name.into();
-    let text = std::str::from_utf8(&source)
-        .map_err(|_| AppError::Validation("import is not valid UTF-8".to_string()))?;
+    let text = std::str::from_utf8(&source).map_err(|error| {
+        AppError::Validation(format!(
+            "{source_name}: file is not valid UTF-8 (first invalid byte at offset {}); convert it to UTF-8",
+            error.valid_up_to()
+        ))
+    })?;
     let source_hash = sha256(&source);
     let has_bom = source.starts_with(&[0xef, 0xbb, 0xbf]);
     let lines = lines_with_offsets(text);
@@ -866,7 +945,8 @@ pub(crate) fn parse_with_map(
         for mapping in map.literal.keys() {
             if mapping != NO_SECTION && !sections.iter().any(|(_, section)| section == mapping) {
                 return Err(AppError::Validation(format!(
-                    "map references unknown section '{mapping}'"
+                    "{} maps section '{mapping}', which {source_name} does not contain; add the section to the file or remove the mapping",
+                    map.path.as_deref().unwrap_or("section map")
                 )));
             }
         }
@@ -895,8 +975,12 @@ pub(crate) fn parse_with_map(
             .unwrap_or(lines.len());
         let end_index = next_task.min(next_section).min(next_top_level);
         let heading = lines[*start_index].text.trim();
-        let (id, mut title) = parse_task_heading(heading)
-            .ok_or_else(|| AppError::Validation("invalid task heading".to_string()))?;
+        let (id, mut title) = parse_task_heading(heading).ok_or_else(|| {
+            AppError::Validation(format!(
+                "{source_name}:{}: task heading '{heading}' is not '### T-<number> <title>'",
+                *start_index + 1
+            ))
+        })?;
         if !seen.insert(id) && !duplicate_ids.contains(&id) {
             duplicate_ids.push(id);
         }
@@ -907,7 +991,7 @@ pub(crate) fn parse_with_map(
         let mut deps = Vec::new();
         let mut body_start = lines[*start_index].end;
         let mut consumed_metadata = Vec::new();
-        if let Some(metadata) = metadata_block(&lines, *start_index + 1, end_index)? {
+        if let Some(metadata) = metadata_block(&lines, *start_index + 1, end_index, &source_name)? {
             if let Some(metadata_title) = metadata.title {
                 title = metadata_title;
             }
@@ -943,7 +1027,10 @@ pub(crate) fn parse_with_map(
             String::new()
         };
         if title.is_empty() {
-            return Err(AppError::Validation(format!("task T-{id:03} has no title")));
+            return Err(AppError::Validation(format!(
+                "{source_name}:{}: task T-{id:03} has no title; write the heading as '### T-{id:03} <title>'",
+                *start_index + 1
+            )));
         }
         task_previews.push(ImportTaskPreview {
             id,

@@ -26,23 +26,33 @@ fn translate(path: &Path) -> Result<PathBuf, AppError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()?.join(path)
+        std::env::current_dir()
+            .map_err(|err| AppError::io_op("resolve the current directory", err))?
+            .join(path)
     };
     let output = ProcessCommand::new("wslpath")
         .arg("-w")
         .arg(&absolute)
         .output()
-        .map_err(|err| AppError::Interop(format!("cannot run wslpath: {err}")))?;
+        .map_err(|err| {
+            AppError::Interop(format!(
+                "cannot run wslpath to convert {}: {err}; install WSL or put wslpath on PATH",
+                absolute.display()
+            ))
+        })?;
     if !output.status.success() {
-        return Err(AppError::Interop(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
+        return Err(AppError::Interop(format!(
+            "wslpath -w {} failed: {}",
+            absolute.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() {
-        return Err(AppError::Interop(
-            "wslpath returned an empty path".to_string(),
-        ));
+        return Err(AppError::Interop(format!(
+            "wslpath returned an empty Windows path for {}; check that the path exists",
+            absolute.display()
+        )));
     }
     Ok(PathBuf::from(value.replace('\\', "/")))
 }
@@ -115,14 +125,20 @@ fn should_inject_project_context(cli: &Cli) -> bool {
 pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
     if !should_delegate(cli) {
         return Err(AppError::Interop(
-            "delegation is only available from WSL".to_string(),
+            "cannot delegate: this is not WSL, or no Windows backend is configured; run the command on Windows, or from WSL pass --windows-exe <path> or set TASKS_WINDOWS_EXE"
+                .to_string(),
         ));
     }
     let exe = cli
         .windows_exe
         .clone()
         .or_else(|| std::env::var_os("TASKS_WINDOWS_EXE").map(PathBuf::from))
-        .ok_or_else(|| AppError::Interop("missing Windows executable".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Interop(
+                "no Windows backend executable: pass --windows-exe <path> or set TASKS_WINDOWS_EXE"
+                    .to_string(),
+            )
+        })?;
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut filtered = Vec::with_capacity(args.len());
     let mut index = 0;
@@ -144,21 +160,29 @@ pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
             child_args.insert(0, project.to_string_lossy().to_string());
             child_args.insert(0, "--project".to_string());
         } else {
-            let route_root = translate(&std::env::current_dir()?)?
-                .to_string_lossy()
-                .to_string();
+            let route_root = translate(
+                &std::env::current_dir()
+                    .map_err(|err| AppError::io_op("resolve the current directory", err))?,
+            )?
+            .to_string_lossy()
+            .to_string();
             child_args.insert(0, route_root);
             child_args.insert(0, "--route-root".to_string());
         }
     }
-    let status = ProcessCommand::new(exe)
+    let status = ProcessCommand::new(&exe)
         .args(child_args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .env_remove("TASKS_WINDOWS_EXE")
         .status()
-        .map_err(|err| AppError::Interop(format!("cannot start Windows backend: {err}")))?;
+        .map_err(|err| {
+            AppError::Interop(format!(
+                "cannot start Windows backend {}: {err}; check --windows-exe or TASKS_WINDOWS_EXE",
+                exe.display()
+            ))
+        })?;
     Ok(status.code().unwrap_or(6))
 }
 

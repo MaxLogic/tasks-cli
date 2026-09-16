@@ -42,22 +42,30 @@ pub fn acquire_exclusive_lock_for(
             Ok(file) => file,
             Err(error) if is_lock_contention(&error) => {
                 if started.elapsed() >= timeout {
-                    return Err(AppError::LockTimeout);
+                    return Err(AppError::LockTimeout(format!(
+                        "{} is held by another tasks process after {}ms; retry when it finishes",
+                        path.display(),
+                        timeout.as_millis()
+                    )));
                 }
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            Err(error) => return Err(AppError::Io(error)),
+            Err(error) => return Err(AppError::io_path("open lock file", path, error)),
         };
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(ExclusiveLock(file)),
             Err(error) if is_lock_contention(&error) => {
                 if started.elapsed() >= timeout {
-                    return Err(AppError::LockTimeout);
+                    return Err(AppError::LockTimeout(format!(
+                        "{} is held by another tasks process after {}ms; retry when it finishes",
+                        path.display(),
+                        timeout.as_millis()
+                    )));
                 }
                 thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => return Err(AppError::Io(error)),
+            Err(error) => return Err(AppError::io_path("lock", path, error)),
         }
     }
 }
@@ -71,7 +79,9 @@ fn absolute_path(path: &Path) -> Result<PathBuf, AppError> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
-        Ok(std::env::current_dir()?.join(path))
+        let cwd = std::env::current_dir()
+            .map_err(|error| AppError::io_op("resolve the current directory", error))?;
+        Ok(cwd.join(path))
     }
 }
 
@@ -117,9 +127,10 @@ pub fn validate_storage_root_for(
         StoragePlatform::Linux => root_text.starts_with('/'),
     };
     if !absolute {
-        return Err(AppError::InvalidPath(
-            "storage root must be absolute".to_string(),
-        ));
+        return Err(AppError::InvalidPath(format!(
+            "storage root {} is not absolute; pass an absolute path such as C:\\tasks-data or /home/<user>/tasks-data",
+            root.display()
+        )));
     }
     let absolute = root.to_path_buf();
     let remote = match platform {
@@ -130,17 +141,17 @@ pub fn validate_storage_root_for(
     };
     if remote {
         return Err(AppError::InvalidPath(format!(
-            "storage root is not a supported local {} path: {}",
+            "storage root {} is a remote or WSL-mounted {} path; use a local disk directory instead",
+            absolute.display(),
             match platform {
                 StoragePlatform::Windows => "Windows",
                 StoragePlatform::Linux => "Linux",
             },
-            absolute.display()
         )));
     }
     if absolute.exists() && !absolute.is_dir() {
         return Err(AppError::InvalidPath(format!(
-            "storage root is not a directory: {}",
+            "storage root {} exists but is not a directory; choose a directory path",
             absolute.display()
         )));
     }
@@ -219,10 +230,15 @@ mod tests {
             .open(&path)
             .expect("lock file");
         guard.lock_exclusive().expect("held lock");
-        assert!(matches!(
-            acquire_exclusive_lock_for(&path, Duration::from_millis(40)),
-            Err(AppError::LockTimeout)
-        ));
+        let error = acquire_exclusive_lock_for(&path, Duration::from_millis(40))
+            .expect_err("held lock must time out");
+        let message = error.to_string();
+        assert!(
+            message.contains(path.to_str().expect("UTF-8 lock path")),
+            "{message}"
+        );
+        assert!(message.contains("40ms"), "{message}");
+        assert!(message.contains("retry when it finishes"), "{message}");
     }
 
     #[cfg(not(windows))]

@@ -159,7 +159,8 @@ impl ParsedDeps {
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| {
-                    crate::model::parse_task_id(s.trim()).map_err(|_| format!("invalid dep id {s}"))
+                    crate::model::parse_task_id(s.trim())
+                        .map_err(|error| format!("--deps item '{s}': {error}"))
                 })
                 .collect::<Result<_, _>>()?
         };

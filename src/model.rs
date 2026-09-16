@@ -52,7 +52,9 @@ impl FromStr for TaskStatus {
             "blocked" => Ok(Self::Blocked),
             "done" => Ok(Self::Done),
             "cancelled" | "canceled" => Ok(Self::Cancelled),
-            _ => Err(format!("invalid status '{value}'")),
+            _ => Err(format!(
+                "invalid status '{value}'; expected one of backlog, ready, in-progress, blocked, done, cancelled"
+            )),
         }
     }
 }
@@ -300,14 +302,18 @@ pub struct SourceRange {
 pub fn parse_task_id(input: &str) -> Result<u64, String> {
     let v = input.trim();
     if !v.to_ascii_uppercase().starts_with(ID_PREFIX) {
-        return Err(format!("invalid task id '{input}'"));
+        return Err(format!(
+            "invalid task id '{input}': expected the form T-<digits>"
+        ));
     }
     let num = &v[2..];
     if num.is_empty() {
-        return Err(format!("invalid task id '{input}'"));
+        return Err(format!(
+            "invalid task id '{input}': expected the form T-<digits>"
+        ));
     }
     num.parse::<u64>()
-        .map_err(|_| format!("invalid task id '{input}'"))
+        .map_err(|_| format!("invalid task id '{input}': expected the form T-<digits>"))
 }
 
 pub fn render_task_id(id: u64) -> String {

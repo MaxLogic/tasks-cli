@@ -106,7 +106,10 @@ fn cross_source_duplicates_fail_and_the_empty_store_check_runs_once() {
     let error = store
         .import_apply_many(vec![late], &[hash])
         .expect_err("empty store precondition");
-    assert!(error.to_string().contains("empty task table"), "{error}");
+    assert!(
+        error.to_string().contains("requires an empty store"),
+        "{error}"
+    );
     assert_eq!(
         store.list_tasks(None, None, 20).expect("list").items.len(),
         2
@@ -219,7 +222,12 @@ fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
         &hash_a,
     ]);
     assert_eq!(swapped.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&swapped.stderr).contains("sha mismatch"));
+    let stderr = String::from_utf8_lossy(&swapped.stderr);
+    assert!(stderr.contains("sha256 mismatch"), "{stderr}");
+    assert!(stderr.contains(a_path.to_str().unwrap()), "{stderr}");
+    assert!(stderr.contains(&hash_b), "{stderr}");
+    assert!(stderr.contains(&hash_a), "{stderr}");
+    assert!(stderr.contains("re-run the preview"), "{stderr}");
 
     let apply = run(&[
         "--data-root",

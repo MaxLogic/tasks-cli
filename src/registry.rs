@@ -32,25 +32,37 @@ impl Registry {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let bytes = std::fs::read(path)?;
+        let bytes =
+            std::fs::read(path).map_err(|error| AppError::io_path("read registry", path, error))?;
         if bytes.is_empty() {
             return Ok(Self::default());
         }
         serde_json::from_slice(&bytes)
-            .map_err(|e| AppError::Registry(format!("invalid registry {e}")))
+            .map_err(|error| AppError::Registry(format!(
+                "registry file {} is not valid JSON: {error}; fix or remove the file, then run tasks init to recreate it",
+                path.display()
+            )))
     }
 
     fn store(&self, path: &Path) -> Result<(), AppError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(|error| AppError::io_path("create directory for", parent, error))?;
         }
         let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)?;
-        fs::write(&tmp, bytes)?;
-        let file = fs::OpenOptions::new().read(true).write(true).open(&tmp)?;
-        file.sync_all()?;
+        fs::write(&tmp, bytes)
+            .map_err(|error| AppError::io_path("write registry file", &tmp, error))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|error| AppError::io_path("open registry file", &tmp, error))?;
+        file.sync_all()
+            .map_err(|error| AppError::io_path("flush registry file", &tmp, error))?;
         drop(file);
-        fs::rename(&tmp, path)?;
+        fs::rename(&tmp, path)
+            .map_err(|error| AppError::io_path("replace registry file", path, error))?;
         Ok(())
     }
 
@@ -60,7 +72,8 @@ impl Registry {
     ) -> Result<Self, AppError> {
         let data_root = validate_storage_root(data_root)?;
         let path = registry_path(&data_root);
-        fs::create_dir_all(&data_root)?;
+        fs::create_dir_all(&data_root)
+            .map_err(|error| AppError::io_path("create data root", &data_root, error))?;
         let lock_path = data_root.join("registry.lock");
         let _lock = acquire_exclusive_lock(&lock_path)?;
         let mut registry = Self::load(&path)?;
@@ -132,11 +145,14 @@ pub fn resolve_project(
     if let Some(project) = explicit_project {
         let p = project.trim().to_string();
         if Uuid::parse_str(&p).is_err() {
-            return Err(AppError::Usage(format!("invalid project id '{p}'")));
+            return Err(AppError::Usage(format!(
+                "--project '{p}' is not a UUID; pass the UUID printed by tasks init"
+            )));
         }
         return Ok(p);
     }
-    let current_dir = std::env::current_dir()?;
+    let current_dir = std::env::current_dir()
+        .map_err(|error| AppError::io_op("resolve the current directory", error))?;
     let route_from = fallback_root.unwrap_or(&current_dir);
     let mut winner: Option<(usize, RegistryBinding)> = None;
     for b in reg.bindings.iter() {
@@ -150,7 +166,14 @@ pub fn resolve_project(
     }
     winner
         .map(|(_, b)| b.project_id)
-        .ok_or_else(|| AppError::NotFound("no project bound for current directory".to_string()))
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "no project is bound to {} or any parent directory (registry {}); run tasks init --root {} to create and bind one, or pass --project <UUID>",
+                route_from.display(),
+                registry_path(&data_root).display(),
+                route_from.display()
+            ))
+        })
 }
 
 pub fn bind_root(
@@ -160,15 +183,25 @@ pub fn bind_root(
 ) -> Result<String, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let mut canonical_root = root.to_path_buf();
-    canonical_root = canonical_root
-        .canonicalize()
-        .map_err(|_| AppError::Registry(format!("cannot canonicalize root {:?}", root)))?;
+    canonical_root = canonical_root.canonicalize().map_err(|error| {
+        AppError::Registry(format!(
+            "cannot resolve root {}: {error}; check that the directory exists",
+            root.display()
+        ))
+    })?;
     let project = match project {
         Some(project) => project,
-        None => return Err(AppError::Usage("bind requires a project id".to_string())),
+        None => {
+            return Err(AppError::Usage(
+                "bind requires a project id: run tasks bind --root <dir> --project <UUID> (tasks init prints the UUID)"
+                    .to_string(),
+            ))
+        }
     };
     if Uuid::parse_str(&project).is_err() {
-        return Err(AppError::Usage(format!("invalid project id '{project}'")));
+        return Err(AppError::Usage(format!(
+            "--project '{project}' is not a UUID; pass the UUID printed by tasks init"
+        )));
     }
     let project_db = data_root
         .join("projects")
@@ -176,8 +209,8 @@ pub fn bind_root(
         .join("TASKS.sqlite");
     if !project_db.is_file() {
         return Err(AppError::NotFoundCode(format!(
-            "project database not found: {}",
-            project_db.display()
+            "project database not found: {}; run tasks init --root <dir> against this data root, or pass an existing --project <UUID>",
+            project_db.display(),
         )));
     }
     let mut bound_existing = false;
@@ -191,8 +224,10 @@ pub fn bind_root(
         {
             if existing.project_id != project {
                 return Err(AppError::Usage(format!(
-                    "root {:?} is already bound to a different project {}",
-                    root, existing.project_id
+                    "root {} is already bound to project {}; pass --project {} to reuse that binding or choose another root",
+                    root.display(),
+                    existing.project_id,
+                    existing.project_id
                 )));
             }
             bound_existing = true;
@@ -225,10 +260,14 @@ pub fn init_root(
     explicit_project: Option<Uuid>,
 ) -> Result<StoreInfo, AppError> {
     let data_root = validate_storage_root(data_root)?;
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|_| AppError::Registry(format!("cannot canonicalize root {:?}", root)))?;
-    fs::create_dir_all(&data_root)?;
+    let canonical_root = root.canonicalize().map_err(|error| {
+        AppError::Registry(format!(
+            "cannot resolve root {}: {error}; check that the directory exists",
+            root.display()
+        ))
+    })?;
+    fs::create_dir_all(&data_root)
+        .map_err(|error| AppError::io_path("create data root", &data_root, error))?;
     let lock_path = data_root.join("registry.lock");
     let _lock = acquire_exclusive_lock(&lock_path)?;
     let path = registry_path(&data_root);
@@ -238,13 +277,21 @@ pub fn init_root(
         .iter()
         .find(|binding| same_path(Path::new(&binding.root), &canonical_root))
     {
-        let existing_id = Uuid::parse_str(&existing.project_id)
-            .map_err(|_| AppError::Registry("binding contains invalid project id".to_string()))?;
+        let existing_id = Uuid::parse_str(&existing.project_id).map_err(|_| {
+            AppError::Registry(format!(
+                "registry {} binds root {} to invalid project id '{}'; fix the registry file",
+                path.display(),
+                existing.root,
+                existing.project_id
+            ))
+        })?;
         if let Some(requested) = explicit_project {
             if requested != existing_id {
                 return Err(AppError::Usage(format!(
-                    "root {:?} is already bound to a different project {}",
-                    root, existing.project_id
+                    "root {} is already bound to project {}; pass --project {} to reuse that binding or choose another root",
+                    root.display(),
+                    existing.project_id,
+                    existing.project_id
                 )));
             }
         }
