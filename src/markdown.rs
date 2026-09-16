@@ -162,13 +162,6 @@ fn canonical_status(section: &str) -> Option<TaskStatus> {
     }
 }
 
-fn status_for_section(section: &str, mappings: &HashMap<String, TaskStatus>) -> Option<TaskStatus> {
-    mappings
-        .get(section)
-        .cloned()
-        .or_else(|| canonical_status(section))
-}
-
 fn parse_mapping_status(value: &str) -> Option<TaskStatus> {
     match value {
         "backlog" => Some(TaskStatus::Backlog),
@@ -181,49 +174,137 @@ fn parse_mapping_status(value: &str) -> Option<TaskStatus> {
     }
 }
 
-fn load_mapping(path: Option<&Path>) -> Result<HashMap<String, TaskStatus>, AppError> {
-    let Some(path) = path else {
-        return Ok(HashMap::new());
-    };
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SectionMap {
+    literal: HashMap<String, TaskStatus>,
+    patterns: Vec<(regex::Regex, TaskStatus)>,
+    default_status: Option<TaskStatus>,
+}
+
+impl SectionMap {
+    fn status_for(&self, section: &str) -> Option<TaskStatus> {
+        self.literal
+            .get(section)
+            .cloned()
+            .or_else(|| {
+                self.patterns
+                    .iter()
+                    .find(|(pattern, _)| pattern.is_match(section))
+                    .map(|(_, status)| status.clone())
+            })
+            .or_else(|| canonical_status(section))
+            .or_else(|| self.default_status.clone())
+    }
+}
+
+fn parse_mapping_status_value(context: &str, value: &Value) -> Result<TaskStatus, AppError> {
+    value
+        .as_str()
+        .and_then(parse_mapping_status)
+        .ok_or_else(|| {
+            AppError::Validation(format!(
+                "map {context} must be one of backlog, ready, in-progress, blocked, done, cancelled"
+            ))
+        })
+}
+
+fn insert_literal_mapping(
+    map: &mut SectionMap,
+    name: &str,
+    status: &Value,
+) -> Result<(), AppError> {
+    let status = parse_mapping_status_value(&format!("for section '{name}'"), status)?;
+    if canonical_status(name).is_some_and(|canonical| canonical != status) {
+        return Err(AppError::Validation(format!(
+            "mapping for canonical section '{name}' conflicts with its status"
+        )));
+    }
+    if map.literal.insert(name.to_string(), status).is_some() {
+        return Err(AppError::Validation(format!(
+            "conflicting mapping for section '{name}'"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
     let value: Value = serde_json::from_slice(&std::fs::read(path)?)?;
     let object = value
         .as_object()
         .ok_or_else(|| AppError::Validation("map file must contain a JSON object".to_string()))?;
-    let mappings = if let Some(sections) = object.get("sections") {
-        if object.keys().any(|key| key != "sections") {
-            return Err(AppError::Validation(
-                "map file cannot mix sections with other top-level keys".to_string(),
-            ));
+    let structured = ["sections", "default_status", "section_patterns"]
+        .iter()
+        .any(|key| object.contains_key(*key));
+    let mut map = SectionMap::default();
+    if structured {
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "sections" | "default_status" | "section_patterns"
+            ) {
+                return Err(AppError::Validation(format!(
+                    "map file has unknown top-level key '{key}'; expected sections, default_status or section_patterns"
+                )));
+            }
         }
-        sections
-    } else {
-        &value
-    };
-    let mapping_object = mappings
-        .as_object()
-        .ok_or_else(|| AppError::Validation("map file sections must be an object".to_string()))?;
-    let mut output = HashMap::new();
-    for (name, status) in mapping_object {
-        let status = status
-            .as_str()
-            .and_then(parse_mapping_status)
-            .ok_or_else(|| {
-                AppError::Validation(format!(
-                    "map for section '{name}' must be one of backlog, ready, in-progress, blocked, done, cancelled"
-                ))
+        if let Some(sections) = object.get("sections") {
+            let sections = sections.as_object().ok_or_else(|| {
+                AppError::Validation("map file sections must be an object".to_string())
             })?;
-        if canonical_status(name).is_some_and(|canonical| canonical != status) {
-            return Err(AppError::Validation(format!(
-                "mapping for canonical section '{name}' conflicts with its status"
-            )));
+            for (name, status) in sections {
+                insert_literal_mapping(&mut map, name, status)?;
+            }
         }
-        if output.insert(name.clone(), status).is_some() {
-            return Err(AppError::Validation(format!(
-                "conflicting mapping for section '{name}'"
-            )));
+        if let Some(default_status) = object.get("default_status") {
+            map.default_status = Some(parse_mapping_status_value(
+                "default_status",
+                default_status,
+            )?);
+        }
+        if let Some(patterns) = object.get("section_patterns") {
+            let patterns = patterns.as_array().ok_or_else(|| {
+                AppError::Validation("map file section_patterns must be an array".to_string())
+            })?;
+            for (index, entry) in patterns.iter().enumerate() {
+                let entry = entry.as_object().ok_or_else(|| {
+                    AppError::Validation(format!("section_patterns[{index}] must be an object"))
+                })?;
+                for key in entry.keys() {
+                    if key != "pattern" && key != "status" {
+                        return Err(AppError::Validation(format!(
+                            "section_patterns[{index}] has unknown key '{key}'; expected pattern and status"
+                        )));
+                    }
+                }
+                let pattern = entry
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        AppError::Validation(format!(
+                            "section_patterns[{index}] requires a string pattern"
+                        ))
+                    })?;
+                let status = entry.get("status").ok_or_else(|| {
+                    AppError::Validation(format!("section_patterns[{index}] requires a status"))
+                })?;
+                let status = parse_mapping_status_value(
+                    &format!("section_patterns[{index}].status"),
+                    status,
+                )?;
+                let compiled = regex::Regex::new(pattern).map_err(|error| {
+                    AppError::Validation(format!(
+                        "section pattern '{pattern}' is not a valid regex: {error}"
+                    ))
+                })?;
+                map.patterns.push((compiled, status));
+            }
+        }
+    } else {
+        for (name, status) in object {
+            insert_literal_mapping(&mut map, name, status)?;
         }
     }
-    Ok(output)
+    Ok(map)
 }
 
 fn parse_dependencies(value: &str) -> Result<Vec<u64>, AppError> {
@@ -245,11 +326,12 @@ fn extract_deps_line<'a>(
     start: usize,
     end: usize,
 ) -> Option<&'a str> {
-    for index in start..end.min(lines.len()) {
+    let end = end.min(lines.len());
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
         if fence_lines.get(index).copied().unwrap_or(false) {
             continue;
         }
-        if let Some(value) = lines[index].text.strip_prefix("Deps:") {
+        if let Some(value) = line.text.strip_prefix("Deps:") {
             return Some(value);
         }
     }
@@ -486,11 +568,23 @@ pub fn parse_with_schema(
     map_file: Option<&Path>,
     schema: SourceSchema,
 ) -> Result<ParsedImport, AppError> {
+    let map = match map_file {
+        Some(path) => load_section_map(path)?,
+        None => SectionMap::default(),
+    };
+    parse_with_map(source_name, source, &map, schema)
+}
+
+pub(crate) fn parse_with_map(
+    source_name: impl Into<String>,
+    source: Vec<u8>,
+    map: &SectionMap,
+    schema: SourceSchema,
+) -> Result<ParsedImport, AppError> {
     let text = std::str::from_utf8(&source)
         .map_err(|_| AppError::Validation("import is not valid UTF-8".to_string()))?;
     let source_hash = sha256(&source);
     let has_bom = source.starts_with(&[0xef, 0xbb, 0xbf]);
-    let mappings = load_mapping(map_file)?;
     let lines = lines_with_offsets(text);
     let mut fences = None;
     let mut fence_lines = vec![false; lines.len()];
@@ -522,7 +616,7 @@ pub fn parse_with_schema(
         }
     }
 
-    for mapping in mappings.keys() {
+    for mapping in map.literal.keys() {
         if mapping != NO_SECTION && !sections.iter().any(|(_, section)| section == mapping) {
             return Err(AppError::Validation(format!(
                 "map references unknown section '{mapping}'"
@@ -560,7 +654,7 @@ pub fn parse_with_schema(
         let section = section_for_line(&sections, *start_index)
             .map(|position| sections[position].1.clone())
             .unwrap_or_else(|| NO_SECTION.to_string());
-        let mut status = status_for_section(&section, &mappings).unwrap_or(TaskStatus::Backlog);
+        let mut status = map.status_for(&section).unwrap_or(TaskStatus::Backlog);
         let mut deps = Vec::new();
         let mut body_start = lines[*start_index].end;
         let mut consumed_metadata = Vec::new();
@@ -695,7 +789,7 @@ pub fn parse_with_schema(
         let contains_tasks = task_starts
             .iter()
             .any(|task| *task > *section_index && *task < end);
-        let status = status_for_section(heading, &mappings);
+        let status = map.status_for(heading);
         if contains_tasks && status.is_none() && !unmapped_sections.contains(heading) {
             unmapped_sections.push(heading.clone());
         }
@@ -709,7 +803,7 @@ pub fn parse_with_schema(
         .iter()
         .any(|start| section_for_line(&sections, *start).is_none())
     {
-        let status = status_for_section(NO_SECTION, &mappings);
+        let status = map.status_for(NO_SECTION);
         if status.is_none() {
             unmapped_sections.push(NO_SECTION.to_string());
         }
@@ -796,5 +890,102 @@ mod tests {
         let input = b"## backlog\n### T-1 One\nDeps: T-abc\nbody\n".to_vec();
         assert!(parse("typo.md", input.clone(), None).is_ok());
         assert!(parse_with_schema("typo.md", input, None, SourceSchema::CreateTask).is_err());
+    }
+
+    #[test]
+    fn section_patterns_and_default_status_cover_an_open_ended_section_space() {
+        let dir = tempfile::tempdir().expect("map dir");
+        let map = dir.path().join("map.json");
+        std::fs::write(
+            &map,
+            r#"{"sections":{"Ongoing":"in-progress"},"section_patterns":[{"pattern":"^\\d{4}-\\d{2}-\\d{2}","status":"done"}],"default_status":"backlog"}"#,
+        )
+        .expect("map");
+        let input = b"## Ongoing\n### T-1 A\nbody\n## 2026-01-02 title\n### T-2 B\nbody\n## Mystery\n### T-3 C\nbody\n".to_vec();
+        let parsed = parse("patterns.md", input, Some(&map)).unwrap();
+        assert_eq!(parsed.tasks[0].status, TaskStatus::InProgress);
+        assert_eq!(parsed.tasks[1].status, TaskStatus::Done);
+        assert_eq!(parsed.tasks[2].status, TaskStatus::Backlog);
+        assert!(parsed.unmapped_sections.is_empty());
+    }
+
+    #[test]
+    fn literal_mappings_beat_patterns_which_beat_canonical_names() {
+        let dir = tempfile::tempdir().expect("map dir");
+        let map = dir.path().join("map.json");
+        std::fs::write(
+            &map,
+            r#"{"sections":{"Done":"blocked","2020-01-01 x":"ready"},"section_patterns":[{"pattern":"^Done$","status":"cancelled"},{"pattern":"^2020-","status":"done"},{"pattern":"^done$","status":"cancelled"}]}"#,
+        )
+        .expect("map");
+        let input = b"## Done\n### T-1 A\nbody\n## 2020-01-01 x\n### T-2 B\nbody\n## 2020-02-02 y\n### T-3 C\nbody\n## done\n### T-4 D\nbody\n".to_vec();
+        let parsed = parse("precedence.md", input, Some(&map)).unwrap();
+        assert_eq!(parsed.tasks[0].status, TaskStatus::Blocked);
+        assert_eq!(parsed.tasks[1].status, TaskStatus::Ready);
+        assert_eq!(parsed.tasks[2].status, TaskStatus::Done);
+        assert_eq!(parsed.tasks[3].status, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn prose_only_sections_need_no_mapping() {
+        let input = b"## Summary\nprose only\n## backlog\n### T-1 A\nbody\n".to_vec();
+        let parsed = parse("prose.md", input, None).unwrap();
+        assert!(parsed.unmapped_sections.is_empty());
+        assert_eq!(parsed.sections[0].status, None);
+        assert!(!parsed.sections[0].contains_tasks);
+        assert_eq!(parsed.sections[1].status, Some(TaskStatus::Backlog));
+    }
+
+    #[test]
+    fn invalid_patterns_and_unknown_keys_fail_at_load() {
+        let dir = tempfile::tempdir().expect("map dir");
+        let bad_regex = dir.path().join("bad-regex.json");
+        std::fs::write(
+            &bad_regex,
+            r#"{"section_patterns":[{"pattern":"(","status":"done"}]}"#,
+        )
+        .expect("bad regex map");
+        let error = parse(
+            "x.md",
+            b"## backlog\n### T-1 A\nbody\n".to_vec(),
+            Some(&bad_regex),
+        )
+        .expect_err("invalid regex");
+        assert!(error.to_string().contains("not a valid regex"), "{error}");
+
+        let bad_default = dir.path().join("bad-default.json");
+        std::fs::write(&bad_default, r#"{"default_status":"nope"}"#).expect("bad default map");
+        assert!(parse(
+            "x.md",
+            b"## backlog\n### T-1 A\nbody\n".to_vec(),
+            Some(&bad_default)
+        )
+        .is_err());
+
+        let extra_key = dir.path().join("extra-key.json");
+        std::fs::write(&extra_key, r#"{"sections":{},"random":1}"#).expect("extra key map");
+        let error = parse(
+            "x.md",
+            b"## backlog\n### T-1 A\nbody\n".to_vec(),
+            Some(&extra_key),
+        )
+        .expect_err("unknown key");
+        assert!(
+            error.to_string().contains("unknown top-level key"),
+            "{error}"
+        );
+
+        let extra_entry_key = dir.path().join("extra-entry-key.json");
+        std::fs::write(
+            &extra_entry_key,
+            r#"{"section_patterns":[{"pattern":"x","status":"done","extra":1}]}"#,
+        )
+        .expect("extra entry key map");
+        assert!(parse(
+            "x.md",
+            b"## backlog\n### T-1 A\nbody\n".to_vec(),
+            Some(&extra_entry_key)
+        )
+        .is_err());
     }
 }
