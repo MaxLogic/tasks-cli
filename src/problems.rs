@@ -7,8 +7,8 @@
 
 use crate::markdown::ParsedImport;
 use crate::model::{
-    ImportProblem, MAX_DEPENDENCIES, PROBLEM_CYCLE, PROBLEM_NONCONFORMING_DEPS,
-    PROBLEM_UNKNOWN_DEPENDENCY,
+    ImportProblem, BODY_MAX_BYTES, MAX_DEPENDENCIES, PROBLEM_CYCLE, PROBLEM_NONCONFORMING_DEPS,
+    PROBLEM_OTHER, PROBLEM_UNKNOWN_DEPENDENCY, RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -38,14 +38,189 @@ pub fn analyze(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
         );
     }
     for parsed in sources {
+        problems.extend(
+            parsed
+                .deps_problems
+                .iter()
+                .filter(|problem| problem.kind == PROBLEM_OTHER)
+                .cloned(),
+        );
+    }
+    for parsed in sources {
         problems.extend(other_problems(parsed));
     }
     for parsed in sources {
         problems.extend(task_limit_problems(parsed));
     }
+    for parsed in sources {
+        problems.extend(size_problems(parsed));
+    }
+    problems.extend(rules_size_problems(sources));
+    problems.extend(unresolved_dependency_problems(sources));
     problems.extend(cross_file_duplicate_problems(sources));
     problems.extend(cycle_problems(sources));
     problems
+}
+
+/// Dependencies carried in `task.deps` that resolve to no task of the import
+/// set, and self-references. The create-task resolver strips both before they
+/// reach a task's deps, so this covers the canonical metadata form; import
+/// apply rejects the same set through its dependency-existence and cycle
+/// checks.
+fn unresolved_dependency_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
+    let known: HashSet<u64> = sources
+        .iter()
+        .flat_map(|parsed| parsed.tasks.iter().map(|task| task.id))
+        .collect();
+    let mut problems = Vec::new();
+    for parsed in sources {
+        let name = &parsed.source_name;
+        for task in &parsed.tasks {
+            let id = format!("T-{:03}", task.id);
+            for dep in &task.deps {
+                if *dep == task.id {
+                    problems.push(ImportProblem {
+                        kind: crate::model::PROBLEM_SELF_DEPENDENCY.to_string(),
+                        message: format!(
+                            "{id} at {name}:{} lists itself in its dependency list; fix: remove {id} from the list",
+                            task.heading_line
+                        ),
+                        file: Some(name.clone()),
+                        line: Some(task.heading_line),
+                        task_id: Some(task.id),
+                        value: None,
+                        keepable_ids: Vec::new(),
+                        group: Vec::new(),
+                        fix: Some(format!("remove {id} from the dependency list")),
+                    });
+                } else if !known.contains(dep) {
+                    problems.push(ImportProblem {
+                        kind: PROBLEM_UNKNOWN_DEPENDENCY.to_string(),
+                        message: format!(
+                            "{id} at {name}:{} depends on T-{dep:03}, which is in neither the import set nor the project; fix: remove T-{dep:03} from the dependency list or add that task to the ledger",
+                            task.heading_line
+                        ),
+                        file: Some(name.clone()),
+                        line: Some(task.heading_line),
+                        task_id: Some(task.id),
+                        value: None,
+                        keepable_ids: Vec::new(),
+                        group: Vec::new(),
+                        fix: Some(format!(
+                            "remove T-{dep:03} from the dependency list; no such task exists"
+                        )),
+                    });
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// Title and body limits that create, update and import apply all enforce.
+/// Import apply runs the same analysis before its transaction, so a preview
+/// reporting no problem cannot fail apply for an oversized task.
+fn size_problems(parsed: &ParsedImport) -> Vec<ImportProblem> {
+    let name = &parsed.source_name;
+    let mut problems = Vec::new();
+    for task in &parsed.tasks {
+        let id = format!("T-{:03}", task.id);
+        let title_len = task.title.chars().count();
+        if title_len == 0 {
+            problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{id} at {name}:{} has an empty title; give the task a non-empty title.",
+                    task.heading_line
+                ),
+                file: Some(name.clone()),
+                line: Some(task.heading_line),
+                task_id: Some(task.id),
+                value: None,
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some("give the task a non-empty title".to_string()),
+            });
+        }
+        if title_len > TITLE_MAX_CHARS {
+            problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{id} at {name}:{} has a title of {title_len} characters; the limit is {TITLE_MAX_CHARS}. Shorten the title.",
+                    task.heading_line
+                ),
+                file: Some(name.clone()),
+                line: Some(task.heading_line),
+                task_id: Some(task.id),
+                value: None,
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some("shorten the title".to_string()),
+            });
+        }
+        if task.body.len() > BODY_MAX_BYTES {
+            problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{id} at {name}:{} has a body of {} bytes; the limit is {BODY_MAX_BYTES}. Trim the body.",
+                    task.heading_line,
+                    task.body.len()
+                ),
+                file: Some(name.clone()),
+                line: Some(task.heading_line),
+                task_id: Some(task.id),
+                value: None,
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some("trim the body".to_string()),
+            });
+        }
+    }
+    problems
+}
+
+/// The shared rules of one import set, combined exactly as import apply stores
+/// them. Both the size check and the store write use this function.
+pub fn combined_rules(sources: &[&ParsedImport]) -> String {
+    sources
+        .iter()
+        .map(|parsed| parsed.rules.trim_matches(['\r', '\n']))
+        .filter(|rules| !rules.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Shared-rules size limit that create, update, rules set and import apply
+/// enforce through the same value.
+fn rules_size_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
+    let combined = combined_rules(sources);
+    if combined.len() <= RULES_MAX_BYTES {
+        return Vec::new();
+    }
+    let names = sources
+        .iter()
+        .map(|parsed| parsed.source_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (file, who) = if sources.len() == 1 {
+        (Some(names.clone()), names)
+    } else {
+        (None, format!("import set ({names})"))
+    };
+    vec![ImportProblem {
+        kind: PROBLEM_OTHER.to_string(),
+        message: format!(
+            "{who}: the shared rules have {} bytes; the limit is {RULES_MAX_BYTES}. Trim the rules.",
+            combined.len()
+        ),
+        file,
+        line: None,
+        task_id: None,
+        value: None,
+        keepable_ids: Vec::new(),
+        group: Vec::new(),
+        fix: Some("trim the rules".to_string()),
+    }]
 }
 
 /// Dependency-list checks that apply enforces before its transaction: the
@@ -176,13 +351,20 @@ fn cycle_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
             if edge.task_id == edge.dependency || !known.contains(&edge.dependency) {
                 continue;
             }
-            let entry = edges.entry(edge.task_id).or_default();
-            if !entry.contains(&edge.dependency) {
-                entry.push(edge.dependency);
-            }
             locations
                 .entry((edge.task_id, edge.dependency))
                 .or_insert_with(|| (edge.file.clone(), edge.line_number, edge.value.clone()));
+        }
+        for task in &parsed.tasks {
+            for dep in &task.deps {
+                if *dep == task.id || !known.contains(dep) {
+                    continue;
+                }
+                let entry = edges.entry(task.id).or_default();
+                if !entry.contains(dep) {
+                    entry.push(*dep);
+                }
+            }
         }
     }
     for targets in edges.values_mut() {

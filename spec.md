@@ -339,6 +339,19 @@ any problem is `unrecognized` and is never applied or quarantined; the
 single-file `import` command reports all problems the same way and refuses
 `--apply` with the same list.
 
+Preview is not a weaker check than apply. It runs every data check apply
+performs before its transaction, through the same functions: the dependency
+count and duplicate-entry checks, the title, body and combined shared-rules
+size limits, dependency existence, self-references, in-file and cross-file
+task-ID uniqueness and dependency cycles, plus the store preconditions (an
+empty store, empty shared rules, and a source set already recorded in the
+project's provenance). Each violation is reported in the all-problems format
+with the file, the line and the task where one applies. A source set that
+passes a dry run cannot fail `--apply` for a data reason; a set whose sources
+were all imported in an earlier run reports that state instead of failing. The
+single-file `import` preview reports the same store-state problems, naming the
+project UUID and the existing task or rules count.
+
 Create-task ledgers may also carry `Archived from TASKS.md.` and
 `Task schema: 1` header lines. Both are recognized as structural markup
 alongside `Project:`, `Next task ID:` and `> Snapshot export` lines, so they do

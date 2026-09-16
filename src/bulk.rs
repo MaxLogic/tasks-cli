@@ -221,6 +221,27 @@ fn resolved_task_ids<'a>(parsed: impl Iterator<Item = &'a ParsedImport>) -> Hash
         .collect()
 }
 
+/// Store-state problems for a candidate whose project database already exists.
+/// A candidate without a database trivially passes; when one exists, preview
+/// runs the same import-state checks apply runs before its transaction.
+fn candidate_store_problems(
+    data_root: &Path,
+    project_id: &str,
+    parsed_set: &[(String, ParsedImport)],
+) -> Result<Option<Vec<ImportProblem>>, AppError> {
+    let db_path = crate::store::data_root_project_path(data_root, project_id);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let store = Store::open_readonly(data_root, project_id)?;
+    let sources = parsed_set
+        .iter()
+        .map(|(_, parsed)| (parsed.source_name.clone(), parsed.source_hash.clone()))
+        .collect::<Vec<_>>();
+    let (problems, _) = store.import_state_problems(&sources)?;
+    Ok(Some(problems))
+}
+
 pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
     let scan_root = options
         .scan_root
@@ -1087,6 +1108,11 @@ fn process_candidate(
     );
     let refs: Vec<&ParsedImport> = parsed_set.iter().map(|(_, parsed)| parsed).collect();
     outcome.problems.extend(problems::analyze(&refs));
+    if let Some(state_problems) =
+        candidate_store_problems(&options.data_root, project_id, &parsed_set)?
+    {
+        outcome.problems.extend(state_problems);
+    }
     outcome.counts = ProblemCounts::of(&outcome.problems);
     blockers.extend(
         outcome

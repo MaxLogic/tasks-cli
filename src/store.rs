@@ -1,9 +1,9 @@
 use crate::error::AppError;
 use crate::markdown::{ParsedImport, ParsedTask};
 use crate::model::{
-    parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportReport, Pagination,
-    RuleRecord, TaskDetail, TaskStatus, TaskSummary, TaskUpdate, BODY_MAX_BYTES, ID_PREFIX,
-    MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
+    parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportProblem, ImportReport,
+    Pagination, RuleRecord, TaskDetail, TaskStatus, TaskSummary, TaskUpdate, BODY_MAX_BYTES,
+    ID_PREFIX, MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
 use crate::storage::{acquire_exclusive_lock, validate_storage_root, ExclusiveLock};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -642,11 +642,23 @@ fn validate_title_body(who: &str, title: &str, body: &str) -> Result<(), AppErro
 fn validate_rules(who: &str, body: &str) -> Result<(), AppError> {
     if body.len() > RULES_MAX_BYTES {
         return Err(AppError::Validation(format!(
-            "{who}: the shared rules have {} bytes; the limit is {RULES_MAX_BYTES}. Trim the rules",
+            "{who}: the shared rules have {} bytes; the limit is {RULES_MAX_BYTES}. Trim the rules.",
             body.len()
         )));
     }
     Ok(())
+}
+
+fn import_empty_store_message(project: &Uuid, task_rows: i64) -> String {
+    format!(
+        "import apply requires an empty store: project {project} already has {task_rows} task(s); import into a new project (tasks init --root <dir>) or remove the existing tasks."
+    )
+}
+
+fn import_non_empty_rules_message(project: &Uuid) -> String {
+    format!(
+        "import apply requires empty shared rules: project {project} already has rules; clear them before importing, or import into a new project."
+    )
 }
 
 fn normalize_dependencies(mut deps: Vec<u64>) -> Vec<u64> {
@@ -1764,6 +1776,56 @@ impl Store {
         Ok((reports.remove(0), already))
     }
 
+    /// Store-state checks import apply performs before its transaction. Import
+    /// preview calls the same function, so a preview reporting no problem
+    /// cannot fail apply because of the store contents.
+    pub fn import_state_problems(
+        &self,
+        sources: &[(String, String)],
+    ) -> Result<(Vec<ImportProblem>, bool), AppError> {
+        let mut problems = Vec::new();
+        let mut already_imported = Vec::new();
+        for (name, hash) in sources {
+            let existing: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imports WHERE input_sha256 = ?1",
+                [hash.clone()],
+                |r| r.get::<_, i64>(0),
+            )?;
+            if existing > 0 {
+                already_imported.push(name.clone());
+            }
+        }
+        if !sources.is_empty() && already_imported.len() == sources.len() {
+            return Ok((problems, true));
+        }
+        if !already_imported.is_empty() {
+            problems.push(ImportProblem::other(format!(
+                "import apply: these sources were already imported in an earlier run: {}; importing them again would duplicate tasks. Pass only sources that were not imported yet, or import into a fresh project.",
+                already_imported.join(", ")
+            )));
+        }
+        let task_rows: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+        if task_rows > 0 {
+            problems.push(ImportProblem::other(import_empty_store_message(
+                &self.project_id,
+                task_rows,
+            )));
+        }
+        let existing_rules = self.conn.query_row(
+            "SELECT COUNT(*) FROM project WHERE TRIM(rules_markdown) != '' OR rules_version > 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )?;
+        if existing_rules > 0 {
+            problems.push(ImportProblem::other(import_non_empty_rules_message(
+                &self.project_id,
+            )));
+        }
+        Ok((problems, false))
+    }
+
     pub fn import_apply_many(
         &mut self,
         parsed: Vec<ParsedImport>,
@@ -1792,7 +1854,13 @@ impl Store {
             hashes.push(item.source_hash.clone());
         }
         let refs: Vec<&ParsedImport> = parsed.iter().collect();
-        let problems = crate::problems::analyze(&refs);
+        let mut problems = crate::problems::analyze(&refs);
+        let sources = parsed
+            .iter()
+            .map(|item| (item.source_name.clone(), item.source_hash.clone()))
+            .collect::<Vec<_>>();
+        let (state_problems, all_already_imported) = self.import_state_problems(&sources)?;
+        problems.extend(state_problems);
         if !problems.is_empty() {
             let counts = crate::model::ProblemCounts::of(&problems);
             let details = problems
@@ -1805,26 +1873,14 @@ impl Store {
                 counts.line()
             )));
         }
-        let mut already_imported = Vec::new();
-        for (hash, item) in hashes.iter().zip(parsed.iter()) {
-            let existing: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM imports WHERE input_sha256 = ?1",
-                [hash.clone()],
-                |r| r.get::<_, i64>(0),
-            )?;
-            if existing > 0 {
-                already_imported.push(item.source_name.clone());
-            }
-        }
-        if already_imported.len() == parsed.len() {
+        if all_already_imported {
             return Ok((reports, true));
         }
-        if !already_imported.is_empty() {
-            return Err(AppError::Usage(format!(
-                "import apply: these sources were already imported in an earlier run: {}; importing them again would duplicate tasks. Pass only sources that were not imported yet, or import into a fresh project",
-                already_imported.join(", ")
-            )));
-        }
+        let combined_rules = crate::problems::combined_rules(&refs);
+        validate_rules(
+            &format!("import into project {}", self.project_id),
+            &combined_rules,
+        )?;
         let mut seen_ids: HashMap<u64, &str> = HashMap::new();
         for item in &parsed {
             for task in &item.tasks {
@@ -1841,9 +1897,9 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let task_rows: i64 = tx.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
         if task_rows > 0 {
-            return Err(AppError::Usage(format!(
-                "import apply requires an empty store: project {} already has {task_rows} task(s); import into a new project (tasks init --root <dir>) or remove the existing tasks",
-                self.project_id
+            return Err(AppError::Usage(import_empty_store_message(
+                &self.project_id,
+                task_rows,
             )));
         }
         let existing_rules = tx.query_row(
@@ -1852,9 +1908,8 @@ impl Store {
             |r| r.get::<_, i64>(0),
         )?;
         if existing_rules > 0 {
-            return Err(AppError::Usage(format!(
-                "import apply requires empty shared rules: project {} already has rules; clear them before importing, or import into a new project",
-                self.project_id
+            return Err(AppError::Usage(import_non_empty_rules_message(
+                &self.project_id,
             )));
         }
         for item in &parsed {
@@ -1936,12 +1991,6 @@ impl Store {
                 ],
             )?;
         }
-        let combined_rules = parsed
-            .iter()
-            .map(|item| item.rules.trim_matches(['\r', '\n']))
-            .filter(|rules| !rules.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
         if !combined_rules.is_empty() {
             tx.execute(
                 "UPDATE project SET rules_markdown = ?1, rules_version = 1 WHERE project_id = ?2",
