@@ -258,6 +258,20 @@ keys are exact level-two heading text, values are the six supported statuses.
 Every section containing tasks needs an explicit mapping, except exact headings
 equal to a canonical status. Preview may suggest mappings but apply never accepts
 an unconfirmed suggestion. Unknown keys/values and conflicting mappings fail.
+The map may also cover an open-ended section space with an optional
+`default_status` and an optional ordered `section_patterns` list of
+`{"pattern": REGEX, "status": STATUS}` objects, written as
+`{"sections": {...}, "default_status": "backlog", "section_patterns": [...]}`.
+Resolution order for a section heading is: literal `sections` entry, then the
+first matching pattern in list order, then an exact canonical status name, then
+`default_status`. Patterns are regular expressions tested against the section
+heading text (unanchored `is_match` semantics; anchor with `^`/`$` when needed).
+An invalid pattern, an unknown status or an unknown key fails at map load with
+exit 2. A section holding no task headings never needs a mapping, so prose
+sections such as `## Summary` do not require entries. The bare
+`{section: status}` form remains valid, and every existing rule and error -
+including mappings that conflict with a canonical section's own status - stays
+in force.
 Store shared non-task rules in project rules in source order, retain original
 sections in import provenance, and expose the proposed rules in the preview.
 Do not infer dependencies from arbitrary T-N mentions; keep prose references.
