@@ -1,3 +1,4 @@
+use crate::bulk::BulkRun;
 use crate::model::{HistoryEvent, ImportReport, RuleRecord, TaskDetail, TaskSummary};
 use serde::Serialize;
 
@@ -66,6 +67,7 @@ pub enum CommandPayload {
         out: String,
         task_count: usize,
     },
+    BulkImport(BulkRun),
     Backup {
         out: String,
         bytes: u64,
@@ -306,6 +308,43 @@ impl Envelope {
             }
             CommandPayload::Export { out, task_count } => {
                 format!("out: {out}\ntasks: {task_count}\n")
+            }
+            CommandPayload::BulkImport(run) => {
+                let summary = &run.summary;
+                let mut out = format!(
+                    "mode: {}\nscan_root: {}\nreport_dir: {}\ncandidates: {}\nrecognized: {}\nrecognized_with_warnings: {}\nunrecognized: {}\nexcluded: {}\napplied_projects: {}\nverified_projects: {}\nfailed_projects: {}\nquarantined_files: {}\ndeleted_quarantined_files: {}\nreports: run.jsonl={} summary.md={} unrecognized.md={}\n",
+                    if summary.apply { "apply" } else { "dry run" },
+                    summary.scan_root,
+                    summary.report_dir,
+                    summary.candidates,
+                    summary.recognized,
+                    summary.recognized_with_warnings,
+                    summary.unrecognized,
+                    summary.excluded,
+                    summary.applied_projects,
+                    summary.verified_projects,
+                    summary.failed_projects,
+                    summary.quarantined_files,
+                    summary.deleted_quarantined_files,
+                    run.reports.run_jsonl,
+                    run.reports.summary_md,
+                    run.reports.unrecognized_md,
+                );
+                if let Some(manifest) = &run.reports.quarantine_manifest {
+                    out.push_str(&format!("quarantine_manifest: {manifest}\n"));
+                }
+                for candidate in &run.candidates {
+                    out.push_str(&format!(
+                        "- {} [{}] project={} tasks={} applied={} verified={}\n",
+                        candidate.relative_directory,
+                        candidate.bucket,
+                        candidate.project_id,
+                        candidate.task_count,
+                        candidate.applied,
+                        candidate.verified
+                    ));
+                }
+                out
             }
             CommandPayload::Backup { out, bytes } => {
                 format!("out: {out}\nbytes: {bytes}\n")

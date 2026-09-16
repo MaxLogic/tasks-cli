@@ -1584,7 +1584,7 @@ impl Store {
         ))
     }
 
-    fn import_report(parsed: &ParsedImport) -> ImportReport {
+    pub(crate) fn import_report(parsed: &ParsedImport) -> ImportReport {
         ImportReport {
             source_sha256: parsed.source_hash.clone(),
             has_bom: parsed.has_bom,

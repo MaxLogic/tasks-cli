@@ -179,9 +179,18 @@ pub(crate) struct SectionMap {
     literal: HashMap<String, TaskStatus>,
     patterns: Vec<(regex::Regex, TaskStatus)>,
     default_status: Option<TaskStatus>,
+    relaxed_missing_sections: bool,
 }
 
 impl SectionMap {
+    /// Bulk runs apply one map to a whole corpus, so a literal section that a
+    /// given file does not contain is ignored instead of rejected.
+    pub(crate) fn for_corpus(&self) -> SectionMap {
+        let mut copy = self.clone();
+        copy.relaxed_missing_sections = true;
+        copy
+    }
+
     fn status_for(&self, section: &str) -> Option<TaskStatus> {
         self.literal
             .get(section)
@@ -616,11 +625,13 @@ pub(crate) fn parse_with_map(
         }
     }
 
-    for mapping in map.literal.keys() {
-        if mapping != NO_SECTION && !sections.iter().any(|(_, section)| section == mapping) {
-            return Err(AppError::Validation(format!(
-                "map references unknown section '{mapping}'"
-            )));
+    if !map.relaxed_missing_sections {
+        for mapping in map.literal.keys() {
+            if mapping != NO_SECTION && !sections.iter().any(|(_, section)| section == mapping) {
+                return Err(AppError::Validation(format!(
+                    "map references unknown section '{mapping}'"
+                )));
+            }
         }
     }
 
