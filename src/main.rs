@@ -289,10 +289,15 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     apply,
                     expect_sha256,
                     map_file,
+                    source_schema,
                 } => {
                     let bytes = read_input(&file)?;
-                    let parsed =
-                        markdown::parse(file.display().to_string(), bytes, map_file.as_deref())?;
+                    let parsed = markdown::parse_with_schema(
+                        file.display().to_string(),
+                        bytes,
+                        map_file.as_deref(),
+                        source_schema,
+                    )?;
                     if let Some(expected) = expect_sha256.as_deref() {
                         if !expected.eq_ignore_ascii_case(&parsed.source_hash) {
                             return Err(AppError::ShaMismatch {
@@ -311,10 +316,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             ));
                         }
                         let reread = read_input(&file)?;
-                        let reparsed = markdown::parse(
+                        let reparsed = markdown::parse_with_schema(
                             file.display().to_string(),
                             reread,
                             map_file.as_deref(),
+                            source_schema,
                         )?;
                         if !expected.eq_ignore_ascii_case(&reparsed.source_hash) {
                             return Err(AppError::ShaMismatch {

@@ -1,4 +1,4 @@
-use crate::model::TaskStatus;
+use crate::model::{SourceSchema, TaskStatus};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -103,6 +103,8 @@ pub enum Command {
         expect_sha256: Option<String>,
         #[arg(long = "map-file")]
         map_file: Option<PathBuf>,
+        #[arg(long = "source-schema", value_enum, default_value = "canonical")]
+        source_schema: SourceSchema,
     },
     Export {
         #[arg(long)]
