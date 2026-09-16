@@ -48,7 +48,7 @@ The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
 
 For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 63 passed, 0 failed, and 0 ignored. This is 15 unit tests and 48 nonzero integration tests; the additional result line is the zero-test doctest target.
 
-The five gates were re-run unchanged after follow-up fix 1, and the first and only post-fix run passed with the same statuses (fmt=0, clippy=0, test=0, serial=0, build=0) and totals (63 passed, 0 failed in both test modes). The Windows run was incremental: cargo clean was not run because the default target directory also contains the retained evidence tree. The release build was already up to date and reproduced the recorded artifact hash.
+The five gates were re-run unchanged after follow-up fix 1, and the first and only post-fix run passed with the same statuses (fmt=0, clippy=0, test=0, serial=0, build=0) and totals (63 passed, 0 failed in both test modes). The Windows run was incremental: cargo clean was not run because the default target directory also contains the retained evidence tree. Retained evidence lives under target/evidence/, so a cargo clean in the default Windows target directory would destroy it; that is the reason the Windows gates run incrementally. The release build was already up to date and reproduced the recorded artifact hash.
 
 Evidence (post-fix re-run):
 
