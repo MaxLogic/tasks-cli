@@ -299,24 +299,41 @@ apply unless that exact pseudo-section is explicitly mapped.
 
 `import --source-schema canonical` (the default) keeps that metadata contract
 unchanged. `--source-schema create-task` additionally recognizes the
-create-task ledger block: within a task block, the first line whose text begins
-at column zero with `Deps:` (fenced code excluded) contributes dependency edges.
-The value is scanned for `T-` followed by digits at word boundaries; surrounding
-backticks and punctuation belong to the text, and the `-`, `none` and empty
-forms carry no dependencies. A token becomes an edge only when it names a task
-of the same candidate file set - the file itself for a single `import`, every
-file of the project for `bulk-import` - and never when it names the task itself,
-because the store rejects self-dependencies. A `Deps:` line never fails the
-file: every fragment that does not become an edge (unparsed tokens, IDs owned by
-another project, self-references, trailing prose) is reported as a per-task
-warning naming the file, the line number, the task ID and the residual text, and
-a candidate holding only such warnings is `recognized-with-warnings`; the
-warnings appear in the preview, `run.jsonl` and `summary.md`. Extraction stays
+create-task ledger block: every line whose text begins at column zero with
+`Deps:` inside a task block (fenced code excluded) is a Deps field, and a second
+one in the same task is nonconforming. The value grammar is exactly create-task
+3.4.0: the value is trimmed; an empty value, `-` or `none` in any case carries
+no dependencies; otherwise it is split on `,` and every trimmed item must match
+`^T-\d+$` exactly. Backticks, semicolons, words, ranges and project names do not
+match. An ID-only line creates an edge only for IDs present in the same
+candidate file set - the file itself for a single `import`, every file of the
+project for `bulk-import` - and a self-reference is a problem, never an edge.
+Nonconforming lines never create edges and never silently drop text: the line
+makes the candidate `unrecognized` and is reported with the file, the line
+number, the task ID, the original value verbatim, the IDs a clean line would
+keep (standalone items after splitting on `,` and `;` and stripping backticks,
+that exist in the candidate's files) and the fix text `keep only these IDs in
+Deps and move the rest of the original text to Notes`. A conforming line that
+names an ID absent from the candidate's files is equally blocking, reported with
+the fix text `remove T-### from Deps; no such task exists`. Extraction stays
 additive: the `Deps:` line and every other source byte remain in the stored body
 byte for byte, nothing is consumed, and non-task prerequisite text stays
 descriptive. Each task preview still carries `deps` (the resolved edges), and
 `consumed_metadata` still gains `Deps` when the line exists. The default schema,
 preview semantics and export round-trip are unchanged.
+
+Every preview reports all of its problems in one run and never stops at the
+first: nonconforming `Deps:` lines, unknown IDs, self-references, unmapped
+task-bearing sections, unassigned content ranges, duplicate IDs and dependency
+cycle groups. The report starts with the count line `N problem(s): X
+nonconforming Deps, Y unknown IDs, Z cycle groups, W other`, and the same list
+is carried as a structured array in `run.jsonl` and as lines in `summary.md` and
+`unrecognized.md`. Cycles come from strongly connected components: every group
+of two or more tasks reports one concrete cycle, the file and line of each edge
+in it with its `Deps:` text, and every task of the group. A candidate holding
+any problem is `unrecognized` and is never applied or quarantined; the
+single-file `import` command reports all problems the same way and refuses
+`--apply` with the same list.
 
 Create-task ledgers may also carry `Archived from TASKS.md.` and
 `Task schema: 1` header lines. Both are recognized as structural markup
@@ -324,6 +341,15 @@ alongside `Project:`, `Next task ID:` and `> Snapshot export` lines, so they do
 not block apply. That list is exhaustive: any other unassigned non-whitespace
 content still blocks apply, which is what catches a ledger schema this tool does
 not understand.
+
+A ledger is recognized by its content, never by the marker. Each parsed ledger
+file is classified `schema-1` when a `Task schema: 1` line is present,
+`legacy-compatible` when there is no marker but every task heading sits under a
+section the map or the canonical names resolve, and `unsupported` when a task
+heading sits before the first section or under a section nothing resolves. A
+missing marker alone never makes a candidate unrecognized, and missing empty
+sections do not matter to the class. The class of every file is recorded in
+`run.jsonl` and `summary.md`.
 
 Each actual schema migration creates and validates a fresh pre-upgrade backup
 named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`; older
@@ -386,7 +412,10 @@ Stages, in order:
    recognized-with-warnings, unrecognized, or excluded. Unrecognized means the
    preview cannot assign a status to a section that holds tasks, or the files
    parse with an error; the recorded reason names the file, the section or line,
-   and what was expected.
+   and what was expected. A candidate is also unrecognized when a `Deps:` line
+   is nonconforming, names an unknown ID or self-reference, or when its
+   dependency graph holds a cycle; all of those problems are recorded in one
+   pass, never just the first.
 4. Preview every recognized candidate through the import preview.
 5. Apply, only with `--apply`: initialize the project against its directory,
    import all of its ledger files in one apply with the hashes from step 4, then
@@ -415,7 +444,9 @@ human, and `unrecognized.md` (every unmigrated file with its reason) under
 `--report-dir`, plus `quarantine-manifest.json` when quarantine runs. Per
 migrated root the reports list every `AGENTS.md` and `CLAUDE.md` below it that
 contains the string `TASKS.md`, with line numbers; the tool reports those files
-and never edits them.
+and never edits them. Each candidate carries its schema class per file, its
+count line and its full structured problem list; `unrecognized.md` groups the
+messages under the candidate that produced them.
 
 Bulk runs apply one map to the whole corpus, so a literal `sections` entry that
 a given file does not contain is ignored instead of rejected; the single-file
