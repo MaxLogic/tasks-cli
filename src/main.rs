@@ -15,18 +15,23 @@ use tasks_cli::store::Store;
 fn read_input(path: &Path) -> Result<Vec<u8>, AppError> {
     if path == Path::new("-") {
         let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes)?;
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|error| AppError::io_op("read the import source from stdin", error))?;
         Ok(bytes)
     } else {
-        std::fs::read(path).map_err(|error| {
-            AppError::Validation(format!("cannot read input {}: {error}", path.display()))
-        })
+        std::fs::read(path).map_err(|error| AppError::io_path("read", path, error))
     }
 }
 
 fn read_text(path: &Path) -> Result<String, AppError> {
-    String::from_utf8(read_input(path)?)
-        .map_err(|_| AppError::Validation(format!("{} is not valid UTF-8", path.display())))
+    String::from_utf8(read_input(path)?).map_err(|error| {
+        AppError::Validation(format!(
+            "{} is not valid UTF-8 (first invalid byte at offset {}); convert it to UTF-8",
+            path.display(),
+            error.utf8_error().valid_up_to()
+        ))
+    })
 }
 
 fn resolved_root(cli: &Cli) -> Result<PathBuf, AppError> {
@@ -96,7 +101,8 @@ fn import_payload(
 fn execute(cli: Cli) -> Result<(), AppError> {
     if interop::has_backend(&cli) && !interop::should_delegate(&cli) {
         return Err(AppError::Interop(
-            "Windows delegation is available only from WSL".to_string(),
+            "cannot use the Windows backend: --windows-exe or TASKS_WINDOWS_EXE is set, but this is not WSL; run the command on Windows, or run it from WSL"
+                .to_string(),
         ));
     }
     if interop::should_delegate(&cli) {
@@ -109,9 +115,14 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             let explicit_project = cli
                 .project
                 .as_deref()
-                .map(uuid::Uuid::parse_str)
-                .transpose()
-                .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+                .map(|value| {
+                    uuid::Uuid::parse_str(value).map_err(|error| {
+                        AppError::Usage(format!(
+                            "--project '{value}' is not a UUID ({error}); pass the UUID printed by tasks init, or omit --project to generate one"
+                        ))
+                    })
+                })
+                .transpose()?;
             let info = registry::init_root(&data_root, root, explicit_project)?;
             envelope(
                 Some(info.project_id.to_string()),
@@ -251,12 +262,14 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             };
             if options.delete_quarantined && !options.apply {
                 return Err(AppError::Usage(
-                    "--delete-quarantined requires --apply".to_string(),
+                    "bulk-import: --delete-quarantined requires --apply; run with --apply --quarantine-dir <dir> --delete-quarantined to move and then delete the sources"
+                        .to_string(),
                 ));
             }
             if options.delete_quarantined && options.quarantine_dir.is_none() {
                 return Err(AppError::Usage(
-                    "--delete-quarantined requires --quarantine-dir".to_string(),
+                    "bulk-import: --delete-quarantined requires --quarantine-dir; pass the directory that should hold the quarantined sources"
+                        .to_string(),
                 ));
             }
             let report_dir = options.report_dir.display().to_string();
@@ -267,7 +280,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             envelope(None, CommandPayload::BulkImport(run), cli.format);
             if failed > 0 {
                 return Err(AppError::Validation(format!(
-                    "{failed} candidate(s) were not migrated ({unrecognized} unrecognized, {failed_projects} failed apply or verification); see {report_dir}/unrecognized.md"
+                    "{failed} candidate(s) were not migrated: {unrecognized} unrecognized and {failed_projects} failed apply or verification. Nothing was written for them; see {report_dir}/unrecognized.md for the reasons"
                 )));
             }
         }
@@ -378,15 +391,17 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     source_schema,
                 } => {
                     if !expect_sha256.is_empty() && expect_sha256.len() != files.len() {
-                        return Err(AppError::Usage(
-                            "one --expect-sha256 is required per --file, in the same order"
-                                .to_string(),
-                        ));
+                        return Err(AppError::Usage(format!(
+                            "import: {} --file source(s) but {} --expect-sha256 value(s); pass one --expect-sha256 per --file, in the same order",
+                            files.len(),
+                            expect_sha256.len()
+                        )));
                     }
                     if files.len() > 1 && files.iter().any(|path| path.as_path() == Path::new("-"))
                     {
                         return Err(AppError::Usage(
-                            "--file - (stdin) supports a single source file".to_string(),
+                            "import: --file - (stdin) can be the only source; pass real paths to import several files"
+                                .to_string(),
                         ));
                     }
                     let mut parsed = Vec::with_capacity(files.len());
@@ -401,6 +416,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         if let Some(expected) = expect_sha256.get(index) {
                             if !expected.eq_ignore_ascii_case(&item.source_hash) {
                                 return Err(AppError::ShaMismatch {
+                                    file: path.display().to_string(),
                                     expected: expected.clone(),
                                     actual: item.source_hash,
                                 });
@@ -416,13 +432,16 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     let problem_counts = ProblemCounts::of(&problems);
                     if apply {
                         if expect_sha256.len() != files.len() {
-                            return Err(AppError::Usage(
-                                "--apply requires one --expect-sha256 per --file".to_string(),
-                            ));
+                            return Err(AppError::Usage(format!(
+                                "import apply: {} --file source(s) but {} --expect-sha256 value(s); pass one --expect-sha256 per --file, in the same order",
+                                files.len(),
+                                expect_sha256.len()
+                            )));
                         }
                         if files.iter().any(|path| path.as_path() == Path::new("-")) {
                             return Err(AppError::Usage(
-                                "--apply requires re-readable import files".to_string(),
+                                "import apply: --apply cannot re-read --file - (stdin); pass a real path so the source can be hashed and verified before import"
+                                    .to_string(),
                             ));
                         }
                         if !problems.is_empty() {
@@ -447,6 +466,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             )?;
                             if !expect_sha256[index].eq_ignore_ascii_case(&item.source_hash) {
                                 return Err(AppError::ShaMismatch {
+                                    file: path.display().to_string(),
                                     expected: expect_sha256[index].clone(),
                                     actual: item.source_hash,
                                 });

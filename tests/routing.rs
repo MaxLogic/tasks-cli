@@ -49,5 +49,8 @@ fn unknown_cli_directory_fails_without_creating_a_backlog() {
         .expect("tasks executable");
     assert_eq!(output.status.code(), Some(3));
     assert!(!temp.path().join("projects").join("unknown").exists());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no project bound"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no project is bound"), "{stderr}");
+    assert!(stderr.contains("registry"), "{stderr}");
+    assert!(stderr.contains("tasks init --root"), "{stderr}");
 }

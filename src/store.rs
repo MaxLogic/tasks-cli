@@ -43,7 +43,8 @@ pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInf
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
     if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)
+            .map_err(|error| AppError::io_path("create the project directory", parent, error))?;
     }
     let _lock = acquire_exclusive_lock(&db_path.with_extension("create.lock"))?;
     if db_path.exists() {
@@ -60,7 +61,8 @@ pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInf
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&db_path)?;
+            .open(&db_path)
+            .map_err(|error| AppError::io_path("create the project database", &db_path, error))?;
         let mut conn = Connection::open(&db_path)?;
         configure_writer(&conn)?;
         initialize_new_database(&mut conn, project_id)?;
@@ -104,9 +106,9 @@ fn validate_limit(limit: usize) -> Result<usize, AppError> {
     if (1..=100).contains(&limit) {
         Ok(limit)
     } else {
-        Err(AppError::Validation(
-            "limit must be between 1 and 100".to_string(),
-        ))
+        Err(AppError::Validation(format!(
+            "invalid limit {limit}: the list limit must be between 1 and 100; pass --limit with a value in that range"
+        )))
     }
 }
 
@@ -174,13 +176,27 @@ fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(
     Ok(())
 }
 
-fn validate_current_schema(conn: &Connection, expected: &Uuid) -> Result<(), AppError> {
-    if schema_version(conn)? != CURRENT_SCHEMA_VERSION {
-        return Err(AppError::Database("schema is not current".to_string()));
+fn validate_current_schema(
+    conn: &Connection,
+    expected: &Uuid,
+    db_path: &Path,
+) -> Result<(), AppError> {
+    let missing = |what: &str| {
+        AppError::Database(format!(
+            "{} is missing {what}; expected the tasks-cli schema version {CURRENT_SCHEMA_VERSION}. Restore the database from a backup, or run tasks init --root <dir> to create a new one",
+            db_path.display()
+        ))
+    };
+    let version = schema_version(conn)?;
+    if version != CURRENT_SCHEMA_VERSION {
+        return Err(AppError::Database(format!(
+            "{} has schema version {version}; this build requires {CURRENT_SCHEMA_VERSION}. Run tasks migrate --project {expected}.",
+            db_path.display()
+        )));
     }
     for table in ["project", "tasks", "dependencies", "events", "imports"] {
         if !table_exists(conn, table)? {
-            return Err(AppError::Database(format!("missing table {table}")));
+            return Err(missing(&format!("the {table} table")));
         }
     }
     for column in [
@@ -190,9 +206,7 @@ fn validate_current_schema(conn: &Connection, expected: &Uuid) -> Result<(), App
         "next_task_number",
     ] {
         if !column_exists(conn, "project", column)? {
-            return Err(AppError::Database(format!(
-                "missing project column {column}"
-            )));
+            return Err(missing(&format!("the project.{column} column")));
         }
     }
     for column in [
@@ -205,7 +219,7 @@ fn validate_current_schema(conn: &Connection, expected: &Uuid) -> Result<(), App
         "updated_ms",
     ] {
         if !column_exists(conn, "tasks", column)? {
-            return Err(AppError::Database(format!("missing tasks column {column}")));
+            return Err(missing(&format!("the tasks.{column} column")));
         }
     }
     for (table, columns) in [
@@ -237,24 +251,30 @@ fn validate_current_schema(conn: &Connection, expected: &Uuid) -> Result<(), App
     ] {
         for column in columns {
             if !column_exists(conn, table, column)? {
-                return Err(AppError::Database(format!(
-                    "missing {table} column {column}"
-                )));
+                return Err(missing(&format!("the {table}.{column} column")));
             }
         }
     }
     let project_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))?;
     if project_count != 1 {
-        return Err(AppError::Database(
-            "project metadata is not singleton".to_string(),
-        ));
+        return Err(AppError::Database(format!(
+            "{} has {project_count} rows in the project table; expected exactly 1. Restore the database from a backup",
+            db_path.display()
+        )));
     }
     let project: String = conn.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
-    let actual = Uuid::parse_str(&project)
-        .map_err(|_| AppError::Database("invalid project identity".to_string()))?;
+    let actual = Uuid::parse_str(&project).map_err(|error| {
+        AppError::Database(format!(
+            "{} has an invalid project id '{project}': {error}; restore the database from a backup",
+            db_path.display()
+        ))
+    })?;
     if actual != *expected {
-        return Err(AppError::Usage("project mismatch".to_string()));
+        return Err(AppError::Usage(format!(
+            "{} belongs to project {actual}, not {expected}; pass --project {actual} or open the database for {expected}",
+            db_path.display()
+        )));
     }
     Ok(())
 }
@@ -264,16 +284,17 @@ fn verify_existing_project(db_path: &Path, expected: &Uuid) -> Result<StoreInfo,
     let version = schema_version(&conn)?;
     if version > CURRENT_SCHEMA_VERSION {
         return Err(AppError::Database(format!(
-            "unsupported newer schema {version} in {}",
+            "{} has schema version {version}, newer than this build supports ({CURRENT_SCHEMA_VERSION}); upgrade tasks-cli to a build that supports it",
             db_path.display()
         )));
     }
     if version < CURRENT_SCHEMA_VERSION {
         return Err(AppError::Database(format!(
-            "schema {version} requires explicit migration"
+            "{} has schema version {version}; this build requires {CURRENT_SCHEMA_VERSION}. Run tasks migrate --project {expected}.",
+            db_path.display()
         )));
     }
-    validate_current_schema(&conn, expected)?;
+    validate_current_schema(&conn, expected, db_path)?;
     Ok(StoreInfo {
         project_id: *expected,
         db_path: db_path.to_path_buf(),
@@ -297,6 +318,7 @@ fn ensure_column(
 fn migrate_v0_to_v1(
     tx: &rusqlite::Transaction<'_>,
     expected_project: &Uuid,
+    db_path: &Path,
 ) -> Result<(), AppError> {
     if !table_exists(tx, "project")? {
         tx.execute_batch(
@@ -309,9 +331,10 @@ fn migrate_v0_to_v1(
         )?;
     } else {
         if !column_exists(tx, "project", "project_id")? {
-            return Err(AppError::Database(
-                "legacy project table has no project_id".to_string(),
-            ));
+            return Err(AppError::Database(format!(
+                "{}: legacy project table has no project_id column; restore the database from a backup",
+                db_path.display()
+            )));
         }
         ensure_column(tx, "project", "rules_markdown", "TEXT NOT NULL DEFAULT ''")?;
         ensure_column(tx, "project", "rules_version", "INTEGER NOT NULL DEFAULT 1")?;
@@ -340,7 +363,8 @@ fn migrate_v0_to_v1(
         for required in ["id", "title", "body", "status"] {
             if !column_exists(tx, "tasks", required)? {
                 return Err(AppError::Database(format!(
-                    "legacy tasks table has no {required} column"
+                    "{}: legacy tasks table has no {required} column; restore the database from a backup",
+                    db_path.display()
                 )));
             }
         }
@@ -414,7 +438,8 @@ fn migrate_v0_to_v1(
         for column in columns {
             if !column_exists(tx, table, column)? {
                 return Err(AppError::Database(format!(
-                    "legacy {table} table has no {column} column"
+                    "{}: legacy {table} table has no {column} column; restore the database from a backup",
+                    db_path.display()
                 )));
             }
         }
@@ -437,9 +462,10 @@ fn migrate_v0_to_v1(
     drop(dependency_rows);
     for (task_id, depends_on_id) in dependency_edges {
         if task_id <= 0 || depends_on_id <= 0 {
-            return Err(AppError::Database(
-                "legacy dependency contains an invalid task id".to_string(),
-            ));
+            return Err(AppError::Database(format!(
+                "{}: legacy dependencies row ({task_id}, {depends_on_id}) contains a non-positive task id; restore the database from a backup",
+                db_path.display()
+            )));
         }
         let exists: i64 = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
@@ -448,35 +474,45 @@ fn migrate_v0_to_v1(
         )?;
         if exists == 0 {
             return Err(AppError::Database(format!(
-                "legacy dependency T-{task_id:03} references missing T-{depends_on_id:03}"
+                "{}: legacy dependency T-{task_id:03} references T-{depends_on_id:03}, which does not exist; restore the database from a backup",
+                db_path.display()
             )));
         }
     }
-    let has_cycle: Option<i64> = tx
-        .query_row(
-            "WITH RECURSIVE reach(root, node) AS (
-                 SELECT task_id, depends_on_id FROM dependencies
-                 UNION
-                 SELECT reach.root, dependencies.depends_on_id
-                 FROM reach
-                 JOIN dependencies ON dependencies.task_id = reach.node
-             )
-             SELECT 1 FROM reach WHERE root = node LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if has_cycle.is_some() {
-        return Err(AppError::Database(
-            "legacy dependency graph contains a cycle".to_string(),
-        ));
+    let mut cycle_statement = tx.prepare(
+        "WITH RECURSIVE reach(root, node) AS (
+             SELECT task_id, depends_on_id FROM dependencies
+             UNION
+             SELECT reach.root, dependencies.depends_on_id
+             FROM reach
+             JOIN dependencies ON dependencies.task_id = reach.node
+         )
+         SELECT DISTINCT root FROM reach WHERE root = node ORDER BY root",
+    )?;
+    let cycle_rows = cycle_statement.query_map([], |row| row.get::<_, i64>(0))?;
+    let mut cycle_tasks = Vec::new();
+    for row in cycle_rows {
+        cycle_tasks.push(row?);
+    }
+    drop(cycle_statement);
+    if !cycle_tasks.is_empty() {
+        let listed = cycle_tasks
+            .iter()
+            .map(|id| format!("T-{id:03}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(AppError::Database(format!(
+            "{}: legacy dependency graph contains a cycle involving {listed}; restore the database from a backup",
+            db_path.display()
+        )));
     }
 
     let project_count: i64 = tx.query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))?;
     if project_count > 1 {
-        return Err(AppError::Database(
-            "legacy project table is not singleton".to_string(),
-        ));
+        return Err(AppError::Database(format!(
+            "{}: legacy project table has {project_count} rows; expected at most 1. Restore the database from a backup",
+            db_path.display()
+        )));
     }
     if project_count == 0 {
         tx.execute(
@@ -486,10 +522,17 @@ fn migrate_v0_to_v1(
     } else {
         let project: String =
             tx.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
-        let actual = Uuid::parse_str(&project)
-            .map_err(|_| AppError::Database("invalid legacy project identity".to_string()))?;
+        let actual = Uuid::parse_str(&project).map_err(|error| {
+            AppError::Database(format!(
+                "{}: legacy project identity '{project}' is not a UUID ({error}); restore the database from a backup",
+                db_path.display()
+            ))
+        })?;
         if actual != *expected_project {
-            return Err(AppError::Usage("project mismatch".to_string()));
+            return Err(AppError::Usage(format!(
+                "{}: this database belongs to project {actual}, not {expected_project}; pass --project {actual}, or restore the backup for {expected_project}",
+                db_path.display()
+            )));
         }
     }
 
@@ -515,9 +558,10 @@ fn migrate_v0_to_v1(
     let mut max_id = 0i64;
     for (id, title, body, status, version, created_ms, _) in legacy_tasks {
         if id <= 0 || version <= 0 {
-            return Err(AppError::Database(
-                "invalid legacy task identity/version".to_string(),
-            ));
+            return Err(AppError::Database(format!(
+                "{}: legacy task {id} has id or version {version} outside the allowed range; restore the database from a backup",
+                db_path.display()
+            )));
         }
         validate_status(&status)?;
         max_id = max_id.max(id);
@@ -548,15 +592,18 @@ fn migrate_v0_to_v1(
             )?;
         }
     }
-    let next = max_id
-        .checked_add(1)
-        .ok_or_else(|| AppError::Database("task id overflow during migration".to_string()))?;
+    let next = max_id.checked_add(1).ok_or_else(|| {
+        AppError::Database(format!(
+            "{}: the largest legacy task id {max_id} cannot be incremented; restore the database from a backup",
+            db_path.display()
+        ))
+    })?;
     tx.execute(
         "UPDATE project SET next_task_number = CASE WHEN next_task_number <= ?1 THEN ?1 ELSE next_task_number END",
         [next],
     )?;
     tx.execute_batch("PRAGMA user_version = 1")?;
-    validate_current_schema(tx, expected_project)?;
+    validate_current_schema(tx, expected_project, db_path)?;
     Ok(())
 }
 
@@ -571,31 +618,32 @@ fn validate_status(raw: &str) -> Result<TaskStatus, AppError> {
     TaskStatus::from_str(raw).map_err(AppError::Validation)
 }
 
-fn validate_title_body(title: &str, body: &str) -> Result<(), AppError> {
+fn validate_title_body(who: &str, title: &str, body: &str) -> Result<(), AppError> {
     let title_len = title.chars().count();
     if title_len == 0 {
-        return Err(AppError::Validation("title must not be empty".to_string()));
+        return Err(AppError::Validation(format!(
+            "{who}: the title is empty; provide a non-empty title"
+        )));
     }
     if title_len > TITLE_MAX_CHARS {
         return Err(AppError::Validation(format!(
-            "title exceeds {} characters",
-            TITLE_MAX_CHARS
+            "{who}: the title has {title_len} characters; the limit is {TITLE_MAX_CHARS}. Shorten the title"
         )));
     }
     if body.len() > BODY_MAX_BYTES {
         return Err(AppError::Validation(format!(
-            "body exceeds {} bytes",
-            BODY_MAX_BYTES
+            "{who}: the body has {} bytes; the limit is {BODY_MAX_BYTES}. Trim the body",
+            body.len()
         )));
     }
     Ok(())
 }
 
-fn validate_rules(body: &str) -> Result<(), AppError> {
+fn validate_rules(who: &str, body: &str) -> Result<(), AppError> {
     if body.len() > RULES_MAX_BYTES {
         return Err(AppError::Validation(format!(
-            "rules exceed {} bytes",
-            RULES_MAX_BYTES
+            "{who}: the shared rules have {} bytes; the limit is {RULES_MAX_BYTES}. Trim the rules",
+            body.len()
         )));
     }
     Ok(())
@@ -623,13 +671,17 @@ fn maybe_precommit_fail(_operation: &str) -> Result<(), AppError> {
         fs::write(marker, b"ready")?;
     }
     if let Ok(raw) = std::env::var("TASKS_HOLD_PRECOMMIT_MS") {
-        let milliseconds = raw
-            .parse::<u64>()
-            .map_err(|_| AppError::Usage("invalid TASKS_HOLD_PRECOMMIT_MS".to_string()))?;
+        let milliseconds = raw.parse::<u64>().map_err(|error| {
+            AppError::Usage(format!(
+                "{_operation}: invalid TASKS_HOLD_PRECOMMIT_MS value '{raw}': {error}; set it to a whole number of milliseconds"
+            ))
+        })?;
         std::thread::sleep(Duration::from_millis(milliseconds));
     }
     if std::env::var("TASKS_PRECOMMIT_FAIL").is_ok() {
-        return Err(AppError::Usage("injected precommit failure".to_string()));
+        return Err(AppError::Usage(format!(
+            "{_operation}: injected precommit failure (TASKS_PRECOMMIT_FAIL is set); unset it to run the operation for real"
+        )));
     }
     Ok(())
 }
@@ -651,26 +703,29 @@ fn validate_backup(
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
         return Err(AppError::Database(format!(
-            "backup quick_check returned {quick_check}"
+            "backup {} failed PRAGMA quick_check: {quick_check}; the file is corrupt, take a new backup",
+            path.display()
         )));
     }
     let mut foreign_rows = conn.prepare("PRAGMA foreign_key_check")?;
     if foreign_rows.query([])?.next()?.is_some() {
-        return Err(AppError::Database(
-            "backup foreign_key_check reported violations".to_string(),
-        ));
+        return Err(AppError::Database(format!(
+            "backup {} failed PRAGMA foreign_key_check: it contains foreign-key violations; take a new backup",
+            path.display()
+        )));
     }
     let schema = schema_version(&conn)?;
     if let Some(expected_schema) = expected_schema {
         if schema != expected_schema {
             return Err(AppError::Database(format!(
-                "backup schema {schema} does not match expected {expected_schema}"
+                "backup {} has schema version {schema}; expected {expected_schema}",
+                path.display()
             )));
         }
     }
     if let Some(expected_project) = expected_project {
         if expected_schema == Some(CURRENT_SCHEMA_VERSION) {
-            validate_current_schema(&conn, expected_project)?;
+            validate_current_schema(&conn, expected_project, path)?;
         } else {
             let project = conn
                 .query_row("SELECT project_id FROM project LIMIT 1", [], |row| {
@@ -678,13 +733,22 @@ fn validate_backup(
                 })
                 .optional()?
                 .ok_or_else(|| {
-                    AppError::Database("backup is missing project identity".to_string())
+                    AppError::Database(format!(
+                        "backup {} has no project row; take a new backup",
+                        path.display()
+                    ))
                 })?;
-            let actual = Uuid::parse_str(&project).map_err(|_| {
-                AppError::Database("backup has invalid project identity".to_string())
+            let actual = Uuid::parse_str(&project).map_err(|error| {
+                AppError::Database(format!(
+                    "backup {} has an invalid project id '{project}': {error}; take a new backup",
+                    path.display()
+                ))
             })?;
             if actual != *expected_project {
-                return Err(AppError::Usage("backup project mismatch".to_string()));
+                return Err(AppError::Usage(format!(
+                    "backup {} belongs to project {actual}, not {expected_project}; check the backup path",
+                    path.display()
+                )));
             }
         }
     }
@@ -699,10 +763,16 @@ fn remove_backup_sidecars(path: &Path) -> Result<(), AppError> {
         let mut sidecar_name = OsString::from(file_name);
         sidecar_name.push(suffix);
         let sidecar = path.with_file_name(sidecar_name);
-        match fs::remove_file(sidecar) {
+        match fs::remove_file(&sidecar) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(AppError::Io(error)),
+            Err(error) => {
+                return Err(AppError::io_path(
+                    "remove the backup sidecar",
+                    &sidecar,
+                    error,
+                ))
+            }
         }
     }
     Ok(())
@@ -712,7 +782,7 @@ fn remove_backup_artifacts(path: &Path) -> Result<(), AppError> {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(AppError::Io(error)),
+        Err(error) => return Err(AppError::io_path("remove the backup file", path, error)),
     }
     remove_backup_sidecars(path)
 }
@@ -727,12 +797,20 @@ fn publish_backup(
     let parent = out.parent().unwrap_or_else(|| Path::new("."));
     validate_storage_root(parent)?;
     if out.exists() {
-        return Err(AppError::Usage("destination exists".to_string()));
+        return Err(AppError::Usage(format!(
+            "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
+            out.display()
+        )));
     }
     let name = out
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| AppError::InvalidPath("backup destination has no filename".to_string()))?;
+        .ok_or_else(|| {
+            AppError::InvalidPath(format!(
+                "--out {} has no file name; pass a file path such as backup.sqlite",
+                out.display()
+            ))
+        })?;
     let temp = parent.join(format!(
         ".{name}.tasks-cli-tmp-{}-{}",
         std::process::id(),
@@ -741,7 +819,8 @@ fn publish_backup(
     let reserved = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temp)?;
+        .open(&temp)
+        .map_err(|error| AppError::io_path("create the temporary backup file", &temp, error))?;
     drop(reserved);
     let result = (|| {
         conn.backup(
@@ -754,12 +833,17 @@ fn publish_backup(
         match std::fs::hard_link(&temp, &out) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(AppError::Usage("destination exists".to_string()));
+                return Err(AppError::Usage(format!(
+                    "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
+                    out.display()
+                )));
             }
-            Err(error) => return Err(AppError::Io(error)),
+            Err(error) => return Err(AppError::io_path("publish the backup", &out, error)),
         }
         remove_backup_sidecars(&out)?;
-        Ok(std::fs::metadata(out)?.len())
+        Ok(std::fs::metadata(&out)
+            .map_err(|error| AppError::io_path("read the backup size", &out, error))?
+            .len())
     })();
     let cleanup = remove_backup_artifacts(&temp);
     match (result, cleanup) {
@@ -769,18 +853,26 @@ fn publish_backup(
     }
 }
 
+fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid), AppError> {
+    let data_root = validate_storage_root(data_root)?;
+    let db_path = data_root_project_path(&data_root, project);
+    if !db_path.is_file() {
+        return Err(AppError::NotFoundCode(format!(
+            "project {project} has no database at {}; run tasks init --root <dir> to create and bind a project, or pass an existing --project <UUID>",
+            db_path.display()
+        )));
+    }
+    let project_id = Uuid::parse_str(project).map_err(|error| {
+        AppError::Usage(format!(
+            "--project '{project}' is not a UUID ({error}); pass the UUID printed by tasks init"
+        ))
+    })?;
+    Ok((db_path, project_id))
+}
+
 impl Store {
     pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let data_root = validate_storage_root(data_root)?;
-        let db_path = data_root_project_path(&data_root, project);
-        if !db_path.is_file() {
-            return Err(AppError::NotFoundCode(format!(
-                "project database not found: {}",
-                db_path.display()
-            )));
-        }
-        let project_id = Uuid::parse_str(project)
-            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let (db_path, project_id) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -788,15 +880,17 @@ impl Store {
         let user_version = schema_version(&conn)?;
         if user_version > CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
-                "unsupported schema {user_version}"
+                "{} has schema version {user_version}, newer than this build supports ({CURRENT_SCHEMA_VERSION}); upgrade tasks-cli to a build that supports it",
+                db_path.display()
             )));
         }
         if user_version < CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
-                "schema {user_version} requires explicit migration"
+                "{} has schema version {user_version}; this build requires {CURRENT_SCHEMA_VERSION}. Run tasks migrate --project {project}.",
+                db_path.display()
             )));
         }
-        validate_current_schema(&conn, &project_id)?;
+        validate_current_schema(&conn, &project_id, &db_path)?;
         Ok(Self {
             project_id,
             db_path,
@@ -806,16 +900,7 @@ impl Store {
     }
 
     pub fn open_for_diagnostics(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let data_root = validate_storage_root(data_root)?;
-        let db_path = data_root_project_path(&data_root, project);
-        if !db_path.is_file() {
-            return Err(AppError::NotFoundCode(format!(
-                "project database not found: {}",
-                db_path.display()
-            )));
-        }
-        let project_id = Uuid::parse_str(project)
-            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let (db_path, project_id) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -829,16 +914,7 @@ impl Store {
     }
 
     pub fn open_rw(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let data_root = validate_storage_root(data_root)?;
-        let db_path = data_root_project_path(&data_root, project);
-        if !db_path.is_file() {
-            return Err(AppError::NotFoundCode(format!(
-                "project database not found: {}",
-                db_path.display()
-            )));
-        }
-        let project_id = Uuid::parse_str(project)
-            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let (db_path, project_id) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -846,15 +922,17 @@ impl Store {
         let user_version = schema_version(&conn)?;
         if user_version > CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
-                "unsupported schema {user_version}"
+                "{} has schema version {user_version}, newer than this build supports ({CURRENT_SCHEMA_VERSION}); upgrade tasks-cli to a build that supports it",
+                db_path.display()
             )));
         }
         if user_version < CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
-                "schema {user_version} requires explicit migration"
+                "{} has schema version {user_version}; this build requires {CURRENT_SCHEMA_VERSION}. Run tasks migrate --project {project}.",
+                db_path.display()
             )));
         }
-        validate_current_schema(&conn, &project_id)?;
+        validate_current_schema(&conn, &project_id, &db_path)?;
         Ok(Self {
             project_id,
             db_path,
@@ -864,16 +942,7 @@ impl Store {
     }
 
     pub fn open_for_migration(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let data_root = validate_storage_root(data_root)?;
-        let db_path = data_root_project_path(&data_root, project);
-        if !db_path.is_file() {
-            return Err(AppError::NotFoundCode(format!(
-                "project database not found: {}",
-                db_path.display()
-            )));
-        }
-        let project_id = Uuid::parse_str(project)
-            .map_err(|_| AppError::Usage("invalid project id".to_string()))?;
+        let (db_path, project_id) = project_db_path(data_root, project)?;
         let migration_lock = acquire_exclusive_lock(&db_path.with_extension("migrate.lock"))?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -881,7 +950,10 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version = schema_version(&conn)?;
         if version > CURRENT_SCHEMA_VERSION {
-            return Err(AppError::Database(format!("unsupported schema {version}")));
+            return Err(AppError::Database(format!(
+                "{} has schema version {version}, newer than this build supports ({CURRENT_SCHEMA_VERSION}); upgrade tasks-cli to a build that supports it",
+                db_path.display()
+            )));
         }
         if table_exists(&conn, "project")? {
             let existing: Option<String> = conn
@@ -891,7 +963,10 @@ impl Store {
                 .optional()?;
             if let Some(existing) = existing {
                 if existing != project {
-                    return Err(AppError::Usage("project mismatch".to_string()));
+                    return Err(AppError::Usage(format!(
+                        "{} stores project {existing}, not {project}; pass --project {existing}",
+                        db_path.display()
+                    )));
                 }
             }
         }
@@ -913,7 +988,12 @@ impl Store {
             )
             .optional()?;
         let (version, body) =
-            row.ok_or_else(|| AppError::Usage("no project metadata".to_string()))?;
+            row.ok_or_else(|| {
+                AppError::Usage(format!(
+                    "project {} has no row in its project table; the database is incomplete. Restore it from a backup, or run tasks init --root <dir> to create a new one",
+                    self.project_id
+                ))
+            })?;
         Ok(RuleRecord {
             version: version as u64,
             body,
@@ -996,7 +1076,10 @@ impl Store {
         limit: usize,
     ) -> Result<Pagination<TaskSummary>, AppError> {
         if needle.is_empty() {
-            return Err(AppError::Validation("search text required".to_string()));
+            return Err(AppError::Validation(
+                "tasks search: the search text is empty; pass a non-empty search argument"
+                    .to_string(),
+            ));
         }
         let page_size = validate_limit(limit)?;
         let fetch = page_size + 1;
@@ -1146,8 +1229,13 @@ impl Store {
                 },
             )
             .optional()?;
-        let (status_text, version, title, body) = row
-            .ok_or_else(|| AppError::NotFound(format!("task {} not found", render_task_id(id))))?;
+        let (status_text, version, title, body) = row.ok_or_else(|| {
+            AppError::NotFound(format!(
+                "task {} not found in project {}; run tasks list to see the IDs in this project",
+                render_task_id(id),
+                self.project_id
+            ))
+        })?;
         let rule = self.project_rules()?;
         Ok(TaskDetail {
             id,
@@ -1169,6 +1257,7 @@ impl Store {
         limit: usize,
         event: Option<u64>,
     ) -> Result<(Pagination<HistoryEvent>, Option<HistoryEvent>), AppError> {
+        let project_id = self.project_id;
         if let Some(event_id) = event {
             let row = self
                 .conn
@@ -1192,8 +1281,8 @@ impl Store {
                 .optional()?;
             let single = row.ok_or_else(|| {
                 AppError::NotFound(format!(
-                    "event {event_id} not found for task {}",
-                    render_task_id(task_id)
+                    "event {event_id} not found for task {} in project {project_id}; run tasks history --project {project_id} to list events",
+                    render_task_id(task_id),
                 ))
             })?;
             return Ok((
@@ -1254,7 +1343,8 @@ impl Store {
     }
 
     pub fn rules_set(&mut self, body: &str, expect_version: u64) -> Result<u64, AppError> {
-        validate_rules(body)?;
+        let who = format!("rules set in project {}", self.project_id);
+        validate_rules(&who, body)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1294,11 +1384,17 @@ impl Store {
         self.project_rules()
     }
 
-    fn ensure_task_ids_unique(items: &[ParsedTask]) -> Result<(), AppError> {
+    fn ensure_task_ids_unique_in_source(
+        source_name: &str,
+        items: &[ParsedTask],
+    ) -> Result<(), AppError> {
         let mut seen = HashSet::new();
         for t in items {
             if !seen.insert(t.id) {
-                return Err(AppError::Validation(format!("duplicate id {}", t.id)));
+                return Err(AppError::Validation(format!(
+                    "{source_name}: task ID T-{:03} appears more than once; every task ID must be unique within a file",
+                    t.id
+                )));
             }
         }
         Ok(())
@@ -1306,6 +1402,7 @@ impl Store {
 
     fn validate_task_dependencies_exist(
         conn: &Connection,
+        task_id: u64,
         deps: &[u64],
         known: &HashSet<u64>,
     ) -> Result<(), AppError> {
@@ -1320,7 +1417,7 @@ impl Store {
                 .optional()?;
             if exists.is_none() {
                 return Err(AppError::Validation(format!(
-                    "missing dependency T-{dep:03}"
+                    "T-{task_id:03} depends on T-{dep:03}, which is in neither the import sources nor this project; add that task to the file set or remove T-{dep:03} from Deps"
                 )));
             }
         }
@@ -1334,9 +1431,9 @@ impl Store {
     ) -> Result<(), AppError> {
         for dep in deps {
             if *dep == task_id {
-                return Err(AppError::Validation(
-                    "dependency cycle self-reference".to_string(),
-                ));
+                return Err(AppError::Validation(format!(
+                    "T-{task_id:03} lists itself as a dependency; remove T-{task_id:03} from its Deps"
+                )));
             }
             let query = "
                 WITH RECURSIVE chain(x) AS (
@@ -1354,8 +1451,7 @@ impl Store {
                 .optional()?;
             if found.is_some() {
                 return Err(AppError::Validation(format!(
-                    "dependency cycle via {}",
-                    render_task_id(*dep)
+                    "T-{task_id:03} cannot depend on T-{dep:03}: T-{dep:03} already depends on it directly or indirectly, so this edge would create a cycle; remove one of the edges"
                 )));
             }
         }
@@ -1383,7 +1479,8 @@ impl Store {
         status: TaskStatus,
         deps: Vec<u64>,
     ) -> Result<(u64, u64, Option<u64>), AppError> {
-        validate_title_body(title, body)?;
+        let who = format!("create in project {}", self.project_id);
+        validate_title_body(&who, title, body)?;
         let deps = normalize_dependencies(deps);
         if deps.len() > MAX_DEPENDENCIES {
             return Err(AppError::Validation(format!(
@@ -1424,7 +1521,7 @@ impl Store {
             "UPDATE project SET next_task_number = next_task_number + 1 WHERE project_id = ?1",
             [self.project_id.to_string()],
         )?;
-        Self::validate_task_dependencies_exist(&tx, &deps, &HashSet::new())?;
+        Self::validate_task_dependencies_exist(&tx, id, &deps, &HashSet::new())?;
         Self::validate_dependency_cycle(&tx, id, &deps)?;
         Self::replace_dependencies(&tx, id, &deps)?;
         let snapshot = json!({
@@ -1456,20 +1553,23 @@ impl Store {
         expect_version: u64,
         changes: TaskUpdate,
     ) -> Result<(u64, TaskStatus, u64, Option<u64>), AppError> {
+        let project_id = self.project_id;
         if changes.title.is_none()
             && changes.body.is_none()
             && changes.status.is_none()
             && changes.deps.is_none()
             && !changes.clear_deps
         {
-            return Err(AppError::Usage(
-                "update requires at least one change".to_string(),
-            ));
+            return Err(AppError::Usage(format!(
+                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps or --clear-deps (project {project_id})",
+                render_task_id(id)
+            )));
         }
         if changes.deps.is_some() && changes.clear_deps {
-            return Err(AppError::Usage(
-                "--deps and --clear-deps are mutually exclusive".to_string(),
-            ));
+            return Err(AppError::Usage(format!(
+                "update {}: --deps and --clear-deps cannot be combined; pass one of them (project {project_id})",
+                render_task_id(id)
+            )));
         }
         let requested_deps = changes.deps.clone().map(normalize_dependencies);
         if let Some(deps) = requested_deps.as_ref() {
@@ -1522,8 +1622,12 @@ impl Store {
                 },
             )
             .optional()?;
-        let current = current
-            .ok_or_else(|| AppError::NotFound(format!("task {} not found", render_task_id(id))))?;
+        let current = current.ok_or_else(|| {
+            AppError::NotFound(format!(
+                "task {} not found in project {project_id}; run tasks list to see the IDs in this project",
+                render_task_id(id)
+            ))
+        })?;
         let (cur_title, cur_body, cur_status, cur_version) = current;
         if cur_version as u64 != expect_version {
             return Err(AppError::VersionConflict {
@@ -1539,7 +1643,12 @@ impl Store {
             .map(ToString::to_string)
             .unwrap_or(cur_status.clone());
         let next_status_value = validate_status(&next_status)?;
-        validate_title_body(&next_title, &next_body)?;
+        let who = format!(
+            "update {} in project {}",
+            render_task_id(id),
+            self.project_id
+        );
+        validate_title_body(&who, &next_title, &next_body)?;
 
         let current_deps = Self::task_dependencies_from(&tx, id)?;
         let no_change = next_title == cur_title
@@ -1554,7 +1663,7 @@ impl Store {
             return Ok((id, next_status_value, cur_version as u64, None));
         }
         if let Some(replacement) = requested_deps.as_deref() {
-            Self::validate_task_dependencies_exist(&tx, replacement, &HashSet::new())?;
+            Self::validate_task_dependencies_exist(&tx, id, replacement, &HashSet::new())?;
             Self::validate_dependency_cycle(&tx, id, replacement)?;
         }
         tx.execute(
@@ -1645,7 +1754,10 @@ impl Store {
         expect_sha256: Option<&str>,
     ) -> Result<(ImportReport, bool), AppError> {
         let expected = expect_sha256.ok_or_else(|| {
-            AppError::Usage("--expect-sha256 is required with --apply".to_string())
+            AppError::Usage(
+                "import apply: --expect-sha256 is required with --apply; run without --apply to preview, or pass the sha256 printed by the preview"
+                    .to_string(),
+            )
         })?;
         let (mut reports, already) =
             self.import_apply_many(vec![parsed], &[expected.to_string()])?;
@@ -1658,9 +1770,11 @@ impl Store {
         expect_sha256: &[String],
     ) -> Result<(Vec<ImportReport>, bool), AppError> {
         if parsed.is_empty() || parsed.len() != expect_sha256.len() {
-            return Err(AppError::Usage(
-                "import apply requires one --expect-sha256 per source file".to_string(),
-            ));
+            return Err(AppError::Usage(format!(
+                "import apply: {} --file source(s) but {} --expect-sha256 value(s); pass one --expect-sha256 per --file, in the same order",
+                parsed.len(),
+                expect_sha256.len()
+            )));
         }
         let mut reports = Vec::with_capacity(parsed.len());
         let mut hashes = Vec::with_capacity(parsed.len());
@@ -1669,6 +1783,7 @@ impl Store {
             let expected = &expect_sha256[index];
             if !expected.eq_ignore_ascii_case(&actual) {
                 return Err(AppError::ShaMismatch {
+                    file: item.source_name.clone(),
                     expected: expected.clone(),
                     actual,
                 });
@@ -1706,17 +1821,19 @@ impl Store {
         }
         if !already_imported.is_empty() {
             return Err(AppError::Usage(format!(
-                "some sources were already imported: {}",
+                "import apply: these sources were already imported in an earlier run: {}; importing them again would duplicate tasks. Pass only sources that were not imported yet, or import into a fresh project",
                 already_imported.join(", ")
             )));
         }
-        let mut seen_ids = HashSet::new();
-        for task in parsed.iter().flat_map(|item| item.tasks.iter()) {
-            if !seen_ids.insert(task.id) {
-                return Err(AppError::Validation(format!(
-                    "duplicate task ID T-{0:03} across import sources",
-                    task.id
-                )));
+        let mut seen_ids: HashMap<u64, &str> = HashMap::new();
+        for item in &parsed {
+            for task in &item.tasks {
+                if let Some(previous) = seen_ids.insert(task.id, &item.source_name) {
+                    return Err(AppError::Validation(format!(
+                        "duplicate task ID T-{:03}: {} and {} both define it; task IDs must be unique across the whole file set",
+                        task.id, previous, item.source_name
+                    )));
+                }
             }
         }
         let tx = self
@@ -1724,9 +1841,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let task_rows: i64 = tx.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
         if task_rows > 0 {
-            return Err(AppError::Usage(
-                "import requires empty task table".to_string(),
-            ));
+            return Err(AppError::Usage(format!(
+                "import apply requires an empty store: project {} already has {task_rows} task(s); import into a new project (tasks init --root <dir>) or remove the existing tasks",
+                self.project_id
+            )));
         }
         let existing_rules = tx.query_row(
             "SELECT COUNT(*) FROM project WHERE TRIM(rules_markdown) != '' OR rules_version > 1",
@@ -1734,12 +1852,13 @@ impl Store {
             |r| r.get::<_, i64>(0),
         )?;
         if existing_rules > 0 {
-            return Err(AppError::Usage(
-                "import requires empty shared rules".to_string(),
-            ));
+            return Err(AppError::Usage(format!(
+                "import apply requires empty shared rules: project {} already has rules; clear them before importing, or import into a new project",
+                self.project_id
+            )));
         }
         for item in &parsed {
-            Self::ensure_task_ids_unique(&item.tasks)?;
+            Self::ensure_task_ids_unique_in_source(&item.source_name, &item.tasks)?;
         }
         let known = parsed
             .iter()
@@ -1752,7 +1871,11 @@ impl Store {
                 if task.id > max_id {
                     max_id = task.id;
                 }
-                validate_title_body(&task.title, &task.body)?;
+                let who = format!(
+                    "import {}:{} task T-{:03} in project {}",
+                    item.source_name, task.heading_line, task.id, self.project_id
+                );
+                validate_title_body(&who, &task.title, &task.body)?;
                 tx.execute(
                     "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
                      VALUES (?1,?2,?3,?4,1,?5,?5)",
@@ -1768,7 +1891,7 @@ impl Store {
         }
         for item in &parsed {
             for task in &item.tasks {
-                Self::validate_task_dependencies_exist(&tx, &task.deps, &known)?;
+                Self::validate_task_dependencies_exist(&tx, task.id, &task.deps, &known)?;
                 Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
                 Self::replace_dependencies(&tx, task.id, &task.deps)?;
             }
@@ -1846,7 +1969,10 @@ impl Store {
 
     pub fn export_markdown(&mut self, out: &Path) -> Result<usize, AppError> {
         if out.exists() {
-            return Err(AppError::Usage("destination exists".to_string()));
+            return Err(AppError::Usage(format!(
+                "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
+                out.display()
+            )));
         }
         let rules = self.project_rules()?;
         let mut stmt = self
@@ -1913,7 +2039,8 @@ impl Store {
                 }
             }
         }
-        std::fs::write(out, out_text)?;
+        std::fs::write(out, out_text)
+            .map_err(|error| AppError::io_path("write export", out, error))?;
         Ok(count)
     }
 
@@ -1948,11 +2075,12 @@ impl Store {
         let current = schema_version(&self.conn)?;
         if current > CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
-                "unsupported newer schema {current}"
+                "{} has schema version {current}, newer than this build supports ({CURRENT_SCHEMA_VERSION}); upgrade tasks-cli to a build that supports it",
+                self.db_path.display()
             )));
         }
         if current == CURRENT_SCHEMA_VERSION {
-            validate_current_schema(&self.conn, &self.project_id)?;
+            validate_current_schema(&self.conn, &self.project_id, &self.db_path)?;
             return Ok((current, current, None));
         }
         let pre_upgrade = self.migration_backup_path(current);
@@ -1968,13 +2096,16 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let locked_version = schema_version(&tx)?;
         if locked_version != current {
-            return Err(AppError::Database(
-                "schema changed while migration was preparing".to_string(),
-            ));
+            return Err(AppError::Database(format!(
+                "{} changed schema from version {current} to {locked_version} while migration was preparing; retry the migration",
+                self.db_path.display()
+            )));
         }
-        migrate_v0_to_v1(&tx, &self.project_id)?;
+        migrate_v0_to_v1(&tx, &self.project_id, &self.db_path).map_err(|error| {
+            error.context(&format!("cannot migrate {}", self.db_path.display()))
+        })?;
         tx.commit()?;
-        validate_current_schema(&self.conn, &self.project_id)?;
+        validate_current_schema(&self.conn, &self.project_id, &self.db_path)?;
         Ok((current, CURRENT_SCHEMA_VERSION, Some(pre_upgrade)))
     }
 
@@ -1984,14 +2115,16 @@ impl Store {
             .query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if quick_check != "ok" {
             return Err(AppError::Database(format!(
-                "quick_check returned {quick_check}"
+                "{} failed PRAGMA quick_check: {quick_check}; the database is corrupt. Restore it from a backup",
+                self.db_path.display()
             )));
         }
         let mut foreign_rows = self.conn.prepare("PRAGMA foreign_key_check")?;
         if foreign_rows.query([])?.next()?.is_some() {
-            return Err(AppError::Database(
-                "foreign_key_check reported violations".to_string(),
-            ));
+            return Err(AppError::Database(format!(
+                "{} failed PRAGMA foreign_key_check: it contains foreign-key violations. Restore it from a backup",
+                self.db_path.display()
+            )));
         }
         let project_id = if table_exists(&self.conn, "project")? {
             let stored: Option<String> = self
@@ -2001,11 +2134,18 @@ impl Store {
                 })
                 .optional()?;
             if let Some(stored) = stored {
-                let actual = Uuid::parse_str(&stored).map_err(|_| {
-                    AppError::Database("doctor found invalid project identity".to_string())
+                let actual = Uuid::parse_str(&stored).map_err(|error| {
+                    AppError::Database(format!(
+                        "{} has an invalid project id '{stored}': {error}; restore the database from a backup",
+                        self.db_path.display()
+                    ))
                 })?;
                 if actual != self.project_id {
-                    return Err(AppError::Usage("project mismatch".to_string()));
+                    return Err(AppError::Usage(format!(
+                        "{} belongs to project {actual}, not {}; pass --project {actual}",
+                        self.db_path.display(),
+                        self.project_id
+                    )));
                 }
                 stored
             } else {
@@ -2036,10 +2176,10 @@ mod tests {
 
     #[test]
     fn validation_enforces_title_and_body_limits() {
-        assert!(validate_title_body("ok", "body").is_ok());
-        assert!(validate_title_body("", "body").is_err());
-        assert!(validate_title_body(&"x".repeat(TITLE_MAX_CHARS + 1), "body").is_err());
-        assert!(validate_title_body("ok", &"x".repeat(BODY_MAX_BYTES + 1)).is_err());
+        assert!(validate_title_body("test", "ok", "body").is_ok());
+        assert!(validate_title_body("test", "", "body").is_err());
+        assert!(validate_title_body("test", &"x".repeat(TITLE_MAX_CHARS + 1), "body").is_err());
+        assert!(validate_title_body("test", "ok", &"x".repeat(BODY_MAX_BYTES + 1)).is_err());
         assert!(validate_status("in-progress").is_ok());
         assert!(validate_status("unknown").is_err());
     }
