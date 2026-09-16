@@ -124,7 +124,7 @@ Evidence:
 - Linux x64 target/linux/release/tasks
   - Size: 3,992,160 bytes
   - SHA-256: A7593D59A328A3B003B7F1E20DBCA2984D878AC48D2DD396C0CA9C68F8988F36
-- The extension-less WSL-built binaries left in the shared Windows target directories by the earlier unscoped WSL run were removed: target/release/tasks was already absent, and target/release/deps/tasks-42c0fe6702b2e502, target/debug/tasks, and target/debug/deps/tasks-9b4c447236f414f1 were deleted. The recorded artifacts above are unchanged by that cleanup.
+- The WSL-built leftovers in the shared Windows target directories from the earlier unscoped WSL run were removed. The first pass deleted target/release/deps/tasks-42c0fe6702b2e502, target/debug/tasks, and target/debug/deps/tasks-9b4c447236f414f1 (target/release/tasks was already absent); a follow-up sweep removed the remaining 72 extension-less Linux ELF files under target/debug and target/release (606,224,144 bytes) plus 1,348 extension-carrying Linux objects (1,342 .o and 6 .so, 103,867,552 bytes). Inventory, removal script, post-removal checks, and summary: target/evidence/cleanup-unscoped-wsl-leak/. The recorded artifacts above are unchanged by these cleanups.
 
 ## Current-binary PFM and DelphiAiKit trials
 
