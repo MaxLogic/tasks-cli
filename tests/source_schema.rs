@@ -206,3 +206,83 @@ fn create_task_schema_blocks_nonconforming_deps_before_apply() {
     );
     assert_eq!(fs::read_to_string(&ledger).expect("source intact"), source);
 }
+
+#[test]
+fn create_task_schema_reports_every_cycle_and_unknown_id_in_one_run() {
+    let source = "## ready\n### T-1 Alpha\nDeps: T-99\n### T-2 Beta\nDeps: T-3\n### T-3 Gamma\nDeps: T-2\n### T-8 Eta\nDeps: T-9\n### T-9 Theta\nDeps: T-8\nbody\n";
+    let work = tempfile::tempdir().expect("work");
+    let root = work.path().join("project");
+    fs::create_dir_all(&root).expect("root");
+    let ledger = root.join("TASKS.md");
+    fs::write(&ledger, source).expect("ledger");
+
+    let init = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "init",
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert!(init.status.success());
+    let project = text_of(&init)
+        .lines()
+        .find_map(|line| line.strip_prefix("project_id: ").map(str::to_string))
+        .expect("project id");
+
+    let preview = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "--project",
+        &project,
+        "import",
+        "--file",
+        ledger.to_str().unwrap(),
+        "--source-schema",
+        "create-task",
+    ]);
+    let preview_text = text_of(&preview);
+    assert!(preview.status.success(), "{preview_text}");
+    assert!(
+        preview_text.contains(
+            "problems: 3 problem(s): 0 nonconforming Deps, 1 unknown IDs, 2 cycle groups, 0 other"
+        ),
+        "{preview_text}"
+    );
+    assert!(
+        preview_text.contains("remove T-099 from Deps; no such task exists"),
+        "{preview_text}"
+    );
+    let hash = preview_text
+        .lines()
+        .find_map(|line| line.strip_prefix("source_sha256: "))
+        .expect("hash")
+        .to_string();
+
+    let apply = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "--project",
+        &project,
+        "import",
+        "--file",
+        ledger.to_str().unwrap(),
+        "--source-schema",
+        "create-task",
+        "--apply",
+        "--expect-sha256",
+        &hash,
+    ]);
+    assert_eq!(
+        apply.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&apply.stdout)
+    );
+    let error = String::from_utf8_lossy(&apply.stderr).to_string();
+    assert!(error.contains("import blocked by 3 problem(s)"), "{error}");
+    assert!(error.contains("T-002 -> T-003"), "{error}");
+    assert!(error.contains("T-008 -> T-009"), "{error}");
+    assert!(error.contains("T-099"), "{error}");
+    let mut store = Store::open_readonly(work.path(), &project).expect("read store");
+    assert!(store.show_task("T-1").is_err());
+}
