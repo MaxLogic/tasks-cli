@@ -2,6 +2,12 @@ use crate::model::{HistoryEvent, ImportReport, RuleRecord, TaskDetail, TaskSumma
 use serde::Serialize;
 
 #[derive(Serialize)]
+pub struct ImportFileReport {
+    pub path: String,
+    pub report: ImportReport,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CommandPayload {
     Init {
@@ -51,6 +57,11 @@ pub enum CommandPayload {
         already_imported: bool,
         applied: bool,
     },
+    ImportBatch {
+        files: Vec<ImportFileReport>,
+        already_imported: bool,
+        applied: bool,
+    },
     Export {
         out: String,
         task_count: usize,
@@ -91,6 +102,71 @@ impl Envelope {
         } else {
             trimmed.to_string()
         }
+    }
+
+    fn import_report_lines(report: &ImportReport) -> String {
+        let mut out = format!("tasks: {}\n", report.task_count);
+        out.push_str(&format!("rules: {}\n", report.rules.len()));
+        let duplicates = report
+            .duplicate_ids
+            .iter()
+            .map(|id| format!("T-{id:03}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push_str(&format!(
+            "duplicates: {}\n",
+            if duplicates.is_empty() {
+                "none"
+            } else {
+                &duplicates
+            }
+        ));
+        out.push_str(&format!("source_sha256: {}\n", report.source_sha256));
+        for task in &report.tasks {
+            let consumed = task.consumed_metadata.join(",");
+            let deps = task
+                .deps
+                .iter()
+                .map(|dep| format!("T-{dep:03}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(
+                "T-{0:03} {1} {2} consumed=[{3}] deps=[{4}] {5}\n",
+                task.id, task.status, task.section, consumed, deps, task.title
+            ));
+        }
+        for section in &report.sections {
+            let status = section
+                .status
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unmapped".to_string());
+            out.push_str(&format!(
+                "section: {} status={} contains_tasks={}\n",
+                section.heading, status, section.contains_tasks
+            ));
+        }
+        for range in &report.unassigned_ranges {
+            out.push_str(&format!(
+                "unassigned: {}-{} {}\n",
+                range.start_byte, range.end_byte, range.preview
+            ));
+        }
+        let ambiguous = report.ambiguous_sections.join(",");
+        out.push_str(&format!(
+            "ambiguous_sections: {}\n",
+            if ambiguous.is_empty() {
+                "none"
+            } else {
+                &ambiguous
+            }
+        ));
+        out.push_str(&format!(
+            "has_unknown_content: {}\n",
+            report.has_unknown_content
+        ));
+        out.push_str(&format!("has_bom: {}\n", report.has_bom));
+        out
     }
 
     pub fn text(&self) -> String {
@@ -209,60 +285,23 @@ impl Envelope {
                 report,
                 already_imported,
                 applied,
+            } => format!(
+                "file: {path}\napplied: {applied}\nalready_imported: {already_imported}\n{}",
+                Self::import_report_lines(report)
+            ),
+            CommandPayload::ImportBatch {
+                files,
+                already_imported,
+                applied,
             } => {
-                let mut out = format!("file: {path}\n");
-                out.push_str(&format!("applied: {applied}\n"));
-                out.push_str(&format!("already_imported: {already_imported}\n"));
-                out.push_str(&format!("tasks: {}\n", report.task_count));
-                out.push_str(&format!("rules: {}\n", report.rules.len()));
-                let duplicates = report
-                    .duplicate_ids
-                    .iter()
-                    .map(|id| format!("T-{id:03}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                out.push_str(&format!(
-                    "duplicates: {}\n",
-                    if duplicates.is_empty() { "none" } else { &duplicates }
-                ));
-                out.push_str(&format!("source_sha256: {}\n", report.source_sha256));
-                for task in &report.tasks {
-                    let consumed = task.consumed_metadata.join(",");
-                    let deps = task
-                        .deps
-                        .iter()
-                        .map(|dep| format!("T-{dep:03}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    out.push_str(&format!(
-                        "T-{0:03} {1} {2} consumed=[{3}] deps=[{4}] {5}\n",
-                        task.id, task.status, task.section, consumed, deps, task.title
-                    ));
+                let mut out = format!(
+                    "files: {}\napplied: {applied}\nalready_imported: {already_imported}\n",
+                    files.len()
+                );
+                for entry in files {
+                    out.push_str(&format!("file: {}\n", entry.path));
+                    out.push_str(&Self::import_report_lines(&entry.report));
                 }
-                for section in &report.sections {
-                    let status = section
-                        .status
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "unmapped".to_string());
-                    out.push_str(&format!(
-                        "section: {} status={} contains_tasks={}\n",
-                        section.heading, status, section.contains_tasks
-                    ));
-                }
-                for range in &report.unassigned_ranges {
-                    out.push_str(&format!(
-                        "unassigned: {}-{} {}\n",
-                        range.start_byte, range.end_byte, range.preview
-                    ));
-                }
-                let ambiguous = report.ambiguous_sections.join(",");
-                out.push_str(&format!(
-                    "ambiguous_sections: {}\n",
-                    if ambiguous.is_empty() { "none" } else { &ambiguous }
-                ));
-                out.push_str(&format!("has_unknown_content: {}\n", report.has_unknown_content));
-                out.push_str(&format!("has_bom: {}\n", report.has_bom));
                 out
             }
             CommandPayload::Export { out, task_count } => {

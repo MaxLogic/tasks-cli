@@ -5,8 +5,8 @@ use tasks_cli::cli::{Cli, Command, OutputFormat, ParsedDeps, RulesCommand};
 use tasks_cli::error::AppError;
 use tasks_cli::interop;
 use tasks_cli::markdown;
-use tasks_cli::model::{parse_task_id, TaskStatus, TaskUpdate};
-use tasks_cli::output::{CommandPayload, Envelope};
+use tasks_cli::model::{parse_task_id, ImportReport, TaskStatus, TaskUpdate};
+use tasks_cli::output::{CommandPayload, Envelope, ImportFileReport};
 use tasks_cli::registry;
 use tasks_cli::store::Store;
 
@@ -50,6 +50,38 @@ fn envelope(project_id: Option<String>, data: CommandPayload, format: OutputForm
     match format {
         OutputFormat::Json => println!("{}", value.json()),
         OutputFormat::Text => print!("{}", value.text()),
+    }
+}
+
+fn import_payload(
+    files: &[PathBuf],
+    reports: Vec<ImportReport>,
+    already_imported: bool,
+    applied: bool,
+) -> CommandPayload {
+    let mut reports = reports.into_iter();
+    if files.len() == 1 {
+        if let Some(report) = reports.next() {
+            return CommandPayload::Import {
+                path: files[0].display().to_string(),
+                report,
+                already_imported,
+                applied,
+            };
+        }
+    }
+    let entries = files
+        .iter()
+        .zip(reports)
+        .map(|(path, report)| ImportFileReport {
+            path: path.display().to_string(),
+            report,
+        })
+        .collect();
+    CommandPayload::ImportBatch {
+        files: entries,
+        already_imported,
+        applied,
     }
 }
 
@@ -285,72 +317,84 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     );
                 }
                 Command::Import {
-                    file,
+                    file: files,
                     apply,
                     expect_sha256,
                     map_file,
                     source_schema,
                 } => {
-                    let bytes = read_input(&file)?;
-                    let parsed = markdown::parse_with_schema(
-                        file.display().to_string(),
-                        bytes,
-                        map_file.as_deref(),
-                        source_schema,
-                    )?;
-                    if let Some(expected) = expect_sha256.as_deref() {
-                        if !expected.eq_ignore_ascii_case(&parsed.source_hash) {
-                            return Err(AppError::ShaMismatch {
-                                expected: expected.to_string(),
-                                actual: parsed.source_hash,
-                            });
-                        }
+                    if !expect_sha256.is_empty() && expect_sha256.len() != files.len() {
+                        return Err(AppError::Usage(
+                            "one --expect-sha256 is required per --file, in the same order"
+                                .to_string(),
+                        ));
                     }
-                    let report = if apply {
-                        let expected = expect_sha256.as_deref().ok_or_else(|| {
-                            AppError::Usage("--expect-sha256 is required with --apply".to_string())
-                        })?;
-                        if file == Path::new("-") {
-                            return Err(AppError::Usage(
-                                "--apply requires a re-readable import file".to_string(),
-                            ));
-                        }
-                        let reread = read_input(&file)?;
-                        let reparsed = markdown::parse_with_schema(
-                            file.display().to_string(),
-                            reread,
+                    if files.len() > 1 && files.iter().any(|path| path.as_path() == Path::new("-"))
+                    {
+                        return Err(AppError::Usage(
+                            "--file - (stdin) supports a single source file".to_string(),
+                        ));
+                    }
+                    let mut parsed = Vec::with_capacity(files.len());
+                    for (index, path) in files.iter().enumerate() {
+                        let bytes = read_input(path)?;
+                        let item = markdown::parse_with_schema(
+                            path.display().to_string(),
+                            bytes,
                             map_file.as_deref(),
                             source_schema,
                         )?;
-                        if !expected.eq_ignore_ascii_case(&reparsed.source_hash) {
-                            return Err(AppError::ShaMismatch {
-                                expected: expected.to_string(),
-                                actual: reparsed.source_hash,
-                            });
+                        if let Some(expected) = expect_sha256.get(index) {
+                            if !expected.eq_ignore_ascii_case(&item.source_hash) {
+                                return Err(AppError::ShaMismatch {
+                                    expected: expected.clone(),
+                                    actual: item.source_hash,
+                                });
+                            }
                         }
-                        let (report, already) = store.import_apply(reparsed, Some(expected))?;
+                        parsed.push(item);
+                    }
+                    if apply {
+                        if expect_sha256.len() != files.len() {
+                            return Err(AppError::Usage(
+                                "--apply requires one --expect-sha256 per --file".to_string(),
+                            ));
+                        }
+                        if files.iter().any(|path| path.as_path() == Path::new("-")) {
+                            return Err(AppError::Usage(
+                                "--apply requires re-readable import files".to_string(),
+                            ));
+                        }
+                        let mut reparsed = Vec::with_capacity(files.len());
+                        for (index, path) in files.iter().enumerate() {
+                            let reread = read_input(path)?;
+                            let item = markdown::parse_with_schema(
+                                path.display().to_string(),
+                                reread,
+                                map_file.as_deref(),
+                                source_schema,
+                            )?;
+                            if !expect_sha256[index].eq_ignore_ascii_case(&item.source_hash) {
+                                return Err(AppError::ShaMismatch {
+                                    expected: expect_sha256[index].clone(),
+                                    actual: item.source_hash,
+                                });
+                            }
+                            reparsed.push(item);
+                        }
+                        let (reports, already) =
+                            store.import_apply_many(reparsed, &expect_sha256)?;
                         envelope(
                             Some(project_id),
-                            CommandPayload::Import {
-                                path: file.display().to_string(),
-                                report,
-                                already_imported: already,
-                                applied: true,
-                            },
+                            import_payload(&files, reports, already, true),
                             cli.format,
                         );
                         return Ok(());
-                    } else {
-                        store.import_preview(parsed)
-                    };
+                    }
+                    let reports = store.import_preview_many(parsed);
                     envelope(
                         Some(project_id),
-                        CommandPayload::Import {
-                            path: file.display().to_string(),
-                            report,
-                            already_imported: false,
-                            applied: false,
-                        },
+                        import_payload(&files, reports, false, false),
                         cli.format,
                     );
                 }
