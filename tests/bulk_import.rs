@@ -1082,3 +1082,65 @@ fn default_status_resolution_of_a_task_section_is_a_warning() {
         "a section that holds no tasks must not warn: {prose:#?}"
     );
 }
+
+#[test]
+fn create_task_ledger_markup_is_structural_and_arbitrary_prose_still_blocks() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("markup").join("TASKS.md"),
+        "# Project notes\nArchived from TASKS.md.\nTask schema: 1\nNext task ID: T-2\n## backlog\n### T-1 Alpha\nbody one\n",
+    );
+    write(
+        &corpus.join("prose").join("TASKS.md"),
+        "## backlog\nsome prose line that is not ledger markup\n### T-1 Beta\nbody two\n",
+    );
+    let map = root.join("map.json");
+    write(&map, "{}");
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let items = candidates(&report_dir);
+    let markup = candidate(&items, "markup");
+    assert_eq!(markup["bucket"], "recognized", "{markup:#?}");
+    assert!(
+        markup["reasons"].as_array().expect("reasons").is_empty(),
+        "{markup:#?}"
+    );
+    let prose = candidate(&items, "prose");
+    assert_eq!(prose["bucket"], "unrecognized", "{prose:#?}");
+    assert!(
+        prose["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unassigned content"),
+        "{prose:#?}"
+    );
+    assert!(
+        prose["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("some prose line that is not ledger markup"),
+        "{prose:#?}"
+    );
+}

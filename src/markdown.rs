@@ -918,6 +918,8 @@ pub(crate) fn parse_with_map(
             || structural.starts_with("Project:")
             || structural.starts_with("Next task ID:")
             || structural.starts_with("> Snapshot export")
+            || structural.starts_with("Archived from TASKS.md.")
+            || structural.starts_with("Task schema: 1")
         {
             assignments[index] = Assignment::Structural;
         }
@@ -1028,6 +1030,21 @@ mod tests {
         let input = b"## backlog\n### T-1 Real\nBody:\nbody\n## Rules\nrule\n## ready\nunknown before task\n### T-2 Next\nBody:\nnext\n".to_vec();
         let parsed = parse("accounting.md", input, None).unwrap();
         assert_eq!(parsed.rules, "rule");
+        assert_eq!(parsed.unassigned_ranges.len(), 1);
+        assert!(parsed.has_unknown_content);
+    }
+
+    #[test]
+    fn create_task_ledger_markup_is_structural_but_unassigned_prose_still_blocks() {
+        let input =
+            b"# TASKS\nArchived from TASKS.md.\nTask schema: 1\nNext task ID: T-2\n## backlog\n### T-1 A\nbody\n"
+                .to_vec();
+        let parsed = parse("markup.md", input, None).unwrap();
+        assert!(parsed.unassigned_ranges.is_empty());
+        assert!(!parsed.has_unknown_content);
+
+        let prose = b"## backlog\nunassigned prose\n### T-1 A\nbody\n".to_vec();
+        let parsed = parse("prose.md", prose, None).unwrap();
         assert_eq!(parsed.unassigned_ranges.len(), 1);
         assert!(parsed.has_unknown_content);
     }
