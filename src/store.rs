@@ -1644,6 +1644,13 @@ impl Store {
                 });
             }
             let report = Self::import_report(item);
+            if !item.deps_problems.is_empty() {
+                return Err(AppError::Validation(format!(
+                    "import of '{}' has {} Deps problem(s); fix the source before importing it",
+                    item.source_name,
+                    item.deps_problems.len()
+                )));
+            }
             if !report.duplicate_ids.is_empty()
                 || !report.unmapped_sections.is_empty()
                 || !report.ambiguous_sections.is_empty()

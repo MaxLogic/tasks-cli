@@ -1,6 +1,7 @@
 use crate::error::AppError;
 use crate::markdown::{self, ParsedImport, SectionMap};
-use crate::model::{ImportReport, SourceSchema};
+use crate::model::{ImportProblem, ImportReport, ProblemCounts, SourceSchema};
+use crate::problems;
 use crate::registry;
 use crate::store::Store;
 use regex::Regex;
@@ -125,6 +126,8 @@ pub struct BulkCandidate {
     pub bucket: String,
     pub reason: Option<String>,
     pub reasons: Vec<String>,
+    pub problems: Vec<ImportProblem>,
+    pub problem_counts: ProblemCounts,
     pub warnings: Vec<String>,
     pub project_id: String,
     pub project_root: String,
@@ -184,6 +187,8 @@ struct CandidateOutcome {
     bucket: String,
     reason: Option<String>,
     reasons: Vec<String>,
+    problems: Vec<ImportProblem>,
+    counts: ProblemCounts,
     warnings: Vec<String>,
     files: Vec<BulkFileRecord>,
     task_count: usize,
@@ -281,6 +286,8 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
             bucket: outcome.bucket,
             reason: outcome.reason,
             reasons: outcome.reasons,
+            problems: outcome.problems,
+            problem_counts: outcome.counts,
             warnings: outcome.warnings,
             project_id,
             project_root: dir.display().to_string(),
@@ -516,6 +523,10 @@ fn render_summary(
             candidate.relative_directory,
             candidate.bucket
         ));
+        out.push_str(&format!("- {}\n", candidate.problem_counts.line()));
+        for problem in &candidate.problems {
+            out.push_str(&format!("- problem: {}\n", problem.message));
+        }
         out.push_str(&format!("- directory: {}\n", candidate.directory));
         out.push_str(&format!("- project UUID: {}\n", candidate.project_id));
         out.push_str(&format!("- tasks: {}\n", candidate.task_count));
@@ -637,6 +648,14 @@ fn render_unmigrated(summary: &BulkSummary, candidates: &[BulkCandidate]) -> Str
                     "- {}\n\n",
                     candidate.reason.as_deref().unwrap_or("excluded")
                 ));
+                continue;
+            }
+            if !candidate.problems.is_empty() {
+                out.push_str(&format!("- {}\n", candidate.problem_counts.line()));
+                for problem in &candidate.problems {
+                    out.push_str(&format!("  - {}\n", problem.message));
+                }
+                out.push('\n');
                 continue;
             }
             let reasons = if candidate.reasons.is_empty() {
@@ -910,21 +929,6 @@ fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
-fn line_number(bytes: &[u8], offset: usize) -> usize {
-    bytes[..offset.min(bytes.len())]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
-        + 1
-}
-
-fn join_ids(ids: &[u64]) -> String {
-    ids.iter()
-        .map(|id| format!("T-{id:03}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn export_slug(relative_directory: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -958,6 +962,8 @@ fn process_candidate(
         bucket: BUCKET_RECOGNIZED.to_string(),
         reason: None,
         reasons: Vec::new(),
+        problems: Vec::new(),
+        counts: ProblemCounts::default(),
         warnings: Vec::new(),
         files: Vec::new(),
         task_count: 0,
@@ -1048,6 +1054,9 @@ fn process_candidate(
             }
             Err(error) => {
                 blockers.push(format!("{}: {error}", item.relative));
+                outcome
+                    .problems
+                    .push(ImportProblem::other(format!("{}: {error}", item.relative)));
                 outcome.files.push(BulkFileRecord {
                     path: item.source.path.display().to_string(),
                     relative_path: item.relative.clone(),
@@ -1065,7 +1074,15 @@ fn process_candidate(
             .into_iter()
             .filter_map(|item| item.parsed.ok().map(|parsed| (item.relative, parsed))),
     );
-    blockers.extend(collect_blockers(&parsed_set));
+    let refs: Vec<&ParsedImport> = parsed_set.iter().map(|(_, parsed)| parsed).collect();
+    outcome.problems.extend(problems::analyze(&refs));
+    outcome.counts = ProblemCounts::of(&outcome.problems);
+    blockers.extend(
+        outcome
+            .problems
+            .iter()
+            .map(|problem| problem.message.clone()),
+    );
     if !blockers.is_empty() {
         outcome.bucket = BUCKET_UNRECOGNIZED.to_string();
         outcome.reasons = blockers.clone();
@@ -1362,125 +1379,6 @@ fn sorted_deps(deps: &[u64]) -> Vec<u64> {
     sorted.sort_unstable();
     sorted.dedup();
     sorted
-}
-
-fn collect_blockers(parsed_set: &[(String, ParsedImport)]) -> Vec<String> {
-    let mut blockers = Vec::new();
-    for (name, parsed) in parsed_set {
-        if !parsed.duplicate_ids.is_empty() {
-            blockers.push(format!(
-                "{name}: duplicate task IDs {}",
-                join_ids(&parsed.duplicate_ids)
-            ));
-        }
-        for section in &parsed.unmapped_sections {
-            blockers.push(format!(
-                "{name}: section '{section}' holds tasks but has no status mapping; expected a literal sections entry, a matching section_pattern, or default_status in the map file"
-            ));
-        }
-        if !parsed.ambiguous_sections.is_empty() {
-            blockers.push(format!(
-                "{name}: ambiguous sections {}",
-                parsed.ambiguous_sections.join(", ")
-            ));
-        }
-        for range in &parsed.unassigned_ranges {
-            blockers.push(format!(
-                "{name}: unassigned content at line {}: {}",
-                line_number(&parsed.source, range.start_byte),
-                range.preview.trim()
-            ));
-        }
-        if parsed.has_unknown_content && parsed.unassigned_ranges.is_empty() {
-            blockers.push(format!("{name}: unassigned source content"));
-        }
-    }
-    let mut owner: HashMap<u64, &str> = HashMap::new();
-    for (name, parsed) in parsed_set {
-        for task in &parsed.tasks {
-            match owner.get(&task.id) {
-                Some(first) if *first != name.as_str() => blockers.push(format!(
-                    "{name}: task T-{:03} is also defined in {first}",
-                    task.id
-                )),
-                Some(_) => {}
-                None => {
-                    owner.insert(task.id, name);
-                }
-            }
-        }
-    }
-    let known: HashSet<u64> = owner.keys().copied().collect();
-    let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
-    for (name, parsed) in parsed_set {
-        for task in &parsed.tasks {
-            for dep in &task.deps {
-                if *dep == task.id {
-                    blockers.push(format!("{name}: task T-{:03} depends on itself", task.id));
-                } else if !known.contains(dep) {
-                    blockers.push(format!(
-                        "{name}: task T-{:03} depends on T-{:03}, which is not present in this project's ledgers",
-                        task.id, dep
-                    ));
-                }
-            }
-            graph.insert(task.id, task.deps.clone());
-        }
-    }
-    if blockers.is_empty() {
-        if let Some(cycle) = find_dependency_cycle(&graph) {
-            blockers.push(format!(
-                "dependency cycle: {}",
-                cycle
-                    .iter()
-                    .map(|id| format!("T-{id:03}"))
-                    .collect::<Vec<_>>()
-                    .join(" -> ")
-            ));
-        }
-    }
-    blockers
-}
-
-fn find_dependency_cycle(graph: &HashMap<u64, Vec<u64>>) -> Option<Vec<u64>> {
-    let mut marks: HashMap<u64, u8> = HashMap::new();
-    for start in graph.keys() {
-        if marks.get(start).copied().unwrap_or(0) != 0 {
-            continue;
-        }
-        let mut stack: Vec<(u64, usize)> = vec![(*start, 0)];
-        marks.insert(*start, 1);
-        while let Some((node, position)) = stack.last().copied() {
-            let deps = graph.get(&node).map(Vec::as_slice).unwrap_or(&[]);
-            if position < deps.len() {
-                if let Some(frame) = stack.last_mut() {
-                    frame.1 += 1;
-                }
-                let dep = deps[position];
-                match marks.get(&dep).copied().unwrap_or(0) {
-                    0 => {
-                        marks.insert(dep, 1);
-                        stack.push((dep, 0));
-                    }
-                    1 => {
-                        let start_of_cycle =
-                            stack.iter().position(|(id, _)| *id == dep).unwrap_or(0);
-                        let mut cycle = stack[start_of_cycle..]
-                            .iter()
-                            .map(|(id, _)| *id)
-                            .collect::<Vec<_>>();
-                        cycle.push(dep);
-                        return Some(cycle);
-                    }
-                    _ => {}
-                }
-            } else {
-                marks.insert(node, 2);
-                stack.pop();
-            }
-        }
-    }
-    None
 }
 
 fn move_file(source: &Path, destination: &Path) -> Result<(), AppError> {

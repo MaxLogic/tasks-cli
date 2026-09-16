@@ -78,6 +78,86 @@ pub enum SourceSchema {
     CreateTask,
 }
 
+pub const PROBLEM_NONCONFORMING_DEPS: &str = "nonconforming-deps";
+pub const PROBLEM_UNKNOWN_DEPENDENCY: &str = "unknown-dependency";
+pub const PROBLEM_SELF_DEPENDENCY: &str = "self-dependency";
+pub const PROBLEM_CYCLE: &str = "cycle";
+pub const PROBLEM_OTHER: &str = "other";
+
+/// One blocking problem found while previewing an import. Every problem is
+/// reported; a run never stops at the first one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportProblem {
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Always serialized: `[]` says a clean line would keep nothing, which is
+    /// different from a problem that has no keepable-ID field at all.
+    #[serde(default)]
+    pub keepable_ids: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+impl ImportProblem {
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            kind: PROBLEM_OTHER.to_string(),
+            message: message.into(),
+            file: None,
+            line: None,
+            task_id: None,
+            value: None,
+            keepable_ids: Vec::new(),
+            group: Vec::new(),
+            fix: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProblemCounts {
+    pub total: usize,
+    pub nonconforming_deps: usize,
+    pub unknown_ids: usize,
+    pub cycle_groups: usize,
+    pub other: usize,
+}
+
+impl ProblemCounts {
+    pub fn of(problems: &[ImportProblem]) -> Self {
+        let mut counts = Self {
+            total: problems.len(),
+            ..Self::default()
+        };
+        for problem in problems {
+            match problem.kind.as_str() {
+                PROBLEM_NONCONFORMING_DEPS => counts.nonconforming_deps += 1,
+                PROBLEM_UNKNOWN_DEPENDENCY => counts.unknown_ids += 1,
+                PROBLEM_CYCLE => counts.cycle_groups += 1,
+                _ => counts.other += 1,
+            }
+        }
+        counts
+    }
+
+    pub fn line(&self) -> String {
+        format!(
+            "{} problem(s): {} nonconforming Deps, {} unknown IDs, {} cycle groups, {} other",
+            self.total, self.nonconforming_deps, self.unknown_ids, self.cycle_groups, self.other
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: u64,

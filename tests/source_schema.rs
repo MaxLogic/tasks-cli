@@ -112,7 +112,7 @@ fn create_task_schema_applies_deps_additively_and_round_trips_the_body() {
 }
 
 #[test]
-fn create_task_schema_reports_unresolved_deps_instead_of_dropping_them() {
+fn create_task_schema_blocks_nonconforming_deps_before_apply() {
     let source = "## ready\n### T-1 Alpha\nOutcome:\n- ok\nDeps: `T-027`; vendor SDK\nbody\n";
     let work = tempfile::tempdir().expect("work");
     let root = work.path().join("project");
@@ -152,11 +152,19 @@ fn create_task_schema_reports_unresolved_deps_instead_of_dropping_them() {
     assert!(preview.status.success(), "{preview_text}");
     assert!(preview_text.contains("deps=[]"), "{preview_text}");
     assert!(
-        preview_text.contains("warning: ") && preview_text.contains("T-027"),
+        preview_text.contains(
+            "problems: 1 problem(s): 1 nonconforming Deps, 0 unknown IDs, 0 cycle groups, 0 other"
+        ),
         "{preview_text}"
     );
+    assert!(preview_text.contains("problem: "), "{preview_text}");
+    assert!(preview_text.contains("T-027"), "{preview_text}");
     assert!(preview_text.contains("vendor SDK"), "{preview_text}");
     assert!(preview_text.contains("line 5"), "{preview_text}");
+    assert!(
+        preview_text.contains("keep only these IDs in Deps"),
+        "{preview_text}"
+    );
     let hash = preview_text
         .lines()
         .find_map(|line| line.strip_prefix("source_sha256: "))
@@ -177,17 +185,24 @@ fn create_task_schema_reports_unresolved_deps_instead_of_dropping_them() {
         "--expect-sha256",
         &hash,
     ]);
-    assert!(
-        apply.status.success(),
+    assert_eq!(
+        apply.status.code(),
+        Some(2),
         "{}",
-        String::from_utf8_lossy(&apply.stderr)
+        String::from_utf8_lossy(&apply.stdout)
+    );
+    let error = String::from_utf8_lossy(&apply.stderr).to_string();
+    assert!(error.contains("import blocked by 1 problem(s)"), "{error}");
+    assert!(
+        error.contains(
+            "keep only these IDs in Deps and move the rest of the original text to Notes"
+        ),
+        "{error}"
     );
     let mut store = Store::open_readonly(work.path(), &project).expect("read store");
-    let detail = store.show_task("T-1").expect("task");
-    assert!(detail.deps.is_empty(), "{:?}", detail.deps);
-    assert_eq!(
-        detail.body,
-        "Outcome:\n- ok\nDeps: `T-027`; vendor SDK\nbody"
+    assert!(
+        store.show_task("T-1").is_err(),
+        "a blocked import must not write a task"
     );
     assert_eq!(fs::read_to_string(&ledger).expect("source intact"), source);
 }

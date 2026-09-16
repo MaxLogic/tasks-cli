@@ -6,6 +6,7 @@ pub mod interop;
 pub mod markdown;
 pub mod model;
 pub mod output;
+pub mod problems;
 pub mod registry;
 pub mod storage;
 pub mod store;
