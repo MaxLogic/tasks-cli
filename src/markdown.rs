@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::model::{
-    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, SourceRange,
-    SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_SELF_DEPENDENCY,
+    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, SchemaClass,
+    SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_SELF_DEPENDENCY,
     PROBLEM_UNKNOWN_DEPENDENCY,
 };
 use serde_json::Value;
@@ -66,6 +66,8 @@ pub struct ParsedImport {
     pub deps_edges: Vec<DepsEdge>,
     pub deps_problems: Vec<ImportProblem>,
     pub section_warnings: Vec<String>,
+    pub has_schema_marker: bool,
+    pub schema_class: SchemaClass,
 }
 
 impl ParsedImport {
@@ -1087,6 +1089,30 @@ pub(crate) fn parse_with_map(
         });
     }
 
+    let has_schema_marker = lines.iter().any(|line| {
+        structural_text(line.text)
+            .is_some_and(|structural| structural.starts_with("Task schema: 1"))
+    });
+    let tasks_without_section = task_starts
+        .iter()
+        .any(|start| section_for_line(&sections, *start).is_none());
+    let unmapped_task_section = sections
+        .iter()
+        .enumerate()
+        .any(|(position, (index, heading))| {
+            let end = section_end(&sections, position, lines.len());
+            let contains_tasks = task_starts.iter().any(|task| *task > *index && *task < end);
+            contains_tasks && map.resolve(heading).is_none()
+        })
+        || (tasks_without_section && map.resolve(NO_SECTION).is_none());
+    let schema_class = if has_schema_marker {
+        SchemaClass::Schema1
+    } else if unmapped_task_section {
+        SchemaClass::Unsupported
+    } else {
+        SchemaClass::LegacyCompatible
+    };
+
     let mut parsed = ParsedImport {
         source_name,
         source,
@@ -1105,6 +1131,8 @@ pub(crate) fn parse_with_map(
         deps_edges: Vec::new(),
         deps_problems: Vec::new(),
         section_warnings,
+        has_schema_marker,
+        schema_class,
     };
     let known: HashSet<u64> = parsed.tasks.iter().map(|task| task.id).collect();
     resolve_create_task_deps(&mut parsed, &known);

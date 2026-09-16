@@ -78,6 +78,33 @@ pub enum SourceSchema {
     CreateTask,
 }
 
+/// How a ledger file declares its schema. The marker is never required: a
+/// ledger whose task headings all sit under sections the map or the canonical
+/// names resolve is recognized as compatible without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SchemaClass {
+    Schema1,
+    LegacyCompatible,
+    Unsupported,
+}
+
+impl SchemaClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Schema1 => "schema-1",
+            Self::LegacyCompatible => "legacy-compatible",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl Display for SchemaClass {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 pub const PROBLEM_NONCONFORMING_DEPS: &str = "nonconforming-deps";
 pub const PROBLEM_UNKNOWN_DEPENDENCY: &str = "unknown-dependency";
 pub const PROBLEM_SELF_DEPENDENCY: &str = "self-dependency";

@@ -99,6 +99,8 @@ pub struct BulkFileRecord {
     pub bytes: usize,
     pub sha256: String,
     pub has_bom: bool,
+    pub schema_class: String,
+    pub has_schema_marker: bool,
     pub error: Option<String>,
     pub preview: Option<ImportReport>,
 }
@@ -553,8 +555,8 @@ fn render_summary(
         out.push_str("#### Files\n\n");
         for file in &candidate.files {
             out.push_str(&format!(
-                "- {} ({} bytes, sha256 {}, bom={})\n",
-                file.relative_path, file.bytes, file.sha256, file.has_bom
+                "- {} ({} bytes, sha256 {}, bom={}, schema={})\n",
+                file.relative_path, file.bytes, file.sha256, file.has_bom, file.schema_class
             ));
             if let Some(error) = &file.error {
                 out.push_str(&format!("  - parse error: {error}\n"));
@@ -1048,6 +1050,8 @@ fn process_candidate(
                     bytes: item.bytes.len(),
                     sha256: item.sha256.clone(),
                     has_bom: parsed.has_bom,
+                    schema_class: parsed.schema_class.as_str().to_string(),
+                    has_schema_marker: parsed.has_schema_marker,
                     error: None,
                     preview: Some(preview),
                 });
@@ -1063,6 +1067,8 @@ fn process_candidate(
                     bytes: item.bytes.len(),
                     sha256: item.sha256.clone(),
                     has_bom: item.bytes.starts_with(&[0xef, 0xbb, 0xbf]),
+                    schema_class: "unsupported".to_string(),
+                    has_schema_marker: false,
                     error: Some(error.to_string()),
                     preview: None,
                 });

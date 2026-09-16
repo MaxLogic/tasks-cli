@@ -1217,6 +1217,62 @@ fn create_task_reports_every_cycle_group_in_one_run() {
 }
 
 #[test]
+fn unmarked_ledger_without_a_done_section_is_legacy_compatible() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("legacy").join("TASKS.md"),
+        "## In Progress\n### T-1 Alpha\nbody one\n",
+    );
+    write(
+        &corpus.join("marked").join("TASKS.md"),
+        "Task schema: 1\n\n# Example ledger\n\n## In Progress\n### T-1 Beta\nbody two\n",
+    );
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let items = candidates(&report_dir);
+    let legacy = candidate(&items, "legacy");
+    assert_eq!(legacy["bucket"], "recognized", "{legacy:#?}");
+    let legacy_file = &legacy["files"][0];
+    assert_eq!(
+        legacy_file["schema_class"], "legacy-compatible",
+        "{legacy:#?}"
+    );
+    assert_eq!(legacy_file["has_schema_marker"], false, "{legacy:#?}");
+    let marked = candidate(&items, "marked");
+    assert_eq!(
+        marked["files"][0]["schema_class"], "schema-1",
+        "{marked:#?}"
+    );
+    let summary = fs::read_to_string(report_dir.join("summary.md")).expect("summary");
+    assert!(summary.contains("schema=legacy-compatible"), "{summary}");
+    assert!(summary.contains("schema=schema-1"), "{summary}");
+}
+
+#[test]
 fn default_status_resolution_of_a_task_section_is_a_warning() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
