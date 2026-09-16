@@ -307,6 +307,21 @@ pub fn init_root(
     Ok(info)
 }
 
+/// Remove one root/project binding. Only a caller that knows it created the
+/// binding (for example a rollback of a failed bulk apply) may call this; it
+/// never touches any other binding.
+pub fn remove_binding(data_root: &Path, root: &Path, project_id: &str) -> Result<(), AppError> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Registry::with_bindings(data_root, |registry| {
+        registry.bindings.retain(|binding| {
+            !(same_path(Path::new(&binding.root), &canonical_root)
+                && binding.project_id.eq_ignore_ascii_case(project_id))
+        });
+        Ok(())
+    })?;
+    Ok(())
+}
+
 fn same_path(left: &Path, right: &Path) -> bool {
     if cfg!(windows) {
         left.to_string_lossy()

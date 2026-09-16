@@ -125,6 +125,9 @@ pub enum Command {
         quarantine_dir: Option<PathBuf>,
         #[arg(long = "delete-quarantined", default_value_t = false)]
         delete_quarantined: bool,
+        /// Apply only the clean candidates when others have problems.
+        #[arg(long = "allow-partial", default_value_t = false)]
+        allow_partial: bool,
         #[arg(long = "source-schema", value_enum, default_value = "canonical")]
         source_schema: SourceSchema,
     },

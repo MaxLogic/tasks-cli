@@ -38,6 +38,7 @@ pub struct BulkOptions {
     pub apply: bool,
     pub quarantine_dir: Option<PathBuf>,
     pub delete_quarantined: bool,
+    pub allow_partial: bool,
     pub source_schema: SourceSchema,
 }
 
@@ -49,6 +50,11 @@ pub struct BulkRun {
     pub reports: BulkReportPaths,
     #[serde(skip)]
     pub failed: usize,
+    /// Set when --apply refused because a candidate had problems and
+    /// --allow-partial was not passed. The run wrote nothing outside the
+    /// report directory.
+    #[serde(skip)]
+    pub strict_refusal: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,6 +144,9 @@ pub struct BulkCandidate {
     pub applied: bool,
     pub already_imported: bool,
     pub verified: bool,
+    /// True when a failed apply or verification rolled back everything this
+    /// run created for the candidate.
+    pub rolled_back: bool,
     pub verification_error: Option<String>,
     pub apply_error: Option<String>,
     pub quarantine: Vec<QuarantineRecord>,
@@ -198,6 +207,7 @@ struct CandidateOutcome {
     applied: bool,
     already_imported: bool,
     verified: bool,
+    rolled_back: bool,
     verification_error: Option<String>,
     apply_error: Option<String>,
     quarantine: Vec<QuarantineRecord>,
@@ -205,6 +215,7 @@ struct CandidateOutcome {
     manifest: Vec<ManifestEntry>,
     export_path: Option<String>,
     deleted: usize,
+    ledger_files: Vec<LedgerSource>,
 }
 
 struct ScannedLedger {
@@ -286,13 +297,41 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
     let mut manifest = Vec::new();
     let mut failed = 0usize;
 
-    for (index, (dir, input)) in inputs.iter().enumerate() {
+    // Stage one previews every candidate and writes nothing. --apply validates
+    // the whole set before touching the data root: with any unrecognized
+    // candidate and without --allow-partial the run refuses before the first
+    // registry entry, project directory, database or quarantine move exists.
+    let mut staged: Vec<(String, CandidateOutcome)> = Vec::with_capacity(inputs.len());
+    for (dir, input) in &inputs {
         let project_id = match existing_binding(&options.data_root, dir)? {
             Some(existing) => existing,
             None => derived_project_id(dir).to_string(),
         };
-        let outcome =
-            process_candidate(index, dir, input, &scan_root, &options, &map, &project_id)?;
+        let outcome = process_candidate(dir, input, &scan_root, &options, &map, &project_id)?;
+        staged.push((project_id, outcome));
+    }
+
+    let mut strict_refusal = None;
+    if options.apply {
+        let any_unrecognized = staged
+            .iter()
+            .any(|(_, outcome)| outcome.bucket == BUCKET_UNRECOGNIZED);
+        if any_unrecognized && !options.allow_partial {
+            strict_refusal = Some(strict_refusal_message(&staged, &report_dir));
+        } else {
+            for (index, (dir, _input)) in inputs.iter().enumerate() {
+                let (project_id, outcome) = &mut staged[index];
+                if outcome.bucket == BUCKET_RECOGNIZED
+                    || outcome.bucket == BUCKET_RECOGNIZED_WITH_WARNINGS
+                {
+                    let project_id = project_id.clone();
+                    apply_candidate(index, dir, &scan_root, &project_id, outcome, &options, &map)?;
+                }
+            }
+        }
+    }
+
+    for ((dir, _input), (project_id, outcome)) in inputs.iter().zip(staged) {
         if outcome.bucket == BUCKET_UNRECOGNIZED
             || outcome.apply_error.is_some()
             || (outcome.applied && !outcome.verified)
@@ -316,6 +355,7 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
             applied: outcome.applied,
             already_imported: outcome.already_imported,
             verified: outcome.verified,
+            rolled_back: outcome.rolled_back,
             verification_error: outcome.verification_error,
             apply_error: outcome.apply_error,
             quarantine: outcome.quarantine,
@@ -325,6 +365,7 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         let _ = outcome.parsed;
         let _ = outcome.export_path;
         let _ = outcome.deleted;
+        let _ = outcome.ledger_files;
     }
 
     for candidate in candidates.iter_mut() {
@@ -406,7 +447,39 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         excluded_paths: scan.excluded,
         reports,
         failed,
+        strict_refusal,
     })
+}
+
+/// The message for an --apply run that refused to touch anything because at
+/// least one candidate has problems and --allow-partial was not passed.
+fn strict_refusal_message(staged: &[(String, CandidateOutcome)], report_dir: &Path) -> String {
+    let blocking: Vec<&CandidateOutcome> = staged
+        .iter()
+        .map(|(_, outcome)| outcome)
+        .filter(|outcome| outcome.bucket == BUCKET_UNRECOGNIZED)
+        .collect();
+    let mut message = format!(
+        "bulk-import --apply refused: {} of {} candidate(s) have problems and --allow-partial was not passed, so nothing was written (no registry change, no project directory, no database, no quarantine). Fix the problems below and re-run, or pass --allow-partial to migrate the clean candidates only:",
+        blocking.len(),
+        staged.len()
+    );
+    for outcome in &blocking {
+        if outcome.problems.is_empty() {
+            if let Some(reason) = outcome.reason.as_ref() {
+                message.push_str(&format!("\n- {reason}"));
+            }
+            continue;
+        }
+        for problem in &outcome.problems {
+            message.push_str(&format!("\n- {}", problem.message));
+        }
+    }
+    message.push_str(&format!(
+        "\nSee {}/unrecognized.md for the per-candidate report.",
+        report_dir.display()
+    ));
+    message
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -977,7 +1050,6 @@ fn export_slug(relative_directory: &str) -> String {
 }
 
 fn process_candidate(
-    index: usize,
     dir: &Path,
     input: &CandidateInput,
     scan_root: &Path,
@@ -998,6 +1070,7 @@ fn process_candidate(
         applied: false,
         already_imported: false,
         verified: false,
+        rolled_back: false,
         verification_error: None,
         apply_error: None,
         quarantine: Vec::new(),
@@ -1005,6 +1078,7 @@ fn process_candidate(
         manifest: Vec::new(),
         export_path: None,
         deleted: 0,
+        ledger_files: Vec::new(),
     };
     let ledger_files = match input {
         CandidateInput::ExcludedOnly(names) => {
@@ -1149,16 +1223,28 @@ fn process_candidate(
             .collect();
     }
 
-    if !options.apply {
-        outcome.parsed = parsed_set;
-        return Ok(outcome);
-    }
+    outcome.ledger_files = ledger_files;
+    outcome.parsed = parsed_set;
+    Ok(outcome)
+}
 
+/// Apply one candidate that passed validation, then quarantine its sources
+/// when verification succeeds. Called only from the apply phase, after every
+/// candidate has been previewed.
+fn apply_candidate(
+    index: usize,
+    dir: &Path,
+    scan_root: &Path,
+    project_id: &str,
+    outcome: &mut CandidateOutcome,
+    options: &BulkOptions,
+    map: &SectionMap,
+) -> Result<(), AppError> {
     match apply_and_verify(
         index,
         dir,
-        &ledger_files,
-        &parsed_set,
+        &outcome.ledger_files,
+        &outcome.parsed,
         &outcome.files,
         &display_relative(scan_root, dir),
         map,
@@ -1169,6 +1255,7 @@ fn process_candidate(
             outcome.applied = true;
             outcome.already_imported = result.already_imported;
             outcome.verified = result.verified;
+            outcome.rolled_back = result.rolled_back;
             outcome.verification_error = result.verification_error;
             outcome.export_path = Some(result.export_path);
         }
@@ -1176,15 +1263,57 @@ fn process_candidate(
             outcome.apply_error = Some(error.to_string());
         }
     }
-
-    if outcome.verified {
-        if let Some(quarantine_dir) = options.quarantine_dir.as_ref() {
-            let base = absolute_path(quarantine_dir);
-            let mut records = Vec::new();
-            let mut failure: Option<String> = None;
-            for (source, record) in ledger_files.iter().zip(outcome.files.iter()) {
-                let destination = base.join(native_relative(scan_root, &source.path));
-                if failure.is_some() {
+    if !outcome.verified {
+        return Ok(());
+    }
+    if let Some(quarantine_dir) = options.quarantine_dir.as_ref() {
+        let base = absolute_path(quarantine_dir);
+        let ledger_files = outcome.ledger_files.clone();
+        let mut records = Vec::new();
+        let mut failure: Option<String> = None;
+        for (source, record) in ledger_files.iter().zip(outcome.files.iter()) {
+            let destination = base.join(native_relative(scan_root, &source.path));
+            if failure.is_some() {
+                records.push(QuarantineRecord {
+                    source: source.path.display().to_string(),
+                    destination: destination.display().to_string(),
+                    size: record.bytes as u64,
+                    sha256: record.sha256.clone(),
+                    status: "planned".to_string(),
+                });
+                continue;
+            }
+            match move_file(&source.path, &destination) {
+                Ok(()) => {
+                    let mut status = "moved".to_string();
+                    if options.delete_quarantined {
+                        fs::remove_file(&destination).map_err(|error| {
+                            AppError::io_path("delete the quarantined copy", &destination, error)
+                        })?;
+                        status = "deleted".to_string();
+                        outcome.deleted += 1;
+                    }
+                    outcome.manifest.push(ManifestEntry {
+                        project_id: project_id.to_string(),
+                        original_path: source.path.display().to_string(),
+                        size: record.bytes as u64,
+                        sha256: record.sha256.clone(),
+                        destination: destination.display().to_string(),
+                        deleted: status == "deleted",
+                    });
+                    records.push(QuarantineRecord {
+                        source: source.path.display().to_string(),
+                        destination: destination.display().to_string(),
+                        size: record.bytes as u64,
+                        sha256: record.sha256.clone(),
+                        status,
+                    });
+                }
+                Err(error) => {
+                    failure = Some(format!(
+                        "quarantine failed for {}: {error}",
+                        source.path.display()
+                    ));
                     records.push(QuarantineRecord {
                         source: source.path.display().to_string(),
                         destination: destination.display().to_string(),
@@ -1192,76 +1321,167 @@ fn process_candidate(
                         sha256: record.sha256.clone(),
                         status: "planned".to_string(),
                     });
-                    continue;
                 }
-                match move_file(&source.path, &destination) {
-                    Ok(()) => {
-                        let mut status = "moved".to_string();
-                        if options.delete_quarantined {
-                            fs::remove_file(&destination).map_err(|error| {
-                                AppError::io_path(
-                                    "delete the quarantined copy",
-                                    &destination,
-                                    error,
-                                )
-                            })?;
-                            status = "deleted".to_string();
-                            outcome.deleted += 1;
-                        }
-                        outcome.manifest.push(ManifestEntry {
-                            project_id: project_id.to_string(),
-                            original_path: source.path.display().to_string(),
-                            size: record.bytes as u64,
-                            sha256: record.sha256.clone(),
-                            destination: destination.display().to_string(),
-                            deleted: status == "deleted",
-                        });
-                        records.push(QuarantineRecord {
-                            source: source.path.display().to_string(),
-                            destination: destination.display().to_string(),
-                            size: record.bytes as u64,
-                            sha256: record.sha256.clone(),
-                            status,
-                        });
-                    }
-                    Err(error) => {
-                        failure = Some(format!(
-                            "quarantine failed for {}: {error}",
-                            source.path.display()
-                        ));
-                        records.push(QuarantineRecord {
-                            source: source.path.display().to_string(),
-                            destination: destination.display().to_string(),
-                            size: record.bytes as u64,
-                            sha256: record.sha256.clone(),
-                            status: "planned".to_string(),
-                        });
-                    }
-                }
-            }
-            outcome.quarantine = records;
-            outcome.quarantined = outcome
-                .quarantine
-                .iter()
-                .any(|record| record.status == "moved" || record.status == "deleted");
-            if let Some(message) = failure {
-                outcome.apply_error = Some(message);
             }
         }
+        outcome.quarantine = records;
+        outcome.quarantined = outcome
+            .quarantine
+            .iter()
+            .any(|record| record.status == "moved" || record.status == "deleted");
+        if let Some(message) = failure {
+            outcome.apply_error = Some(message);
+        }
     }
-    outcome.parsed = parsed_set;
-    Ok(outcome)
+    Ok(())
 }
 
 struct ApplyOutcome {
     already_imported: bool,
     verified: bool,
+    rolled_back: bool,
     verification_error: Option<String>,
     export_path: String,
 }
 
+/// Artifacts that did not exist before this candidate's apply started. Only
+/// these are removed by a rollback, so a re-run never touches what an earlier
+/// run or `tasks init` created.
+struct CreatedArtifacts {
+    binding: bool,
+    db: bool,
+    wal: bool,
+    shm: bool,
+    lock: bool,
+    directory: bool,
+}
+
+fn sqlite_sidecar(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Apply one candidate and roll back everything this run created for it when
+/// the import, the export or the verification fails. A failed verification
+/// still reports `applied: true` with `rolled_back: true`; the sources are
+/// never touched and never quarantined.
 #[allow(clippy::too_many_arguments)]
 fn apply_and_verify(
+    index: usize,
+    dir: &Path,
+    ledger_files: &[LedgerSource],
+    preview: &[(String, ParsedImport)],
+    files: &[BulkFileRecord],
+    relative_directory: &str,
+    map: &SectionMap,
+    options: &BulkOptions,
+    project_id: &str,
+) -> Result<ApplyOutcome, AppError> {
+    let db_path = crate::store::data_root_project_path(&options.data_root, project_id);
+    let created = CreatedArtifacts {
+        binding: existing_binding(&options.data_root, dir)?.is_none(),
+        db: !db_path.exists(),
+        wal: !sqlite_sidecar(&db_path, "-wal").exists(),
+        shm: !sqlite_sidecar(&db_path, "-shm").exists(),
+        lock: !db_path.with_extension("create.lock").exists(),
+        directory: !db_path.parent().map(Path::exists).unwrap_or(false),
+    };
+    match apply_and_verify_inner(
+        index,
+        dir,
+        ledger_files,
+        preview,
+        files,
+        relative_directory,
+        map,
+        options,
+        project_id,
+    ) {
+        Ok(mut outcome) => {
+            if !outcome.verified {
+                outcome.rolled_back = true;
+                if let Some(problem) =
+                    roll_back_apply(&options.data_root, dir, project_id, &created)
+                {
+                    let reason = outcome
+                        .verification_error
+                        .take()
+                        .unwrap_or_else(|| "verification failed".to_string());
+                    outcome.verification_error =
+                        Some(format!("{reason}; rollback failed: {problem}"));
+                }
+            }
+            Ok(outcome)
+        }
+        Err(error) => match roll_back_apply(&options.data_root, dir, project_id, &created) {
+            None => Err(error),
+            Some(problem) => Err(AppError::Validation(format!(
+                "{error}; rollback failed: {problem}"
+            ))),
+        },
+    }
+}
+
+/// Remove exactly what an apply created: the registry binding, the database
+/// files and the project directory, never recursively and never anything that
+/// existed before. Every step reports its failure so the caller can say what
+/// is left behind.
+fn roll_back_apply(
+    data_root: &Path,
+    dir: &Path,
+    project_id: &str,
+    created: &CreatedArtifacts,
+) -> Option<String> {
+    let mut problems = Vec::new();
+    if created.binding {
+        if let Err(error) = registry::remove_binding(data_root, dir, project_id) {
+            problems.push(format!("remove the registry binding: {error}"));
+        }
+    }
+    let db_path = crate::store::data_root_project_path(data_root, project_id);
+    if created.db && db_path.exists() {
+        if let Err(error) = fs::remove_file(&db_path) {
+            problems.push(format!("delete {}: {error}", db_path.display()));
+        }
+    }
+    for (created_sidecar, suffix) in [(created.wal, "-wal"), (created.shm, "-shm")] {
+        let path = sqlite_sidecar(&db_path, suffix);
+        if created_sidecar && path.exists() {
+            if let Err(error) = fs::remove_file(&path) {
+                problems.push(format!("delete {}: {error}", path.display()));
+            }
+        }
+    }
+    if created.lock {
+        let lock_path = db_path.with_extension("create.lock");
+        if lock_path.exists() {
+            if let Err(error) = fs::remove_file(&lock_path) {
+                problems.push(format!("delete {}: {error}", lock_path.display()));
+            }
+        }
+    }
+    if created.directory {
+        if let Some(directory) = db_path.parent() {
+            if directory.exists() {
+                if let Err(error) = fs::remove_dir(directory) {
+                    problems.push(format!(
+                        "remove the project directory {}: {error}",
+                        directory.display()
+                    ));
+                }
+            }
+        }
+    }
+    if problems.is_empty() {
+        None
+    } else {
+        Some(problems.join("; "))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_and_verify_inner(
     index: usize,
     dir: &Path,
     ledger_files: &[LedgerSource],
@@ -1337,6 +1557,7 @@ fn apply_and_verify(
     Ok(ApplyOutcome {
         already_imported,
         verified: verification.is_ok(),
+        rolled_back: false,
         verification_error: verification.err(),
         export_path: export_path.display().to_string(),
     })

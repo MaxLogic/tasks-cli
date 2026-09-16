@@ -246,6 +246,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     apply,
                     quarantine_dir,
                     delete_quarantined,
+                    allow_partial,
                     source_schema,
                 } => tasks_cli::bulk::BulkOptions {
                     data_root: data_root.clone(),
@@ -256,6 +257,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     apply: *apply,
                     quarantine_dir: quarantine_dir.clone(),
                     delete_quarantined: *delete_quarantined,
+                    allow_partial: *allow_partial,
                     source_schema: *source_schema,
                 },
                 _ => unreachable!(),
@@ -277,7 +279,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             let failed = run.failed;
             let unrecognized = run.summary.unrecognized;
             let failed_projects = run.summary.failed_projects;
+            let strict_refusal = run.strict_refusal.clone();
             envelope(None, CommandPayload::BulkImport(run), cli.format);
+            if let Some(message) = strict_refusal {
+                return Err(AppError::Validation(message));
+            }
             if failed > 0 {
                 return Err(AppError::Validation(format!(
                     "{failed} candidate(s) were not migrated: {unrecognized} unrecognized and {failed_projects} failed apply or verification. Nothing was written for them; see {report_dir}/unrecognized.md for the reasons"
