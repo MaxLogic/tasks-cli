@@ -7,7 +7,8 @@
 
 use crate::markdown::ParsedImport;
 use crate::model::{
-    ImportProblem, PROBLEM_CYCLE, PROBLEM_NONCONFORMING_DEPS, PROBLEM_UNKNOWN_DEPENDENCY,
+    ImportProblem, MAX_DEPENDENCIES, PROBLEM_CYCLE, PROBLEM_NONCONFORMING_DEPS,
+    PROBLEM_UNKNOWN_DEPENDENCY,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -39,8 +40,63 @@ pub fn analyze(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
     for parsed in sources {
         problems.extend(other_problems(parsed));
     }
+    for parsed in sources {
+        problems.extend(task_limit_problems(parsed));
+    }
     problems.extend(cross_file_duplicate_problems(sources));
     problems.extend(cycle_problems(sources));
+    problems
+}
+
+/// Dependency-list checks that apply enforces before its transaction: the
+/// per-task limit and duplicate entries. The line is the task's `Deps:` line
+/// when the source has one, otherwise the task heading.
+fn task_limit_problems(parsed: &ParsedImport) -> Vec<ImportProblem> {
+    let name = &parsed.source_name;
+    let mut problems = Vec::new();
+    for task in &parsed.tasks {
+        let id = format!("T-{:03}", task.id);
+        let line = parsed
+            .deps_lines
+            .iter()
+            .find(|deps| deps.task_id == task.id)
+            .map(|deps| deps.line_number)
+            .unwrap_or(task.heading_line);
+        if task.deps.len() > MAX_DEPENDENCIES {
+            problems.push(ImportProblem {
+                kind: crate::model::PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{id} at {name}:{line} has {} dependencies; the limit is {MAX_DEPENDENCIES}. Reduce the list or split the task.",
+                    task.deps.len()
+                ),
+                file: Some(name.clone()),
+                line: Some(line),
+                task_id: Some(task.id),
+                value: None,
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some("reduce the list or split the task".to_string()),
+            });
+        }
+        let mut seen = HashSet::new();
+        for dependency in &task.deps {
+            if !seen.insert(*dependency) {
+                problems.push(ImportProblem {
+                    kind: crate::model::PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{id} at {name}:{line} lists dependency T-{dependency:03} more than once; remove the duplicate entry."
+                    ),
+                    file: Some(name.clone()),
+                    line: Some(line),
+                    task_id: Some(task.id),
+                    value: None,
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some(format!("remove the duplicate T-{dependency:03} entry")),
+                });
+            }
+        }
+    }
     problems
 }
 

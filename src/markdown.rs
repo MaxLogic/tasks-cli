@@ -14,6 +14,8 @@ const NO_SECTION: &str = "<no section>";
 #[derive(Debug, Clone)]
 pub struct ParsedTask {
     pub id: u64,
+    /// 1-based line of the task heading in the source file.
+    pub heading_line: usize,
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
@@ -953,6 +955,7 @@ pub(crate) fn parse_with_map(
         });
         tasks.push(ParsedTask {
             id,
+            heading_line: *start_index + 1,
             title,
             body,
             status,
