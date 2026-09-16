@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use std::fs;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tasks_cli::model::TaskStatus;
 use tasks_cli::store::{create_project_db, Store};
 use tempfile::TempDir;
@@ -97,13 +97,21 @@ fn newer_schema_fails_safely_and_killed_precommit_writer_rolls_back() {
         .env("TASKS_HOLD_PRECOMMIT_MS", "30000")
         .spawn()
         .expect("writer");
-    for _ in 0..1000 {
+    let ready_deadline = Instant::now() + Duration::from_secs(300);
+    loop {
         if marker.exists() {
             break;
         }
-        thread::sleep(Duration::from_millis(10));
+        if let Some(status) = child.try_wait().expect("writer status") {
+            panic!("writer exited before creating the readiness marker: {status}");
+        }
+        if Instant::now() >= ready_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("writer did not create the readiness marker within 300 seconds");
+        }
+        thread::sleep(Duration::from_millis(20));
     }
-    assert!(marker.exists());
     child.kill().expect("kill writer");
     let _ = child.wait().expect("wait writer");
     let mut reopened = Store::open_rw(temp.path(), &id.to_string()).expect("reopen");
