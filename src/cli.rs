@@ -95,12 +95,12 @@ pub enum Command {
     #[command(subcommand)]
     Rules(RulesCommand),
     Import {
-        #[arg(long)]
-        file: PathBuf,
+        #[arg(long, required = true)]
+        file: Vec<PathBuf>,
         #[arg(long, default_value_t = false)]
         apply: bool,
         #[arg(long = "expect-sha256")]
-        expect_sha256: Option<String>,
+        expect_sha256: Vec<String>,
         #[arg(long = "map-file")]
         map_file: Option<PathBuf>,
         #[arg(long = "source-schema", value_enum, default_value = "canonical")]

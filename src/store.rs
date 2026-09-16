@@ -1604,38 +1604,86 @@ impl Store {
         Self::import_report(&parsed)
     }
 
+    pub fn import_preview_many(&mut self, parsed: Vec<ParsedImport>) -> Vec<ImportReport> {
+        parsed.iter().map(Self::import_report).collect()
+    }
+
     pub fn import_apply(
         &mut self,
         parsed: ParsedImport,
         expect_sha256: Option<&str>,
     ) -> Result<(ImportReport, bool), AppError> {
-        let actual = parsed.source_hash.clone();
         let expected = expect_sha256.ok_or_else(|| {
             AppError::Usage("--expect-sha256 is required with --apply".to_string())
         })?;
-        if !expected.eq_ignore_ascii_case(&actual) {
-            return Err(AppError::ShaMismatch {
-                expected: expected.to_string(),
-                actual,
-            });
-        }
-        let report = Self::import_report(&parsed);
-        if !report.duplicate_ids.is_empty()
-            || !report.unmapped_sections.is_empty()
-            || !report.ambiguous_sections.is_empty()
-            || report.has_unknown_content
-        {
-            return Err(AppError::Validation(
-                "import contains duplicate IDs, unmapped sections, or unknown content".to_string(),
+        let (mut reports, already) =
+            self.import_apply_many(vec![parsed], &[expected.to_string()])?;
+        Ok((reports.remove(0), already))
+    }
+
+    pub fn import_apply_many(
+        &mut self,
+        parsed: Vec<ParsedImport>,
+        expect_sha256: &[String],
+    ) -> Result<(Vec<ImportReport>, bool), AppError> {
+        if parsed.is_empty() || parsed.len() != expect_sha256.len() {
+            return Err(AppError::Usage(
+                "import apply requires one --expect-sha256 per source file".to_string(),
             ));
         }
-        let existing: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM imports WHERE input_sha256 = ?1",
-            [actual.clone()],
-            |r| r.get::<_, i64>(0),
-        )?;
-        if existing > 0 {
-            return Ok((self.import_preview(parsed), true));
+        let mut reports = Vec::with_capacity(parsed.len());
+        let mut hashes = Vec::with_capacity(parsed.len());
+        for (index, item) in parsed.iter().enumerate() {
+            let actual = item.source_hash.clone();
+            let expected = &expect_sha256[index];
+            if !expected.eq_ignore_ascii_case(&actual) {
+                return Err(AppError::ShaMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+            let report = Self::import_report(item);
+            if !report.duplicate_ids.is_empty()
+                || !report.unmapped_sections.is_empty()
+                || !report.ambiguous_sections.is_empty()
+                || report.has_unknown_content
+            {
+                return Err(AppError::Validation(format!(
+                    "import of '{}' contains duplicate IDs, unmapped sections, or unknown content",
+                    item.source_name
+                )));
+            }
+            reports.push(report);
+            hashes.push(item.source_hash.clone());
+        }
+        let mut already_imported = Vec::new();
+        for (hash, item) in hashes.iter().zip(parsed.iter()) {
+            let existing: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM imports WHERE input_sha256 = ?1",
+                [hash.clone()],
+                |r| r.get::<_, i64>(0),
+            )?;
+            if existing > 0 {
+                already_imported.push(item.source_name.clone());
+            }
+        }
+        if already_imported.len() == parsed.len() {
+            return Ok((reports, true));
+        }
+        if !already_imported.is_empty() {
+            return Err(AppError::Usage(format!(
+                "some sources were already imported: {}",
+                already_imported.join(", ")
+            )));
+        }
+        let mut seen_ids = HashSet::new();
+        for task in parsed.iter().flat_map(|item| item.tasks.iter()) {
+            if !seen_ids.insert(task.id) {
+                return Err(AppError::Validation(format!(
+                    "duplicate task ID T-{0:03} across import sources",
+                    task.id
+                )));
+            }
         }
         let tx = self
             .conn
@@ -1656,60 +1704,68 @@ impl Store {
                 "import requires empty shared rules".to_string(),
             ));
         }
-        Self::ensure_task_ids_unique(&parsed.tasks)?;
+        for item in &parsed {
+            Self::ensure_task_ids_unique(&item.tasks)?;
+        }
         let known = parsed
-            .tasks
             .iter()
+            .flat_map(|item| item.tasks.iter())
             .map(|task| task.id)
             .collect::<HashSet<_>>();
         let mut max_id = 0u64;
-        for task in &parsed.tasks {
-            if task.id > max_id {
-                max_id = task.id;
+        for item in &parsed {
+            for task in &item.tasks {
+                if task.id > max_id {
+                    max_id = task.id;
+                }
+                validate_title_body(&task.title, &task.body)?;
+                if task.deps.len() > MAX_DEPENDENCIES
+                    || task.deps.iter().collect::<HashSet<_>>().len() != task.deps.len()
+                {
+                    return Err(AppError::Validation(
+                        "invalid import dependency list".to_string(),
+                    ));
+                }
+                tx.execute(
+                    "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
+                     VALUES (?1,?2,?3,?4,1,?5,?5)",
+                    params![
+                        task.id,
+                        task.title,
+                        task.body,
+                        task.status.to_string(),
+                        sqlite_now_ms()
+                    ],
+                )?;
             }
-            validate_title_body(&task.title, &task.body)?;
-            if task.deps.len() > MAX_DEPENDENCIES
-                || task.deps.iter().collect::<HashSet<_>>().len() != task.deps.len()
-            {
-                return Err(AppError::Validation(
-                    "invalid import dependency list".to_string(),
-                ));
+        }
+        for item in &parsed {
+            for task in &item.tasks {
+                Self::validate_task_dependencies_exist(&tx, &task.deps, &known)?;
+                Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
+                Self::replace_dependencies(&tx, task.id, &task.deps)?;
             }
-            tx.execute(
-                "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
-                 VALUES (?1,?2,?3,?4,1,?5,?5)",
-                params![
-                    task.id,
-                    task.title,
-                    task.body,
-                    task.status.to_string(),
-                    sqlite_now_ms()
-                ],
-            )?;
         }
-        for task in &parsed.tasks {
-            Self::validate_task_dependencies_exist(&tx, &task.deps, &known)?;
-            Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
-            Self::replace_dependencies(&tx, task.id, &task.deps)?;
-        }
-        for task in &parsed.tasks {
-            tx.execute(
-                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-                 VALUES (?1,'task','create',1,?2,?3)",
-                params![
-                    task.id as i64,
-                    sqlite_now_ms(),
-                    json!({
-                        "id": task.id,
-                        "title": task.title,
-                        "body": task.body,
-                        "status": task.status.to_string(),
-                        "version": 1,
-                        "deps": task.deps
-                    })
-                    .to_string()
-                ],
-            )?;
+        for item in &parsed {
+            for task in &item.tasks {
+                tx.execute(
+                    "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
+                     VALUES (?1,'task','create',1,?2,?3)",
+                    params![
+                        task.id as i64,
+                        sqlite_now_ms(),
+                        json!({
+                            "id": task.id,
+                            "title": task.title,
+                            "body": task.body,
+                            "status": task.status.to_string(),
+                            "version": 1,
+                            "deps": task.deps
+                        })
+                        .to_string()
+                    ],
+                )?;
+            }
         }
         if max_id > 0 {
             tx.execute(
@@ -1717,31 +1773,39 @@ impl Store {
                 params![max_id + 1, self.project_id.to_string()],
             )?;
         }
-        tx.execute(
-            "INSERT INTO imports(input_sha256, source_name, original_source, report_json, imported_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                actual,
-                parsed.source_name,
-                parsed.source,
-                serde_json::to_string(&report)?,
-                sqlite_now_ms()
-            ],
-        )?;
-        if !parsed.rules.is_empty() {
+        for (index, item) in parsed.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO imports(input_sha256, source_name, original_source, report_json, imported_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    hashes[index],
+                    item.source_name,
+                    item.source,
+                    serde_json::to_string(&reports[index])?,
+                    sqlite_now_ms()
+                ],
+            )?;
+        }
+        let combined_rules = parsed
+            .iter()
+            .map(|item| item.rules.trim_matches(['\r', '\n']))
+            .filter(|rules| !rules.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !combined_rules.is_empty() {
             tx.execute(
                 "UPDATE project SET rules_markdown = ?1, rules_version = 1 WHERE project_id = ?2",
-                params![parsed.rules, self.project_id.to_string()],
+                params![combined_rules, self.project_id.to_string()],
             )?;
             tx.execute(
                 "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
                  VALUES (NULL,'rules','update',1,?1,?2)",
-                params![sqlite_now_ms(), json!({"rules": parsed.rules}).to_string()],
+                params![sqlite_now_ms(), json!({"rules": combined_rules}).to_string()],
             )?;
         }
         maybe_precommit_fail("import")?;
         tx.commit()?;
-        Ok((Self::import_report(&parsed), false))
+        Ok((reports, false))
     }
 
     pub fn backup(&mut self, out: &Path) -> Result<u64, AppError> {

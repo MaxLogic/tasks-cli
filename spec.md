@@ -148,7 +148,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | `update T-N --expect-version N ...` | At least one of title, body-file, status or full dependency replacement |
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
-| `import --file PATH [--apply --expect-sha256 HASH]` | Preview by default; explicit apply imports validated content atomically |
+| `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
 | `export --out PATH` | Deterministic readable Markdown snapshot; refuse existing destination |
 | `backup --out PATH` | Consistent SQLite backup; refuse existing destination |
 | `migrate` | Explicit schema upgrade, with verified pre-upgrade backup |
@@ -297,6 +297,16 @@ identical import reports already imported without mutation. Duplicate IDs or
 partial parsing roll everything back. Never edit/remove the source TASKS.md.
 Importer compatibility with actual PFM/DelphiAiKit copies is an acceptance gate,
 not permission to switch those projects to SQLite.
+
+`import` accepts `--file` more than once, preserving the given order, with
+exactly one `--expect-sha256` per file in the same order. The preview reports
+each file separately. Apply re-reads and re-hashes every source, checks the
+empty-store precondition once, requires IDs to be unique across the whole set
+(forward and cross-file dependencies are allowed), and commits all tasks,
+dependencies, initial events, rules and provenance rows in one transaction.
+Each source records its own bytes and SHA-256 in provenance; shared rules are
+concatenated in file order. A repeated identical apply reports already
+imported; a set mixing already-imported sources with new ones is refused.
 
 Export contains a snapshot warning, project UUID, shared rules, all tasks ordered
 by ID, status, version, dependency IDs and complete bodies. It is human-readable,
