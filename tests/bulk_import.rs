@@ -853,6 +853,8 @@ fn verification_failure_leaves_the_sources_in_place() {
     let report_dir = root.join("reports");
     let data_root = root.join("data");
     let quarantine = root.join("quarantine");
+    let seed_project = seed_data_root(&data_root);
+    let before = snapshot(&data_root, &report_dir);
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new("cargo")
         .args([
@@ -903,12 +905,41 @@ fn verification_failure_leaves_the_sources_in_place() {
     );
     assert!(
         data_root.exists(),
-        "the project is created and imported before verification"
+        "the seeded data root must still exist after the rollback"
+    );
+    assert_eq!(
+        snapshot(&data_root, &report_dir),
+        before,
+        "a rolled-back candidate must leave the registry and projects directory byte-identical"
     );
     let items = candidates(&report_dir);
     let broken = candidate(&items, "broken");
     assert_eq!(broken["applied"], true);
     assert_eq!(broken["verified"], false);
+    assert_eq!(broken["rolled_back"], true);
+    let broken_id = broken["project_id"].as_str().expect("project id");
+    assert!(
+        !data_root.join("projects").join(broken_id).exists(),
+        "the rolled-back project directory must be gone"
+    );
+    let registry: Value =
+        serde_json::from_slice(&fs::read(data_root.join("registry.json")).expect("registry"))
+            .expect("registry JSON");
+    let bindings = registry["bindings"].as_array().expect("bindings");
+    assert!(
+        bindings.iter().all(|binding| !binding["project_id"]
+            .as_str()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(broken_id)),
+        "the rolled-back binding must be gone: {registry}"
+    );
+    assert!(
+        bindings.iter().any(|binding| binding["project_id"]
+            .as_str()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(&seed_project)),
+        "the pre-existing binding must remain: {registry}"
+    );
     assert!(
         broken["verification_error"]
             .as_str()
@@ -1108,6 +1139,7 @@ fn create_task_id_only_deps_create_edges_and_unknown_ids_block() {
         "--source-schema",
         "create-task",
         "--apply",
+        "--allow-partial",
     ]);
     assert_eq!(
         output.status.code(),
@@ -1393,4 +1425,227 @@ fn create_task_ledger_markup_is_structural_and_arbitrary_prose_still_blocks() {
             .contains("some prose line that is not ledger markup"),
         "{prose:#?}"
     );
+}
+
+/// Create a data root that already holds one init'ed project, so a test can
+/// prove that a refused or rolled-back run leaves the registry byte-identical.
+fn seed_data_root(data_root: &Path) -> String {
+    let seed = data_root.join("seed-project");
+    fs::create_dir_all(&seed).expect("seed root");
+    let output = run(&[
+        "--data-root",
+        &string_arg(data_root),
+        "init",
+        "--root",
+        &string_arg(&seed),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("project_id: ").map(str::to_string))
+        .expect("seed project id")
+}
+
+/// A create-task ledger whose first task lists 1001 existing dependencies:
+/// one over MAX_DEPENDENCIES (1000). The count problem must surface in the
+/// preview and block apply with the task, file, line, count and limit.
+fn write_oversized_dependency_ledger(path: &Path) {
+    let mut ledger = String::from("## Next - Today\n### T-1 Alpha\nDeps: ");
+    let deps = (2..=1002)
+        .map(|id| format!("T-{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ledger.push_str(&deps);
+    ledger.push_str("\nbody one\n");
+    for id in 2..=1002 {
+        ledger.push_str(&format!("### T-{id} Task {id}\nbody {id}\n"));
+    }
+    write(path, &ledger);
+}
+
+#[test]
+fn strict_apply_refuses_the_whole_set_when_one_candidate_has_problems() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("good").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nbody one\n",
+    );
+    write_oversized_dependency_ledger(&corpus.join("broken").join("TASKS.md"));
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+    let quarantine = root.join("quarantine");
+    let seed_project = seed_data_root(&data_root);
+    let before = snapshot(&data_root, &report_dir);
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+        "--apply",
+        "--quarantine-dir",
+        &string_arg(&quarantine),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bulk-import --apply refused"), "{stderr}");
+    assert!(stderr.contains("nothing was written"), "{stderr}");
+    assert!(stderr.contains("--allow-partial"), "{stderr}");
+    assert!(
+        stderr.contains("T-001 at broken/TASKS.md:3 has 1001 dependencies; the limit is 1000"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Reduce the list or split the task"),
+        "{stderr}"
+    );
+
+    assert_eq!(
+        snapshot(&data_root, &report_dir),
+        before,
+        "a refused --apply must leave the registry and projects directory byte-identical"
+    );
+    assert!(
+        !quarantine.exists(),
+        "a refused run must not move or delete any source"
+    );
+    assert!(
+        corpus.join("good").join("TASKS.md").exists()
+            && corpus.join("broken").join("TASKS.md").exists(),
+        "a refused run must leave every source in place"
+    );
+    let registry = fs::read_to_string(data_root.join("registry.json")).expect("registry");
+    assert!(
+        registry.contains(&seed_project),
+        "the pre-existing binding must remain: {registry}"
+    );
+    let items = candidates(&report_dir);
+    assert_eq!(candidate(&items, "good")["bucket"], "recognized");
+    let broken = candidate(&items, "broken");
+    assert_eq!(broken["bucket"], "unrecognized", "{broken:#?}");
+    assert_eq!(broken["applied"], false, "{broken:#?}");
+    assert_eq!(broken["verified"], false, "{broken:#?}");
+    assert_eq!(broken["rolled_back"], false, "{broken:#?}");
+    let problems = broken["problems"].as_array().expect("problems");
+    assert!(
+        problems.iter().any(|problem| problem["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("1001 dependencies; the limit is 1000")),
+        "{broken:#?}"
+    );
+}
+
+#[test]
+fn allow_partial_applies_only_the_clean_candidates() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("good").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nbody one\n",
+    );
+    write_oversized_dependency_ledger(&corpus.join("broken").join("TASKS.md"));
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+    let quarantine = root.join("quarantine");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+        "--apply",
+        "--allow-partial",
+        "--quarantine-dir",
+        &string_arg(&quarantine),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("1 candidate(s) were not migrated"),
+        "{stderr}"
+    );
+
+    let items = candidates(&report_dir);
+    let good = candidate(&items, "good");
+    assert_eq!(good["applied"], true, "{good:#?}");
+    assert_eq!(good["verified"], true, "{good:#?}");
+    assert_eq!(good["rolled_back"], false, "{good:#?}");
+    let good_id = good["project_id"].as_str().expect("project id");
+    assert!(
+        !corpus.join("good").join("TASKS.md").exists(),
+        "a verified candidate is quarantined when --quarantine-dir is passed"
+    );
+
+    let broken = candidate(&items, "broken");
+    assert_eq!(broken["bucket"], "unrecognized", "{broken:#?}");
+    assert_eq!(broken["applied"], false, "{broken:#?}");
+    let broken_id = broken["project_id"].as_str().expect("project id");
+    assert!(
+        !data_root.join("projects").join(broken_id).exists(),
+        "an unrecognized candidate must get no project directory"
+    );
+    assert!(
+        corpus.join("broken").join("TASKS.md").exists(),
+        "an unrecognized candidate keeps its sources"
+    );
+
+    let registry: Value =
+        serde_json::from_slice(&fs::read(data_root.join("registry.json")).expect("registry"))
+            .expect("registry JSON");
+    let bindings = registry["bindings"].as_array().expect("bindings");
+    assert!(
+        bindings.iter().any(|binding| binding["project_id"]
+            .as_str()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(good_id)),
+        "the applied candidate must be bound: {registry}"
+    );
+    assert!(
+        bindings.iter().all(|binding| !binding["project_id"]
+            .as_str()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(broken_id)),
+        "the unrecognized candidate must not be bound: {registry}"
+    );
+
+    let mut store = tasks_cli::store::Store::open_readonly(&data_root, good_id).expect("store");
+    assert_eq!(store.show_task("T-1").expect("T-1").title, "Alpha");
 }

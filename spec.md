@@ -151,7 +151,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
-| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies, and only `--quarantine-dir` moves sources |
+| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
 | `export --out PATH` | Deterministic readable Markdown snapshot; refuse existing destination |
 | `backup --out PATH` | Consistent SQLite backup; refuse existing destination |
 | `migrate` | Explicit schema upgrade, with verified pre-upgrade backup |
@@ -412,8 +412,8 @@ bindings separately or recreate them with bind after restoring the UUID director
 ## Bulk migration
 
 `tasks bulk-import --scan-root PATH --map-file FILE --report-dir DIR
-[--exclude GLOB]... [--apply] [--quarantine-dir DIR] [--delete-quarantined]
-[--source-schema NAME]` migrates a tree of Markdown ledgers into one project per
+[--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR]
+[--delete-quarantined] [--source-schema NAME]` migrates a tree of Markdown ledgers into one project per
 ledger directory. Dry run is the default and writes nothing anywhere except the
 report directory; apply requires the explicit flag. The whole run refuses to
 start when `--report-dir` is not writable.
@@ -434,9 +434,21 @@ Stages, in order:
    dependency graph holds a cycle; all of those problems are recorded in one
    pass, never just the first.
 4. Preview every recognized candidate through the import preview.
-5. Apply, only with `--apply`: initialize the project against its directory,
-   import all of its ledger files in one apply with the hashes from step 4, then
-   verify.
+5. Apply, only with `--apply`. The default is all-or-nothing: the complete
+   dry-run validation for every candidate runs first, and when any candidate
+   is unrecognized or holds any problem the run writes nothing - no registry
+   change, no project directory, no database, no quarantine - exits 2 and
+   prints the full problem list. `--allow-partial` applies only the clean
+   candidates instead and reports the rest as unmigrated. For each applied
+   candidate the run initializes the project against its directory, imports
+   all of its ledger files in one apply with the hashes from step 4, then
+   verifies. A candidate that fails after its project directory was created is
+   rolled back: its registry binding is removed, then only the exact files
+   this run created (`TASKS.sqlite`, its `TASKS.create.lock` and its `-wal` and
+   `-shm` sidecars) are deleted, and the project directory is removed with a
+   non-recursive `rmdir`.
+   Nothing that existed before the run is removed, nothing is deleted
+   recursively, and a rollback never touches a candidate's sources.
 6. Verify by re-exporting and comparing task count, every ID, every title, every
    body byte, every extracted dependency and the section-to-status assignment
    against the preview and the store. A project failing verification is left in
@@ -463,7 +475,11 @@ migrated root the reports list every `AGENTS.md` and `CLAUDE.md` below it that
 contains the string `TASKS.md`, with line numbers; the tool reports those files
 and never edits them. Each candidate carries its schema class per file, its
 count line and its full structured problem list; `unrecognized.md` groups the
-messages under the candidate that produced them.
+messages under the candidate that produced them. Each candidate record also
+carries `rolled_back`, true when a failed apply or verification removed
+everything this run had created for it. Reports are written even when an
+all-or-nothing `--apply` refuses the whole set, so the refusal message can
+point at `unrecognized.md`.
 
 Bulk runs apply one map to the whole corpus, so a literal `sections` entry that
 a given file does not contain is ignored instead of rejected; the single-file
@@ -471,7 +487,9 @@ a given file does not contain is ignored instead of rejected; the single-file
 table: 0 when no candidate is unrecognized and every applied project verified,
 where excluded candidates never fail a run; 2 for usage and map errors, including
 a completed run that reports unrecognized candidates or failed verifications and
-says how many; 6 for I/O and database failure. Rehearsals run against copies of
+says how many. A refused all-or-nothing apply also exits 2, before any registry,
+project, database or quarantine mutation, and still writes the report files
+under `--report-dir`. 6 covers I/O and database failure. Rehearsals run against copies of
 real ledgers, never the live files, and never create projects in the default
 data root.
 
