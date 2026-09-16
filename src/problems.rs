@@ -2,12 +2,14 @@
 //!
 //! A preview never stops at the first problem: every nonconforming Deps line,
 //! every unknown or self-referencing dependency, every unmapped task-bearing
-//! section, every unassigned content range and every duplicate ID of the
-//! whole import set is collected in one pass.
+//! section, every unassigned content range, every duplicate ID and every
+//! dependency cycle group of the whole import set is collected in one pass.
 
 use crate::markdown::ParsedImport;
-use crate::model::{ImportProblem, PROBLEM_NONCONFORMING_DEPS, PROBLEM_UNKNOWN_DEPENDENCY};
-use std::collections::HashMap;
+use crate::model::{
+    ImportProblem, PROBLEM_CYCLE, PROBLEM_NONCONFORMING_DEPS, PROBLEM_UNKNOWN_DEPENDENCY,
+};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Analyze one import set: a single-file import, or one bulk candidate with all
 /// of its ledger files.
@@ -38,6 +40,7 @@ pub fn analyze(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
         problems.extend(other_problems(parsed));
     }
     problems.extend(cross_file_duplicate_problems(sources));
+    problems.extend(cycle_problems(sources));
     problems
 }
 
@@ -105,6 +108,185 @@ fn cross_file_duplicate_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem
     problems
 }
 
+fn cycle_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
+    let known: HashSet<u64> = sources
+        .iter()
+        .flat_map(|parsed| parsed.tasks.iter().map(|task| task.id))
+        .collect();
+    let mut edges: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut locations: HashMap<(u64, u64), (String, usize, String)> = HashMap::new();
+    for parsed in sources {
+        for edge in &parsed.deps_edges {
+            if edge.task_id == edge.dependency || !known.contains(&edge.dependency) {
+                continue;
+            }
+            let entry = edges.entry(edge.task_id).or_default();
+            if !entry.contains(&edge.dependency) {
+                entry.push(edge.dependency);
+            }
+            locations
+                .entry((edge.task_id, edge.dependency))
+                .or_insert_with(|| (edge.file.clone(), edge.line_number, edge.value.clone()));
+        }
+    }
+    for targets in edges.values_mut() {
+        targets.sort_unstable();
+    }
+    let mut problems = Vec::new();
+    for component in strongly_connected_components(&known, &edges) {
+        if component.len() < 2 {
+            continue;
+        }
+        let members: HashSet<u64> = component.iter().copied().collect();
+        let cycle = cycle_through(component[0], &members, &edges);
+        let path = cycle
+            .iter()
+            .map(|id| format!("T-{id:03}"))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        let edge_text = cycle
+            .windows(2)
+            .map(|pair| {
+                let (source, target) = (pair[0], pair[1]);
+                match locations.get(&(source, target)) {
+                    Some((file, line, value)) => format!(
+                        "T-{source:03} at {file}:{line} depends on T-{target:03} (Deps: {value})"
+                    ),
+                    None => format!("T-{source:03} depends on T-{target:03}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        problems.push(ImportProblem {
+            kind: PROBLEM_CYCLE.to_string(),
+            message: format!(
+                "dependency cycle: {path} ({edge_text}); cycle group of {} task(s): {}",
+                component.len(),
+                join_ids(&component)
+            ),
+            file: None,
+            line: None,
+            task_id: None,
+            value: None,
+            keepable_ids: Vec::new(),
+            group: component.clone(),
+            fix: None,
+        });
+    }
+    problems
+}
+
+/// Iterative Tarjan: every strongly connected component of the dependency
+/// graph, sorted by smallest member.
+fn strongly_connected_components(
+    nodes: &HashSet<u64>,
+    edges: &HashMap<u64, Vec<u64>>,
+) -> Vec<Vec<u64>> {
+    let mut roots: Vec<u64> = nodes.iter().copied().collect();
+    roots.sort_unstable();
+    let mut next_index = 0usize;
+    let mut indices: HashMap<u64, usize> = HashMap::new();
+    let mut low: HashMap<u64, usize> = HashMap::new();
+    let mut stack: Vec<u64> = Vec::new();
+    let mut on_stack: HashSet<u64> = HashSet::new();
+    let mut components = Vec::new();
+    for root in roots {
+        if indices.contains_key(&root) {
+            continue;
+        }
+        indices.insert(root, next_index);
+        low.insert(root, next_index);
+        next_index += 1;
+        stack.push(root);
+        on_stack.insert(root);
+        let mut work: Vec<(u64, usize)> = vec![(root, 0)];
+        while !work.is_empty() {
+            let node = work.last().expect("frame").0;
+            let targets = edges.get(&node).map(Vec::as_slice).unwrap_or(&[]);
+            let position = work.last().expect("frame").1;
+            if position < targets.len() {
+                if let Some(frame) = work.last_mut() {
+                    frame.1 += 1;
+                }
+                let target = targets[position];
+                if !nodes.contains(&target) {
+                    continue;
+                }
+                match indices.get(&target).copied() {
+                    None => {
+                        indices.insert(target, next_index);
+                        low.insert(target, next_index);
+                        next_index += 1;
+                        stack.push(target);
+                        on_stack.insert(target);
+                        work.push((target, 0));
+                    }
+                    Some(target_index) => {
+                        if on_stack.contains(&target) {
+                            let node_low = low[&node];
+                            if target_index < node_low {
+                                low.insert(node, target_index);
+                            }
+                        }
+                    }
+                }
+            } else {
+                work.pop();
+                if let Some(parent) = work.last().map(|frame| frame.0) {
+                    let node_low = low[&node];
+                    if node_low < low[&parent] {
+                        low.insert(parent, node_low);
+                    }
+                }
+                if low[&node] == indices[&node] {
+                    let mut component = Vec::new();
+                    loop {
+                        let member = stack.pop().expect("component member");
+                        on_stack.remove(&member);
+                        component.push(member);
+                        if member == node {
+                            break;
+                        }
+                    }
+                    component.sort_unstable();
+                    components.push(component);
+                }
+            }
+        }
+    }
+    components
+}
+
+/// One concrete cycle through `start` inside its component.
+fn cycle_through(start: u64, members: &HashSet<u64>, edges: &HashMap<u64, Vec<u64>>) -> Vec<u64> {
+    let mut parents: HashMap<u64, u64> = HashMap::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    seen.insert(start);
+    let mut queue: VecDeque<u64> = VecDeque::new();
+    queue.push_back(start);
+    while let Some(node) = queue.pop_front() {
+        for target in edges.get(&node).map(Vec::as_slice).unwrap_or(&[]) {
+            if !members.contains(target) {
+                continue;
+            }
+            if *target == start {
+                let mut path = vec![node];
+                while *path.last().expect("path") != start {
+                    path.push(parents[path.last().expect("path")]);
+                }
+                path.reverse();
+                path.push(start);
+                return path;
+            }
+            if seen.insert(*target) {
+                parents.insert(*target, node);
+                queue.push_back(*target);
+            }
+        }
+    }
+    vec![start, start]
+}
+
 fn line_number(bytes: &[u8], offset: usize) -> usize {
     bytes
         .iter()
@@ -112,4 +294,102 @@ fn line_number(bytes: &[u8], offset: usize) -> usize {
         .filter(|byte| **byte == b'\n')
         .count()
         + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SourceSchema;
+
+    fn source(name: &str, text: &str) -> ParsedImport {
+        crate::markdown::parse_with_schema(
+            name.to_string(),
+            text.as_bytes().to_vec(),
+            None,
+            SourceSchema::CreateTask,
+        )
+        .expect("parse")
+    }
+
+    fn resolved(sources: &mut [ParsedImport]) -> Vec<ImportProblem> {
+        crate::markdown::resolve_create_task_deps_across(sources);
+        let refs: Vec<&ParsedImport> = sources.iter().collect();
+        analyze(&refs)
+    }
+
+    #[test]
+    fn two_independent_cycles_are_both_reported() {
+        let mut sources = vec![
+            source(
+                "a/TASKS.md",
+                "## In Progress\n### T-1 Alpha\nDeps: T-2\n### T-2 Beta\nDeps: T-1\n",
+            ),
+            source(
+                "a/TASKS.ARCHIVE.md",
+                "## Done\n### T-8 Eta\nDeps: T-9\n### T-9 Theta\nDeps: T-8\n",
+            ),
+        ];
+        let problems = resolved(&mut sources);
+        let cycles: Vec<&ImportProblem> = problems
+            .iter()
+            .filter(|problem| problem.kind == PROBLEM_CYCLE)
+            .collect();
+        assert_eq!(cycles.len(), 2, "{problems:#?}");
+        assert!(
+            cycles.iter().any(|cycle| cycle.message.contains("T-001")),
+            "{cycles:#?}"
+        );
+        let eta = cycles
+            .iter()
+            .find(|cycle| cycle.message.contains("T-008"))
+            .expect("T-008 cycle");
+        assert!(eta.message.contains("T-009"), "{eta:#?}");
+        assert!(
+            cycles
+                .iter()
+                .all(|cycle| cycle.message.contains("a/TASKS.ARCHIVE.md:")
+                    || cycle.message.contains("a/TASKS.md:")),
+            "{cycles:#?}"
+        );
+    }
+
+    #[test]
+    fn unknown_ids_do_not_hide_cycles() {
+        let mut sources = vec![source(
+            "a/TASKS.md",
+            "## In Progress\n### T-1 Alpha\nDeps: T-099\n### T-2 Beta\nDeps: T-3\n### T-3 Gamma\nDeps: T-2\n",
+        )];
+        let problems = resolved(&mut sources);
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|problem| problem.kind == PROBLEM_UNKNOWN_DEPENDENCY)
+                .count(),
+            1,
+            "{problems:#?}"
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|problem| problem.kind == PROBLEM_CYCLE)
+                .count(),
+            1,
+            "{problems:#?}"
+        );
+    }
+
+    #[test]
+    fn group_lists_every_entangled_task() {
+        let mut sources = vec![source(
+            "a/TASKS.md",
+            "## In Progress\n### T-1 Alpha\nDeps: T-2\n### T-2 Beta\nDeps: T-1, T-3\n### T-3 Gamma\nDeps: T-2\n",
+        )];
+        let problems = resolved(&mut sources);
+        let cycle = problems
+            .iter()
+            .find(|problem| problem.kind == PROBLEM_CYCLE)
+            .expect("cycle");
+        assert_eq!(cycle.group, vec![1, 2, 3], "{cycle:#?}");
+        assert!(cycle.message.contains("T-003"), "{}", cycle.message);
+    }
 }

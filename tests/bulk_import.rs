@@ -1142,6 +1142,81 @@ fn create_task_id_only_deps_create_edges_and_unknown_ids_block() {
 }
 
 #[test]
+fn create_task_reports_every_cycle_group_in_one_run() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("cycles").join("TASKS.md"),
+        "## In Progress\n### T-1 Alpha\nDeps: T-2\n### T-2 Beta\nDeps: T-1\n### T-8 Eta\nDeps: T-9\n### T-9 Theta\nDeps: T-8\n",
+    );
+    write(
+        &corpus.join("cycles").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-20 Done task\nbody\n",
+    );
+    write(
+        &corpus.join("unknown-and-cycle").join("TASKS.md"),
+        "## In Progress\n### T-1 Alpha\nDeps: T-99\n### T-2 Beta\nDeps: T-3\n### T-3 Gamma\nDeps: T-2\n",
+    );
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let items = candidates(&report_dir);
+    let cycles = candidate(&items, "cycles");
+    assert_eq!(cycles["bucket"], "unrecognized", "{cycles:#?}");
+    assert_eq!(cycles["problem_counts"]["cycle_groups"], 2, "{cycles:#?}");
+    let problems = cycles["problems"].as_array().expect("problems");
+    let groups = problems
+        .iter()
+        .filter(|problem| problem["kind"] == "cycle")
+        .map(|problem| problem["group"].clone())
+        .collect::<Vec<_>>();
+    assert!(
+        groups.contains(&serde_json::json!([1, 2])) && groups.contains(&serde_json::json!([8, 9])),
+        "{problems:#?}"
+    );
+    let first = problems
+        .iter()
+        .find(|problem| problem["kind"] == "cycle")
+        .expect("cycle problem");
+    let message = first["message"].as_str().expect("message");
+    assert!(message.contains("cycles/TASKS.md:"), "{message}");
+    assert!(message.contains("Deps: T-"), "{message}");
+    assert!(message.contains("cycle group of 2 task(s)"), "{message}");
+
+    let mixed = candidate(&items, "unknown-and-cycle");
+    assert_eq!(mixed["problem_counts"]["unknown_ids"], 1, "{mixed:#?}");
+    assert_eq!(mixed["problem_counts"]["cycle_groups"], 1, "{mixed:#?}");
+    let summary = fs::read_to_string(report_dir.join("summary.md")).expect("summary");
+    assert!(
+        summary
+            .contains("2 problem(s): 0 nonconforming Deps, 0 unknown IDs, 2 cycle groups, 0 other"),
+        "{summary}"
+    );
+}
+
+#[test]
 fn default_status_resolution_of_a_task_section_is_a_warning() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
