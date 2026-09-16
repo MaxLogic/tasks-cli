@@ -318,6 +318,13 @@ descriptive. Each task preview still carries `deps` (the resolved edges), and
 `consumed_metadata` still gains `Deps` when the line exists. The default schema,
 preview semantics and export round-trip are unchanged.
 
+Create-task ledgers may also carry `Archived from TASKS.md.` and
+`Task schema: 1` header lines. Both are recognized as structural markup
+alongside `Project:`, `Next task ID:` and `> Snapshot export` lines, so they do
+not block apply. That list is exhaustive: any other unassigned non-whitespace
+content still blocks apply, which is what catches a ledger schema this tool does
+not understand.
+
 Each actual schema migration creates and validates a fresh pre-upgrade backup
 named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`; older
 pre-migration backups are retained, and migrate output reports the new path.
