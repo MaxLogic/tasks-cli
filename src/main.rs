@@ -217,6 +217,52 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 cli.format,
             );
         }
+        Command::BulkImport { .. } => {
+            let options = match &cli.command {
+                Command::BulkImport {
+                    scan_root,
+                    map_file,
+                    report_dir,
+                    exclude,
+                    apply,
+                    quarantine_dir,
+                    delete_quarantined,
+                    source_schema,
+                } => tasks_cli::bulk::BulkOptions {
+                    data_root: data_root.clone(),
+                    scan_root: scan_root.clone(),
+                    map_file: map_file.clone(),
+                    report_dir: report_dir.clone(),
+                    excludes: exclude.clone(),
+                    apply: *apply,
+                    quarantine_dir: quarantine_dir.clone(),
+                    delete_quarantined: *delete_quarantined,
+                    source_schema: *source_schema,
+                },
+                _ => unreachable!(),
+            };
+            if options.delete_quarantined && !options.apply {
+                return Err(AppError::Usage(
+                    "--delete-quarantined requires --apply".to_string(),
+                ));
+            }
+            if options.delete_quarantined && options.quarantine_dir.is_none() {
+                return Err(AppError::Usage(
+                    "--delete-quarantined requires --quarantine-dir".to_string(),
+                ));
+            }
+            let report_dir = options.report_dir.display().to_string();
+            let run = tasks_cli::bulk::run(options)?;
+            let failed = run.failed;
+            let unrecognized = run.summary.unrecognized;
+            let failed_projects = run.summary.failed_projects;
+            envelope(None, CommandPayload::BulkImport(run), cli.format);
+            if failed > 0 {
+                return Err(AppError::Validation(format!(
+                    "{failed} candidate(s) were not migrated ({unrecognized} unrecognized, {failed_projects} failed apply or verification); see {report_dir}/unrecognized.md"
+                )));
+            }
+        }
         _ => {
             let project_id = resolved_project(&cli, &data_root)?;
             let mut store = match &cli.command {
@@ -439,6 +485,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 | Command::History { .. }
                 | Command::Init { .. }
                 | Command::Bind { .. }
+                | Command::BulkImport { .. }
                 | Command::Migrate => unreachable!(),
             }
         }

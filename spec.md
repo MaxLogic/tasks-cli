@@ -104,15 +104,17 @@ takes precedence over `TASKS_PROJECT`, and both take precedence over directory
 routing. An unknown translated directory fails without creating a database or
 backlog. Explicit flags override environment values. These `TASKS_PROJECT` and
 hidden `--route-root` routing defaults apply only to routed project commands.
-Native and delegated `init`/`bind` never consume them; those commands follow
-their own root-binding and project-creation contract. Reject delegation on
+Native and delegated `init`/`bind` never consume them and follow their own
+root-binding and project-creation contract; `bulk-import` also takes no injected
+routing default and follows its own multi-project contract. Reject delegation on
 non-WSL Linux or from Windows, and do
 not forward the delegation option to the child. Failure to start the configured
 executable must fail, never fall back to a local store.
 
 Use `std::process::Command`, never a shell command string. Preserve stdin,
 stdout, stderr and child exit code. Convert filesystem-valued arguments (`--root`,
-`--data-root`, `--body-file` except `-`, `--map-file`, `--file`, `--out`) with
+`--data-root`, `--body-file` except `-`, `--map-file`, `--file`, `--out`,
+`--scan-root`, `--report-dir`, `--quarantine-dir`) with
 `wslpath -w` as argument arrays; leave task text, IDs and search strings untouched.
 Resolve relative paths in the Linux caller's cwd before conversion, including
 not-yet-created output paths. For delegated data-root/root bindings, require
@@ -149,6 +151,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
+| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies, and only `--quarantine-dir` moves sources |
 | `export --out PATH` | Deterministic readable Markdown snapshot; refuse existing destination |
 | `backup --out PATH` | Consistent SQLite backup; refuse existing destination |
 | `migrate` | Explicit schema upgrade, with verified pre-upgrade backup |
@@ -271,7 +274,9 @@ exit 2. A section holding no task headings never needs a mapping, so prose
 sections such as `## Summary` do not require entries. The bare
 `{section: status}` form remains valid, and every existing rule and error -
 including mappings that conflict with a canonical section's own status - stays
-in force.
+in force. `bulk-import` applies one map to a whole corpus, so a literal entry
+that a given file does not contain is ignored there instead of failing (see
+Bulk migration); the single-file `import` keeps the strict unknown-section error.
 Store shared non-task rules in project rules in source order, retain original
 sections in import provenance, and expose the proposed rules in the preview.
 Do not infer dependencies from arbitrary T-N mentions; keep prose references.
@@ -339,6 +344,67 @@ V1 recovery procedure: stop task clients, preserve the whole damaged store direc
 for diagnosis, validate a backup at a new isolated data root, then explicitly bind
 the restored UUID there. No in-place destructive restore command. Back up registry
 bindings separately or recreate them with bind after restoring the UUID directory.
+
+## Bulk migration
+
+`tasks bulk-import --scan-root PATH --map-file FILE --report-dir DIR
+[--exclude GLOB]... [--apply] [--quarantine-dir DIR] [--delete-quarantined]
+[--source-schema NAME]` migrates a tree of Markdown ledgers into one project per
+ledger directory. Dry run is the default and writes nothing anywhere except the
+report directory; apply requires the explicit flag. The whole run refuses to
+start when `--report-dir` is not writable.
+
+Stages, in order:
+1. Scan `--scan-root` for `TASKS.md` and `TASKS.ARCHIVE.md`. Prune `.git`,
+   `target`, `node_modules`, `3rdParty` and every `--exclude` glob. Never follow
+   symlinks or reparse points out of the scan root. A discovered path is data,
+   never an argument: a directory named `--maxTdb` is handled as a path.
+2. Group: one candidate project per directory holding a ledger. A nested ledger
+   is its own candidate and is never merged into an ancestor.
+3. Classify each candidate into exactly one bucket: recognized,
+   recognized-with-warnings, unrecognized, or excluded. Unrecognized means the
+   preview cannot assign a status to a section that holds tasks, or the files
+   parse with an error; the recorded reason names the file, the section or line,
+   and what was expected.
+4. Preview every recognized candidate through the import preview.
+5. Apply, only with `--apply`: initialize the project against its directory,
+   import all of its ledger files in one apply with the hashes from step 4, then
+   verify.
+6. Verify by re-exporting and comparing task count, every ID, every title, every
+   body byte, every extracted dependency and the section-to-status assignment
+   against the preview and the store. A project failing verification is left in
+   place, its sources are not quarantined, and the run continues and reports it.
+7. Quarantine, only with `--quarantine-dir` and only for verified projects: move
+   the sources below the quarantine directory, mirroring their path below the
+   scan root, and write a manifest with the original absolute path, size,
+   SHA-256 and destination. `--delete-quarantined` deletes the quarantined
+   copies afterwards and requires `--apply`, `--quarantine-dir` and a clean
+   verify for that project; it has no form that deletes a source that was never
+   quarantined. Without `--quarantine-dir`, nothing is moved or deleted.
+
+A dry run performs stages 1 to 4 and reports exactly what stages 5 to 7 would
+do, including the project UUID it would create, the per-section status
+assignment, the task count and, when `--quarantine-dir` is given, the quarantine
+destination of every file. The project UUID is derived deterministically from
+the candidate directory and is reused by apply; an existing registry binding
+wins.
+
+Reporting writes `run.jsonl` (one JSON object per candidate), `summary.md` for a
+human, and `unrecognized.md` (every unmigrated file with its reason) under
+`--report-dir`, plus `quarantine-manifest.json` when quarantine runs. Per
+migrated root the reports list every `AGENTS.md` and `CLAUDE.md` below it that
+contains the string `TASKS.md`, with line numbers; the tool reports those files
+and never edits them.
+
+Bulk runs apply one map to the whole corpus, so a literal `sections` entry that
+a given file does not contain is ignored instead of rejected; the single-file
+`import` keeps the strict unknown-section error. Exit codes follow the existing
+table: 0 when no candidate is unrecognized and every applied project verified,
+where excluded candidates never fail a run; 2 for usage and map errors, including
+a completed run that reports unrecognized candidates or failed verifications and
+says how many; 6 for I/O and database failure. Rehearsals run against copies of
+real ledgers, never the live files, and never create projects in the default
+data root.
 
 ## Performance and output targets
 

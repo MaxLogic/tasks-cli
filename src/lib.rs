@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod bulk;
 pub mod cli;
 pub mod error;
 pub mod interop;

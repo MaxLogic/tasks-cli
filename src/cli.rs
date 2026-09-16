@@ -110,6 +110,24 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    BulkImport {
+        #[arg(long = "scan-root")]
+        scan_root: PathBuf,
+        #[arg(long = "map-file")]
+        map_file: PathBuf,
+        #[arg(long = "report-dir")]
+        report_dir: PathBuf,
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        #[arg(long = "quarantine-dir")]
+        quarantine_dir: Option<PathBuf>,
+        #[arg(long = "delete-quarantined", default_value_t = false)]
+        delete_quarantined: bool,
+        #[arg(long = "source-schema", value_enum, default_value = "canonical")]
+        source_schema: SourceSchema,
+    },
     Backup {
         #[arg(long)]
         out: PathBuf,

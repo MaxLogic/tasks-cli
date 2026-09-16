@@ -56,6 +56,9 @@ fn path_flag(arg: &str) -> Option<(&'static str, Option<&str>)> {
         "--map-file",
         "--file",
         "--out",
+        "--scan-root",
+        "--report-dir",
+        "--quarantine-dir",
     ] {
         if arg == flag {
             return Some((flag, None));
@@ -102,7 +105,11 @@ fn convert_args(args: &[String]) -> Result<Vec<String>, AppError> {
 }
 
 fn should_inject_project_context(cli: &Cli) -> bool {
-    cli.project.is_none() && !matches!(&cli.command, Command::Init { .. } | Command::Bind { .. })
+    cli.project.is_none()
+        && !matches!(
+            &cli.command,
+            Command::Init { .. } | Command::Bind { .. } | Command::BulkImport { .. }
+        )
 }
 
 pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
