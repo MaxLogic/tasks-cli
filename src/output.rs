@@ -228,9 +228,15 @@ impl Envelope {
                 out.push_str(&format!("source_sha256: {}\n", report.source_sha256));
                 for task in &report.tasks {
                     let consumed = task.consumed_metadata.join(",");
+                    let deps = task
+                        .deps
+                        .iter()
+                        .map(|dep| format!("T-{dep:03}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
                     out.push_str(&format!(
-                        "T-{0:03} {1} {2} consumed=[{3}] {4}\n",
-                        task.id, task.status, task.section, consumed, task.title
+                        "T-{0:03} {1} {2} consumed=[{3}] deps=[{4}] {5}\n",
+                        task.id, task.status, task.section, consumed, deps, task.title
                     ));
                 }
                 for section in &report.sections {
@@ -336,6 +342,7 @@ mod tests {
                         title: "Title".to_string(),
                         section: "ready".to_string(),
                         status: crate::model::TaskStatus::Ready,
+                        deps: Vec::new(),
                         consumed_metadata: vec!["Status".to_string(), "Body".to_string()],
                     }],
                     sections: vec![crate::model::ImportSectionPreview {
@@ -359,7 +366,7 @@ mod tests {
             },
         };
         let text = envelope.text();
-        assert!(text.contains("T-001 ready ready consumed=[Status,Body] Title"));
+        assert!(text.contains("T-001 ready ready consumed=[Status,Body] deps=[] Title"));
         assert!(text.contains("section: ready status=ready contains_tasks=true"));
         assert!(text.contains("unassigned: 4-8 leftover"));
         assert!(text.contains("has_bom: true"));

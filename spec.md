@@ -273,6 +273,18 @@ form, and preview lists the consumed metadata fields. A task before the first
 `##` heading is reported under the pseudo-section `<no section>` and blocks
 apply unless that exact pseudo-section is explicitly mapped.
 
+`import --source-schema canonical` (the default) keeps that metadata contract
+unchanged. `--source-schema create-task` additionally recognizes the
+create-task ledger block: within a task block, the first line whose text begins
+at column zero with `Deps:` (fenced code excluded) is parsed with the same
+comma-separated `T-` ID syntax and the `-`/`none` empty forms; extracted IDs are
+recorded as task dependencies and listed per task in the preview (each task
+preview carries `deps`, and `consumed_metadata` gains `Deps`). Extraction is
+additive: the `Deps:` line and every other source byte stay in the stored body
+unchanged, nothing is consumed, and non-task prerequisite text remains
+descriptive. The default schema, preview semantics and export round-trip are
+unchanged.
+
 Each actual schema migration creates and validates a fresh pre-upgrade backup
 named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`; older
 pre-migration backups are retained, and migrate output reports the new path.

@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::model::{
-    parse_task_id, ImportSectionPreview, ImportTaskPreview, SourceRange, TaskStatus,
+    parse_task_id, ImportSectionPreview, ImportTaskPreview, SourceRange, SourceSchema, TaskStatus,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -239,6 +239,46 @@ fn parse_dependencies(value: &str) -> Result<Vec<u64>, AppError> {
     Ok(deps)
 }
 
+fn extract_deps_line<'a>(
+    lines: &[Line<'a>],
+    fence_lines: &[bool],
+    start: usize,
+    end: usize,
+) -> Option<&'a str> {
+    for index in start..end.min(lines.len()) {
+        if fence_lines.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Some(value) = lines[index].text.strip_prefix("Deps:") {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn parse_deps_line(value: &str) -> Result<Vec<u64>, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    let mut deps = Vec::new();
+    for raw in value.split(',') {
+        let item = raw.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if item
+            .get(..2)
+            .is_some_and(|head| head.eq_ignore_ascii_case("T-"))
+        {
+            deps.push(parse_task_id(item).map_err(AppError::Validation)?);
+        }
+    }
+    deps.sort_unstable();
+    deps.dedup();
+    Ok(deps)
+}
+
 struct MetadataBlock {
     title: Option<String>,
     status: Option<TaskStatus>,
@@ -437,6 +477,15 @@ pub fn parse(
     source: Vec<u8>,
     map_file: Option<&Path>,
 ) -> Result<ParsedImport, AppError> {
+    parse_with_schema(source_name, source, map_file, SourceSchema::Canonical)
+}
+
+pub fn parse_with_schema(
+    source_name: impl Into<String>,
+    source: Vec<u8>,
+    map_file: Option<&Path>,
+    schema: SourceSchema,
+) -> Result<ParsedImport, AppError> {
     let text = std::str::from_utf8(&source)
         .map_err(|_| AppError::Validation("import is not valid UTF-8".to_string()))?;
     let source_hash = sha256(&source);
@@ -444,15 +493,18 @@ pub fn parse(
     let mappings = load_mapping(map_file)?;
     let lines = lines_with_offsets(text);
     let mut fences = None;
+    let mut fence_lines = vec![false; lines.len()];
     let mut sections: Vec<(usize, String)> = Vec::new();
     let mut task_starts = Vec::new();
     let mut top_level_starts = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if fences.is_some() {
+            fence_lines[index] = true;
             update_fence(&mut fences, line.text);
             continue;
         }
         if fence_candidate(line.text).is_some() {
+            fence_lines[index] = true;
             update_fence(&mut fences, line.text);
             continue;
         }
@@ -523,6 +575,16 @@ pub fn parse(
             body_start = metadata.body_start;
             consumed_metadata = metadata.consumed;
         }
+        if schema == SourceSchema::CreateTask {
+            if let Some(value) =
+                extract_deps_line(&lines, &fence_lines, *start_index + 1, end_index)
+            {
+                deps.extend(parse_deps_line(value)?);
+                deps.sort_unstable();
+                deps.dedup();
+                consumed_metadata.push("Deps".to_string());
+            }
+        }
         let body_end = lines
             .get(end_index.saturating_sub(1))
             .map(|line| line.end)
@@ -542,6 +604,7 @@ pub fn parse(
             title: title.clone(),
             section: section.clone(),
             status: status.clone(),
+            deps: deps.clone(),
             consumed_metadata,
         });
         tasks.push(ParsedTask {
@@ -693,5 +756,45 @@ mod tests {
         assert_eq!(parsed.rules, "rule");
         assert_eq!(parsed.unassigned_ranges.len(), 1);
         assert!(parsed.has_unknown_content);
+    }
+
+    #[test]
+    fn create_task_schema_extracts_deps_without_consuming_the_body() {
+        let input = b"## in-progress\n### T-1 Alpha\nOutcome:\n- ok\nDeps: T-2, T-3\nProof:\n- Run: x\n### T-2 Beta\nDeps: none\nbody\n### T-3 Gamma\nDeps: -\nbody\n".to_vec();
+        let canonical = parse("block.md", input.clone(), None).unwrap();
+        assert!(canonical.tasks[0].deps.is_empty());
+        assert!(!canonical.task_previews[0]
+            .consumed_metadata
+            .contains(&"Deps".to_string()));
+
+        let parsed = parse_with_schema("block.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert_eq!(parsed.tasks[0].deps, vec![2, 3]);
+        assert!(parsed.tasks[1].deps.is_empty());
+        assert!(parsed.tasks[2].deps.is_empty());
+        assert!(parsed.task_previews[0]
+            .consumed_metadata
+            .contains(&"Deps".to_string()));
+        assert_eq!(parsed.tasks[0].body, canonical.tasks[0].body);
+        assert!(parsed.tasks[0].body.contains("Deps: T-2, T-3"));
+        assert_eq!(parsed.task_previews[0].deps, vec![2, 3]);
+    }
+
+    #[test]
+    fn create_task_schema_ignores_fenced_and_later_deps_lines() {
+        let input =
+            b"## ready\n### T-1 One\n```\nDeps: T-2\n```\nDeps: vendor SDK, T-3\nDeps: T-4\nbody\n"
+                .to_vec();
+        let parsed =
+            parse_with_schema("fenced-deps.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert_eq!(parsed.tasks[0].deps, vec![3]);
+        assert!(parsed.tasks[0].body.contains("Deps: vendor SDK, T-3"));
+        assert!(parsed.tasks[0].body.contains("Deps: T-4"));
+    }
+
+    #[test]
+    fn create_task_deps_typos_fail_only_under_the_opt_in() {
+        let input = b"## backlog\n### T-1 One\nDeps: T-abc\nbody\n".to_vec();
+        assert!(parse("typo.md", input.clone(), None).is_ok());
+        assert!(parse_with_schema("typo.md", input, None, SourceSchema::CreateTask).is_err());
     }
 }

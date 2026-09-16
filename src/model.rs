@@ -67,6 +67,17 @@ impl TaskStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SourceSchema {
+    /// Canonical export metadata (`Status:`/`Version:`/`Depends on:`/`Body:`).
+    #[default]
+    #[value(name = "canonical")]
+    Canonical,
+    /// create-task ledger blocks with a top-level `Deps:` line.
+    #[value(name = "create-task")]
+    CreateTask,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
     pub id: u64,
@@ -157,6 +168,8 @@ pub struct ImportTaskPreview {
     pub title: String,
     pub section: String,
     pub status: TaskStatus,
+    #[serde(default)]
+    pub deps: Vec<u64>,
     #[serde(default)]
     pub consumed_metadata: Vec<String>,
 }
