@@ -1,7 +1,7 @@
 # tasks-cli verification report
 
-Date: 2026-09-15
-Candidate: main after numbered maintenance commits
+Date: 2026-09-16
+Candidate: main after numbered maintenance commits and the follow-up recovery-test fix
 Scope: Windows x64 release binary and Ubuntu 22.04 WSL x64 release binary.
 
 ## Summary
@@ -9,6 +9,8 @@ Scope: Windows x64 release binary and Ubuntu 22.04 WSL x64 release binary.
 The seven requested maintenance items are implemented in separate commits. Migration now creates a new validated pre-upgrade backup for every actual migration attempt, reports its path, and does not reuse or delete older backups. Import BOM handling, readable text previews, routing documentation, dead-code removal, and batched list/search dependency reads are complete.
 
 All current-binary checks below are measured from the candidate after the item commits. No prior trial counts are reused. No live TASKS.md file or live task backlog was modified.
+
+One first-run failure occurred and is recorded rather than smoothed over: the first parallel WSL test run of the correction batch failed on the recovery test's fixed ten-second readiness wait. It was rerun to pass, and follow-up fix 1 removes the cause. The gate numbers below are the post-fix first-run results.
 
 ## Numbered commits
 
@@ -22,6 +24,13 @@ All current-binary checks below are measured from the candidate after the item c
 | 6 | 0047be0 | Routing, migration-backup, and BOM documentation |
 | 7 | 7826d53 | One parameterized dependency query for each list/search page |
 | Formatting | 7396607 | Mechanical rustfmt changes recorded separately |
+
+Follow-up fixes, each in its own commit:
+
+| Fix | Commit | Result |
+| --- | --- | --- |
+| 1 | d5ea677 | Precommit readiness wait polls while the writer process is alive, fails fast if it exits before the marker appears, and is capped at five minutes; cold throwaway-target proof |
+| 2 | Report correction commit | Records the failed first parallel WSL test run and the rerun, and the removal of the leaked extension-less WSL binary |
 
 ## Verification commands and exact results
 
@@ -39,14 +48,20 @@ The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
 
 For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 63 passed, 0 failed, and 0 ignored. This is 15 unit tests and 48 nonzero integration tests; the additional result line is the zero-test doctest target.
 
-Evidence:
+The five gates were re-run unchanged after follow-up fix 1, and the first and only post-fix run passed with the same statuses (fmt=0, clippy=0, test=0, serial=0, build=0) and totals (63 passed, 0 failed in both test modes). The Windows run was incremental: cargo clean was not run because the default target directory also contains the retained evidence tree. The release build was already up to date and reproduced the recorded artifact hash.
 
-- target/evidence/item-2-windows-gates/fmt.log
-- target/evidence/item-2-windows-gates/clippy.log
-- target/evidence/item-2-windows-gates/test.log
-- target/evidence/item-2-windows-gates/serial.log
-- target/evidence/item-2-windows-gates/build.log
-- target/evidence/item-2-windows-gates/status.txt
+Evidence (post-fix re-run):
+
+- target/evidence/item-1-gates-windows/fmt.log
+- target/evidence/item-1-gates-windows/clippy.log
+- target/evidence/item-1-gates-windows/test.log
+- target/evidence/item-1-gates-windows/serial.log
+- target/evidence/item-1-gates-windows/build.log
+- target/evidence/item-1-gates-windows/status.txt
+- target/evidence/item-1-gates-windows/artifact.txt
+- target/evidence/item-1-gates-windows/run.ps1
+
+Correction-batch evidence: target/evidence/item-2-windows-gates/.
 
 ### Ubuntu/WSL
 
@@ -60,21 +75,46 @@ Executed inside Ubuntu 22.04 WSL with CARGO_TARGET_DIR=target/linux:
     cargo test --locked -- --test-threads=1
     cargo build --release --locked
 
-The command statuses were fmt=0, clippy=0, test=0, serial=0, build=0.
+The five gates started with cargo clean. The recorded statuses were clean=0, fmt=0, clippy=0, test=0, serial=0, build=0; the test=0 is the rerun result described next, not the first parallel run.
+
+The first parallel test run of this batch did not pass. newer_schema_fails_safely_and_killed_precommit_writer_rolls_back failed because its fixed ten-second readiness wait expired while the nested cargo run --features test-hooks invocation was still compiling the test-hooks binaries (target/evidence/item-2-correction-wsl-gates/test-parallel-initial.log). The test was rerun and passed (target/evidence/item-2-correction-wsl-gates/test-rerun-status.txt), and follow-up fix 1 (d5ea677) removed the cause: the wait now polls while the writer process is alive, fails immediately if it exits before the marker appears, and is capped at five minutes.
+
+The full gate run was repeated against the fixed candidate; its first and only post-fix run passed with clean=0, fmt=0, clippy=0, test=0, serial=0, build=0. The recovery test passed in the parallel mode in 12.11s, which the old fixed wait could not have survived.
 
 The earlier WSL run used the shared default target directory and was repeated here with CARGO_TARGET_DIR=target/linux in the same shell.
 
 For both cargo test commands, the captured output contained 15 running-test lines and 16 test-result lines. The result totals were 65 passed, 0 failed, and 0 ignored. This is 16 unit tests and 49 nonzero integration tests; the additional result line is the zero-test doctest target.
 
+Evidence (post-fix re-run):
+
+- target/evidence/item-1-gates-wsl/fmt.log
+- target/evidence/item-1-gates-wsl/clippy.log
+- target/evidence/item-1-gates-wsl/test.log
+- target/evidence/item-1-gates-wsl/serial.log
+- target/evidence/item-1-gates-wsl/build.log
+- target/evidence/item-1-gates-wsl/status.txt
+- target/evidence/item-1-gates-wsl/artifact.txt
+- target/evidence/item-1-gates-wsl/invocation-note.txt
+- target/evidence/item-1-gates-wsl.sh
+
+Failed first run and rerun: target/evidence/item-2-correction-wsl-gates/test-parallel-initial.log, test-rerun-status.txt, test-rerun-results.txt.
+
+### Recovery readiness proof (throwaway cold target)
+
+The fix was proven once against a fresh throwaway target directory outside target/ and target/linux/, on the same filesystem as the gate targets:
+
+    cargo clean
+    cargo test --locked --test recovery
+
+Result: clean=0, test=0; 4 passed, 0 failed; the test file finished in 34.60s with a cold nested compile. The throwaway target directory (467 MB) was deleted after the run.
+
 Evidence:
 
-- target/evidence/item-2-correction-wsl-gates/fmt.log
-- target/evidence/item-2-correction-wsl-gates/clippy.log
-- target/evidence/item-2-correction-wsl-gates/test.log
-- target/evidence/item-2-correction-wsl-gates/serial.log
-- target/evidence/item-2-correction-wsl-gates/build.log
-- target/evidence/item-2-correction-wsl-gates/status.txt
-- target/evidence/item-2-correction-wsl-gates/artifact.txt
+- target/evidence/item-1-recovery-cold-build/cold-recovery.log
+- target/evidence/item-1-recovery-cold-build/status.txt
+- target/evidence/item-1-recovery-cold-build/run-meta.txt
+- target/evidence/item-1-recovery-cold-build/run.sh
+- target/evidence/item-1-recovery-cold-build/cleanup-throwaway.sh
 
 ## Release artifacts
 
@@ -84,6 +124,7 @@ Evidence:
 - Linux x64 target/linux/release/tasks
   - Size: 3,992,160 bytes
   - SHA-256: A7593D59A328A3B003B7F1E20DBCA2984D878AC48D2DD396C0CA9C68F8988F36
+- The extension-less WSL-built binaries left in the shared Windows target directories by the earlier unscoped WSL run were removed: target/release/tasks was already absent, and target/release/deps/tasks-42c0fe6702b2e502, target/debug/tasks, and target/debug/deps/tasks-9b4c447236f414f1 were deleted. The recorded artifacts above are unchanged by that cleanup.
 
 ## Current-binary PFM and DelphiAiKit trials
 
@@ -158,4 +199,4 @@ Evidence:
 
 ## Release judgment
 
-Ready with minor fixes. The requested maintenance changes and current-binary platform evidence are complete; no push was performed.
+Ready with minor fixes. The requested maintenance changes, the follow-up recovery-test fix, and the current-binary platform evidence are complete; the post-fix gate runs above are first-run passes. No push was performed.
