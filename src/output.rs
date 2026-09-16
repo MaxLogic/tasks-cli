@@ -168,6 +168,9 @@ impl Envelope {
             report.has_unknown_content
         ));
         out.push_str(&format!("has_bom: {}\n", report.has_bom));
+        for warning in &report.warnings {
+            out.push_str(&format!("warning: {warning}\n"));
+        }
         out
     }
 
@@ -438,6 +441,7 @@ mod tests {
                         preview: "leftover".to_string(),
                     }],
                     has_unknown_content: true,
+                    warnings: vec!["input.md: line 2: task T-001: Deps residual 'T-099' did not become a dependency edge".to_string()],
                 },
                 already_imported: false,
                 applied: false,
@@ -448,6 +452,7 @@ mod tests {
         assert!(text.contains("section: ready status=ready contains_tasks=true"));
         assert!(text.contains("unassigned: 4-8 leftover"));
         assert!(text.contains("has_bom: true"));
+        assert!(text.contains("warning: input.md: line 2"));
         assert!(!text.contains("ImportTaskPreview"));
     }
 }

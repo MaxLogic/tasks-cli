@@ -1597,6 +1597,7 @@ impl Store {
             ambiguous_sections: parsed.ambiguous_sections.clone(),
             unassigned_ranges: parsed.unassigned_ranges.clone(),
             has_unknown_content: parsed.has_unknown_content,
+            warnings: parsed.warnings(),
         }
     }
 
