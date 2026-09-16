@@ -425,10 +425,16 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         parsed.push(item);
                     }
                     markdown::resolve_create_task_deps_across(&mut parsed);
-                    let problems = {
+                    let mut problems = {
                         let refs: Vec<&markdown::ParsedImport> = parsed.iter().collect();
                         tasks_cli::problems::analyze(&refs)
                     };
+                    let sources = parsed
+                        .iter()
+                        .map(|item| (item.source_name.clone(), item.source_hash.clone()))
+                        .collect::<Vec<_>>();
+                    let (state_problems, _) = store.import_state_problems(&sources)?;
+                    problems.extend(state_problems);
                     let problem_counts = ProblemCounts::of(&problems);
                     if apply {
                         if expect_sha256.len() != files.len() {

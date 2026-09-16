@@ -1,8 +1,8 @@
 use crate::error::AppError;
 use crate::model::{
     parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, SchemaClass,
-    SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_SELF_DEPENDENCY,
-    PROBLEM_UNKNOWN_DEPENDENCY,
+    SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_OTHER,
+    PROBLEM_SELF_DEPENDENCY, PROBLEM_UNKNOWN_DEPENDENCY,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ pub struct ParsedTask {
     /// baseline by `resolve_create_task_deps`.
     pub deps: Vec<u64>,
     pub metadata_deps: Vec<u64>,
+    /// 1-based line of the canonical `Depends on:` line, when the task has one.
+    pub metadata_deps_line: Option<usize>,
 }
 
 /// A create-task `Deps:` line, kept verbatim so dependency edges can be
@@ -587,7 +589,25 @@ pub(crate) fn resolve_create_task_deps(parsed: &mut ParsedImport, known: &HashSe
             ));
             continue;
         };
+        let mut seen_in_line: HashSet<u64> = HashSet::new();
+        let mut reported_in_line: HashSet<u64> = HashSet::new();
         for id in ids {
+            if !seen_in_line.insert(id) && reported_in_line.insert(id) {
+                parsed.deps_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{}: line {}: task T-{:03} lists dependency T-{:03} more than once; fix: remove the duplicate entry",
+                        parsed.source_name, line.line_number, line.task_id, id
+                    ),
+                    file: Some(parsed.source_name.clone()),
+                    line: Some(line.line_number),
+                    task_id: Some(line.task_id),
+                    value: Some(line.value.clone()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some("remove the duplicate entry".to_string()),
+                });
+            }
             if id == line.task_id {
                 parsed.deps_problems.push(ImportProblem {
                     kind: PROBLEM_SELF_DEPENDENCY.to_string(),
@@ -639,16 +659,61 @@ pub(crate) fn resolve_create_task_deps(parsed: &mut ParsedImport, known: &HashSe
         }
     }
     debug_assert_eq!(parsed.tasks.len(), parsed.task_previews.len());
+    let name = parsed.source_name.clone();
+    let edge_lines: HashMap<(u64, u64), usize> = parsed
+        .deps_edges
+        .iter()
+        .map(|edge| ((edge.task_id, edge.dependency), edge.line_number))
+        .collect();
+    let mut duplicate_problems = Vec::new();
     for (task, preview) in parsed.tasks.iter_mut().zip(parsed.task_previews.iter_mut()) {
         let mut deps = task.metadata_deps.clone();
         if let Some(resolved) = edges.get(&task.id) {
             deps.extend(resolved.iter().copied());
+        }
+        // A dependency listed more than once is merged into a single edge, so
+        // it never reaches apply. Preview still reports it: create and update
+        // reject the same list, and a one-way migration must not hide it.
+        let mut seen_deps: HashSet<u64> = HashSet::new();
+        let mut reported_deps: HashSet<u64> = HashSet::new();
+        for dep in &deps {
+            if !seen_deps.insert(*dep) && reported_deps.insert(*dep) {
+                let line = if task
+                    .metadata_deps
+                    .iter()
+                    .filter(|entry| *entry == dep)
+                    .count()
+                    > 1
+                {
+                    task.metadata_deps_line.unwrap_or(task.heading_line)
+                } else {
+                    edge_lines
+                        .get(&(task.id, *dep))
+                        .copied()
+                        .unwrap_or(task.heading_line)
+                };
+                duplicate_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{name}: line {line}: task T-{:03} lists dependency T-{:03} more than once; fix: remove the duplicate entry",
+                        task.id, dep
+                    ),
+                    file: Some(name.clone()),
+                    line: Some(line),
+                    task_id: Some(task.id),
+                    value: None,
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some("remove the duplicate entry".to_string()),
+                });
+            }
         }
         deps.sort_unstable();
         deps.dedup();
         preview.deps = deps.clone();
         task.deps = deps;
     }
+    parsed.deps_problems.extend(duplicate_problems);
 }
 
 /// Resolve create-task Deps lines across a whole import set: a bulk candidate
@@ -668,6 +733,7 @@ struct MetadataBlock {
     title: Option<String>,
     status: Option<TaskStatus>,
     deps: Vec<u64>,
+    deps_line: Option<usize>,
     body_start: usize,
     consumed: Vec<String>,
 }
@@ -703,6 +769,7 @@ fn metadata_block(
             title: None,
             status: None,
             deps: Vec::new(),
+            deps_line: None,
             body_start: lines[cursor].end,
             consumed: vec!["Body".to_string()],
         }));
@@ -789,6 +856,7 @@ fn metadata_block(
         title,
         status: Some(status),
         deps,
+        deps_line: Some(deps_line),
         body_start: lines[body_index].end,
         consumed,
     }))
@@ -989,6 +1057,7 @@ pub(crate) fn parse_with_map(
             .unwrap_or_else(|| NO_SECTION.to_string());
         let mut status = map.status_for(&section).unwrap_or(TaskStatus::Backlog);
         let mut deps = Vec::new();
+        let mut metadata_deps_line = None;
         let mut body_start = lines[*start_index].end;
         let mut consumed_metadata = Vec::new();
         if let Some(metadata) = metadata_block(&lines, *start_index + 1, end_index, &source_name)? {
@@ -999,6 +1068,7 @@ pub(crate) fn parse_with_map(
                 status = metadata_status;
             }
             deps = metadata.deps;
+            metadata_deps_line = metadata.deps_line;
             body_start = metadata.body_start;
             consumed_metadata = metadata.consumed;
         }
@@ -1048,6 +1118,7 @@ pub(crate) fn parse_with_map(
             status,
             metadata_deps: deps.clone(),
             deps,
+            metadata_deps_line,
         });
     }
 
