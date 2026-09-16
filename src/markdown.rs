@@ -49,12 +49,15 @@ pub struct ParsedImport {
     pub has_unknown_content: bool,
     pub deps_lines: Vec<DepsLine>,
     pub deps_warnings: Vec<String>,
+    pub section_warnings: Vec<String>,
 }
 
 impl ParsedImport {
     /// Every warning recorded while parsing and resolving this source.
     pub fn warnings(&self) -> Vec<String> {
-        self.deps_warnings.clone()
+        let mut warnings = self.section_warnings.clone();
+        warnings.extend(self.deps_warnings.iter().cloned());
+        warnings
     }
 }
 
@@ -205,6 +208,14 @@ pub(crate) struct SectionMap {
     relaxed_missing_sections: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatusSource {
+    Literal,
+    Pattern,
+    Canonical,
+    Default,
+}
+
 impl SectionMap {
     /// Bulk runs apply one map to a whole corpus, so a literal section that a
     /// given file does not contain is ignored instead of rejected.
@@ -214,18 +225,27 @@ impl SectionMap {
         copy
     }
 
+    fn resolve(&self, section: &str) -> Option<(TaskStatus, StatusSource)> {
+        if let Some(status) = self.literal.get(section) {
+            return Some((status.clone(), StatusSource::Literal));
+        }
+        if let Some((_, status)) = self
+            .patterns
+            .iter()
+            .find(|(pattern, _)| pattern.is_match(section))
+        {
+            return Some((status.clone(), StatusSource::Pattern));
+        }
+        if let Some(status) = canonical_status(section) {
+            return Some((status, StatusSource::Canonical));
+        }
+        self.default_status
+            .clone()
+            .map(|status| (status, StatusSource::Default))
+    }
+
     fn status_for(&self, section: &str) -> Option<TaskStatus> {
-        self.literal
-            .get(section)
-            .cloned()
-            .or_else(|| {
-                self.patterns
-                    .iter()
-                    .find(|(pattern, _)| pattern.is_match(section))
-                    .map(|(_, status)| status.clone())
-            })
-            .or_else(|| canonical_status(section))
-            .or_else(|| self.default_status.clone())
+        self.resolve(section).map(|(status, _)| status)
     }
 }
 
@@ -706,6 +726,7 @@ pub(crate) fn parse_with_map(
     map: &SectionMap,
     schema: SourceSchema,
 ) -> Result<ParsedImport, AppError> {
+    let source_name: String = source_name.into();
     let text = std::str::from_utf8(&source)
         .map_err(|_| AppError::Validation("import is not valid UTF-8".to_string()))?;
     let source_hash = sha256(&source);
@@ -915,14 +936,26 @@ pub(crate) fn parse_with_map(
 
     let mut section_previews = Vec::new();
     let mut unmapped_sections = Vec::new();
+    let mut section_warnings = Vec::new();
     for (position, (section_index, heading)) in sections.iter().enumerate() {
         let end = section_end(&sections, position, lines.len());
         let contains_tasks = task_starts
             .iter()
             .any(|task| *task > *section_index && *task < end);
-        let status = map.status_for(heading);
+        let resolution = map.resolve(heading);
+        let status = resolution.as_ref().map(|(status, _)| status.clone());
+        let resolved_by_default = matches!(resolution, Some((_, StatusSource::Default)));
         if contains_tasks && status.is_none() && !unmapped_sections.contains(heading) {
             unmapped_sections.push(heading.clone());
+        }
+        if contains_tasks && resolved_by_default {
+            let assigned = status
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unmapped".to_string());
+            section_warnings.push(format!(
+                "{source_name}: section '{heading}' holds tasks and was resolved only by default_status to {assigned}; add a literal sections entry or a matching section_pattern"
+            ));
         }
         section_previews.push(ImportSectionPreview {
             heading: heading.clone(),
@@ -934,9 +967,19 @@ pub(crate) fn parse_with_map(
         .iter()
         .any(|start| section_for_line(&sections, *start).is_none())
     {
-        let status = map.status_for(NO_SECTION);
+        let resolution = map.resolve(NO_SECTION);
+        let status = resolution.as_ref().map(|(status, _)| status.clone());
         if status.is_none() {
             unmapped_sections.push(NO_SECTION.to_string());
+        }
+        if matches!(resolution, Some((_, StatusSource::Default))) {
+            let assigned = status
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unmapped".to_string());
+            section_warnings.push(format!(
+                "{source_name}: section '{NO_SECTION}' holds tasks and was resolved only by default_status to {assigned}; add a literal sections entry or a matching section_pattern"
+            ));
         }
         section_previews.push(ImportSectionPreview {
             heading: NO_SECTION.to_string(),
@@ -946,7 +989,7 @@ pub(crate) fn parse_with_map(
     }
 
     let mut parsed = ParsedImport {
-        source_name: source_name.into(),
+        source_name,
         source,
         source_hash,
         has_bom,
@@ -961,6 +1004,7 @@ pub(crate) fn parse_with_map(
         has_unknown_content,
         deps_lines,
         deps_warnings: Vec::new(),
+        section_warnings,
     };
     let known: HashSet<u64> = parsed.tasks.iter().map(|task| task.id).collect();
     resolve_create_task_deps(&mut parsed, &known);
@@ -1102,6 +1146,45 @@ mod tests {
         assert_eq!(parsed.tasks[1].status, TaskStatus::Done);
         assert_eq!(parsed.tasks[2].status, TaskStatus::Backlog);
         assert!(parsed.unmapped_sections.is_empty());
+        assert_eq!(
+            parsed.section_warnings.len(),
+            1,
+            "{:?}",
+            parsed.section_warnings
+        );
+    }
+
+    #[test]
+    fn default_status_resolution_of_a_task_section_is_warned_about() {
+        let dir = tempfile::tempdir().expect("map dir");
+        let map = dir.path().join("map.json");
+        std::fs::write(
+            &map,
+            r#"{"section_patterns":[{"pattern":"^\\d{4}-\\d{2}-\\d{2}","status":"done"}],"default_status":"done"}"#,
+        )
+        .expect("map");
+        let input = "## Next \u{2013} Today\n### T-1 A\nbody\n## done\n### T-2 B\nbody\n## 2026-01-02 x\n### T-3 C\nbody\n## Summary\nprose only\n".as_bytes().to_vec();
+        let parsed = parse("en-dash.md", input, Some(&map)).unwrap();
+        assert_eq!(parsed.tasks[0].status, TaskStatus::Done);
+        assert_eq!(parsed.tasks[1].status, TaskStatus::Done);
+        assert_eq!(parsed.tasks[2].status, TaskStatus::Done);
+        assert_eq!(
+            parsed.section_warnings.len(),
+            1,
+            "{:?}",
+            parsed.section_warnings
+        );
+        let warning = &parsed.section_warnings[0];
+        assert!(warning.contains("en-dash.md"), "{warning}");
+        assert!(warning.contains("Next \u{2013} Today"), "{warning}");
+        assert!(warning.contains("done"), "{warning}");
+        let summary = parsed
+            .sections
+            .iter()
+            .find(|section| section.heading == "Summary")
+            .expect("summary section");
+        assert!(!summary.contains_tasks);
+        assert!(parsed.warnings().iter().any(|item| item == warning));
     }
 
     #[test]

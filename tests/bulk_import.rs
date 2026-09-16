@@ -1021,3 +1021,64 @@ fn create_task_deps_residuals_are_warnings_and_cross_file_edges_resolve() {
     );
     assert!(store.show_task("T-2").expect("T-2").deps.is_empty());
 }
+
+#[test]
+fn default_status_resolution_of_a_task_section_is_a_warning() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("endash").join("TASKS.md"),
+        "## Next \u{2013} Today\n### T-1 Alpha\nopen work\n",
+    );
+    write(
+        &corpus.join("prose").join("TASKS.md"),
+        "## Summary\nprose only, no task headings here\n## backlog\n### T-1 Beta\nbacklog work\n",
+    );
+    let map = root.join("map.json");
+    write(
+        &map,
+        r#"{"sections":{"Next - Today":"ready","Next - This Week":"ready","Next - Later":"backlog"},"default_status":"done"}"#,
+    );
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let items = candidates(&report_dir);
+    let endash = candidate(&items, "endash");
+    assert_eq!(endash["bucket"], "recognized-with-warnings", "{endash:#?}");
+    let warnings = endash["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    let warning = warnings[0].as_str().expect("warning text");
+    assert!(warning.contains("endash/TASKS.md"), "{warning}");
+    assert!(warning.contains("Next \u{2013} Today"), "{warning}");
+    assert!(warning.contains("done"), "{warning}");
+    let files = endash["files"].as_array().expect("files");
+    assert_eq!(files[0]["preview"]["tasks"][0]["status"], "done");
+    assert_eq!(files[0]["preview"]["sections"][0]["status"], "done");
+
+    let prose = candidate(&items, "prose");
+    assert_eq!(prose["bucket"], "recognized", "{prose:#?}");
+    assert!(
+        prose["warnings"].as_array().expect("warnings").is_empty(),
+        "a section that holds no tasks must not warn: {prose:#?}"
+    );
+}

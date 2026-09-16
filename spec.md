@@ -270,8 +270,13 @@ first matching pattern in list order, then an exact canonical status name, then
 `default_status`. Patterns are regular expressions tested against the section
 heading text (unanchored `is_match` semantics; anchor with `^`/`$` when needed).
 An invalid pattern, an unknown status or an unknown key fails at map load with
-exit 2. A section holding no task headings never needs a mapping, so prose
-sections such as `## Summary` do not require entries. The bare
+exit 2. A section that holds tasks and is resolved only by `default_status` is a
+section name the map did not anticipate: the status is still assigned, but the
+importer records a warning naming the file, the section heading and the assigned
+status, and `bulk-import` classifies that candidate `recognized-with-warnings`
+instead of `recognized`. A section holding no task headings never needs a
+mapping, so prose sections such as `## Summary` do not require entries and stay
+silent when `default_status` resolves them. The bare
 `{section: status}` form remains valid, and every existing rule and error -
 including mappings that conflict with a canonical section's own status - stays
 in force. `bulk-import` applies one map to a whole corpus, so a literal entry
