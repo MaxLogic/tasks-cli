@@ -1386,12 +1386,24 @@ impl Store {
         validate_title_body(title, body)?;
         let deps = normalize_dependencies(deps);
         if deps.len() > MAX_DEPENDENCIES {
-            return Err(AppError::Validation("too many dependencies".to_string()));
+            return Err(AppError::Validation(format!(
+                "create: task '{title}' has {} dependencies; the limit is {MAX_DEPENDENCIES}. Reduce the list or split the task.",
+                deps.len()
+            )));
         }
         let unique_count = deps.len();
         let dep_set = deps.iter().collect::<HashSet<_>>();
         if dep_set.len() != unique_count {
-            return Err(AppError::Validation("duplicate dependencies".to_string()));
+            let mut seen = HashSet::new();
+            let duplicate = deps
+                .iter()
+                .copied()
+                .find(|dependency| !seen.insert(*dependency))
+                .unwrap_or(deps[0]);
+            return Err(AppError::Validation(format!(
+                "create: task '{title}' lists dependency {} more than once; remove the duplicate entry.",
+                render_task_id(duplicate)
+            )));
         }
         let now = sqlite_now_ms();
         let tx = self
@@ -1462,15 +1474,33 @@ impl Store {
         let requested_deps = changes.deps.clone().map(normalize_dependencies);
         if let Some(deps) = requested_deps.as_ref() {
             if deps.len() > MAX_DEPENDENCIES {
-                return Err(AppError::Validation("too many dependencies".to_string()));
+                return Err(AppError::Validation(format!(
+                    "update {}: the dependency list has {} entries; the limit is {MAX_DEPENDENCIES}. Reduce the list or split the task.",
+                    render_task_id(id),
+                    deps.len()
+                )));
             }
             let unique = deps.iter().collect::<HashSet<_>>();
             if unique.len() != deps.len() {
-                return Err(AppError::Validation("duplicate dependencies".to_string()));
+                let mut seen = HashSet::new();
+                let duplicate = deps
+                    .iter()
+                    .find(|dependency| !seen.insert(*dependency))
+                    .copied()
+                    .unwrap_or(deps[0]);
+                return Err(AppError::Validation(format!(
+                    "update {}: dependency {} is listed more than once; remove the duplicate entry.",
+                    render_task_id(id),
+                    render_task_id(duplicate)
+                )));
             }
             for dep in deps {
                 if *dep == id {
-                    return Err(AppError::Validation("self dependency".to_string()));
+                    return Err(AppError::Validation(format!(
+                        "update {}: the task lists itself as a dependency; remove {} from the list.",
+                        render_task_id(id),
+                        render_task_id(id)
+                    )));
                 }
             }
         }
@@ -1643,26 +1673,22 @@ impl Store {
                     actual,
                 });
             }
-            let report = Self::import_report(item);
-            if !item.deps_problems.is_empty() {
-                return Err(AppError::Validation(format!(
-                    "import of '{}' has {} Deps problem(s); fix the source before importing it",
-                    item.source_name,
-                    item.deps_problems.len()
-                )));
-            }
-            if !report.duplicate_ids.is_empty()
-                || !report.unmapped_sections.is_empty()
-                || !report.ambiguous_sections.is_empty()
-                || report.has_unknown_content
-            {
-                return Err(AppError::Validation(format!(
-                    "import of '{}' contains duplicate IDs, unmapped sections, or unknown content",
-                    item.source_name
-                )));
-            }
-            reports.push(report);
+            reports.push(Self::import_report(item));
             hashes.push(item.source_hash.clone());
+        }
+        let refs: Vec<&ParsedImport> = parsed.iter().collect();
+        let problems = crate::problems::analyze(&refs);
+        if !problems.is_empty() {
+            let counts = crate::model::ProblemCounts::of(&problems);
+            let details = problems
+                .iter()
+                .map(|problem| format!("- {}", problem.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(AppError::Validation(format!(
+                "import blocked by {}:\n{details}",
+                counts.line()
+            )));
         }
         let mut already_imported = Vec::new();
         for (hash, item) in hashes.iter().zip(parsed.iter()) {
@@ -1727,13 +1753,6 @@ impl Store {
                     max_id = task.id;
                 }
                 validate_title_body(&task.title, &task.body)?;
-                if task.deps.len() > MAX_DEPENDENCIES
-                    || task.deps.iter().collect::<HashSet<_>>().len() != task.deps.len()
-                {
-                    return Err(AppError::Validation(
-                        "invalid import dependency list".to_string(),
-                    ));
-                }
                 tx.execute(
                     "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
                      VALUES (?1,?2,?3,?4,1,?5,?5)",

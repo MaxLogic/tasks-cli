@@ -5,7 +5,7 @@ use std::str::FromStr;
 pub const TITLE_MAX_CHARS: usize = 500;
 pub const BODY_MAX_BYTES: usize = 1_048_576;
 pub const RULES_MAX_BYTES: usize = 262_144;
-pub const MAX_DEPENDENCIES: usize = 100;
+pub const MAX_DEPENDENCIES: usize = 1000;
 pub const ID_PREFIX: &str = "T-";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]

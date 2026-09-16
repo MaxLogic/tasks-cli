@@ -170,6 +170,8 @@ last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
 concurrent edits can change later pages. History pages similarly use event IDs.
 `show` never silently truncates body text. History full snapshots and export are
 explicit bulk access, not default context. Dependency cycles and self-links fail.
+Create, update and import enforce the same dependency-list limit: at most 1000
+IDs per task.
 
 `rules` contains shared verification/workflow requirements needed to interpret
 tasks; do not make agents infer them from an obsolete TASKS.md. `show` includes
@@ -178,7 +180,8 @@ for unchanged data. Writes return only ID, status, new version and event ID.
 Support `--body-file -` for UTF-8 stdin; never launch an editor or interpolate text
 through a shell. Preserve input body whitespace/newlines. Reject invalid UTF-8,
 empty titles and oversized input with no mutation (body limit 1 MiB; title 500
-Unicode characters; shared rules 256 KiB). No secret redaction or telemetry.
+Unicode characters; shared rules 256 KiB; dependency list 1000 IDs per task).
+No secret redaction or telemetry.
 
 Exit codes: 0 success (including empty lists), 2 usage/validation, 3 project/task
 not found, 4 version conflict, 5 lock timeout/busy, 6 I/O/database/schema failure.
@@ -324,8 +327,9 @@ preview semantics and export round-trip are unchanged.
 
 Every preview reports all of its problems in one run and never stops at the
 first: nonconforming `Deps:` lines, unknown IDs, self-references, unmapped
-task-bearing sections, unassigned content ranges, duplicate IDs and dependency
-cycle groups. The report starts with the count line `N problem(s): X
+task-bearing sections, unassigned content ranges, duplicate IDs, dependency
+lists that exceed 1000 IDs or repeat an entry, and dependency cycle groups. The
+report starts with the count line `N problem(s): X
 nonconforming Deps, Y unknown IDs, Z cycle groups, W other`, and the same list
 is carried as a structured array in `run.jsonl` and as lines in `summary.md` and
 `unrecognized.md`. Cycles come from strongly connected components: every group
