@@ -923,3 +923,101 @@ fn verification_failure_leaves_the_sources_in_place() {
         "{unrecognized}"
     );
 }
+
+#[test]
+fn create_task_deps_residuals_are_warnings_and_cross_file_edges_resolve() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("deps").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nOutcome:\n- ok\nDeps: `T-099`, T-2; vendor SDK\nbody one\n",
+    );
+    write(
+        &corpus.join("deps").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Beta\nbody two\n",
+    );
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let items = candidates(&report_dir);
+    let deps = candidate(&items, "deps");
+    assert_eq!(deps["bucket"], "recognized-with-warnings", "{deps:#?}");
+    assert_eq!(deps["task_count"], 2);
+    let warnings = deps["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    let warning = warnings[0].as_str().expect("warning text");
+    assert!(warning.contains("deps/TASKS.md"), "{warning}");
+    assert!(warning.contains("line 5"), "{warning}");
+    assert!(warning.contains("T-001"), "{warning}");
+    assert!(warning.contains("T-099"), "{warning}");
+    assert!(warning.contains("vendor SDK"), "{warning}");
+    let files = deps["files"].as_array().expect("files");
+    let ledger = files
+        .iter()
+        .find(|file| file["relative_path"] == "deps/TASKS.md")
+        .expect("ledger record");
+    assert_eq!(
+        ledger["preview"]["tasks"][0]["deps"],
+        serde_json::json!([2])
+    );
+    let summary = fs::read_to_string(report_dir.join("summary.md")).expect("summary");
+    assert!(
+        summary.contains("- warning: ") && summary.contains("T-099"),
+        "{summary}"
+    );
+
+    let apply = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--source-schema",
+        "create-task",
+        "--apply",
+    ]);
+    assert_eq!(
+        apply.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let applied = candidates(&report_dir);
+    let deps = candidate(&applied, "deps");
+    assert_eq!(deps["applied"], true);
+    assert_eq!(deps["verified"], true);
+    let project_id = deps["project_id"].as_str().expect("project id").to_string();
+    let mut store = tasks_cli::store::Store::open_readonly(&data_root, &project_id).expect("store");
+    assert_eq!(
+        store.show_task("T-1").expect("T-1").deps,
+        vec![2],
+        "the edge that resolved across the candidate files must reach the store"
+    );
+    assert!(store.show_task("T-2").expect("T-2").deps.is_empty());
+}

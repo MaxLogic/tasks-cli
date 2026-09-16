@@ -295,14 +295,23 @@ apply unless that exact pseudo-section is explicitly mapped.
 `import --source-schema canonical` (the default) keeps that metadata contract
 unchanged. `--source-schema create-task` additionally recognizes the
 create-task ledger block: within a task block, the first line whose text begins
-at column zero with `Deps:` (fenced code excluded) is parsed with the same
-comma-separated `T-` ID syntax and the `-`/`none` empty forms; extracted IDs are
-recorded as task dependencies and listed per task in the preview (each task
-preview carries `deps`, and `consumed_metadata` gains `Deps`). Extraction is
-additive: the `Deps:` line and every other source byte stay in the stored body
-unchanged, nothing is consumed, and non-task prerequisite text remains
-descriptive. The default schema, preview semantics and export round-trip are
-unchanged.
+at column zero with `Deps:` (fenced code excluded) contributes dependency edges.
+The value is scanned for `T-` followed by digits at word boundaries; surrounding
+backticks and punctuation belong to the text, and the `-`, `none` and empty
+forms carry no dependencies. A token becomes an edge only when it names a task
+of the same candidate file set - the file itself for a single `import`, every
+file of the project for `bulk-import` - and never when it names the task itself,
+because the store rejects self-dependencies. A `Deps:` line never fails the
+file: every fragment that does not become an edge (unparsed tokens, IDs owned by
+another project, self-references, trailing prose) is reported as a per-task
+warning naming the file, the line number, the task ID and the residual text, and
+a candidate holding only such warnings is `recognized-with-warnings`; the
+warnings appear in the preview, `run.jsonl` and `summary.md`. Extraction stays
+additive: the `Deps:` line and every other source byte remain in the stored body
+byte for byte, nothing is consumed, and non-task prerequisite text stays
+descriptive. Each task preview still carries `deps` (the resolved edges), and
+`consumed_metadata` still gains `Deps` when the line exists. The default schema,
+preview semantics and export round-trip are unchanged.
 
 Each actual schema migration creates and validates a fresh pre-upgrade backup
 named `TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`; older

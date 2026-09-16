@@ -15,7 +15,21 @@ pub struct ParsedTask {
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
+    /// Dependencies declared by the canonical metadata block. The create-task
+    /// `Deps:` line is resolution-dependent, so `deps` is recomputed from this
+    /// baseline by `resolve_create_task_deps`.
     pub deps: Vec<u64>,
+    pub metadata_deps: Vec<u64>,
+}
+
+/// A create-task `Deps:` line, kept verbatim so dependency edges can be
+/// recomputed against a wider task-ID set: a bulk candidate parses one file at
+/// a time but resolves dependencies across every file of the candidate.
+#[derive(Debug, Clone)]
+pub struct DepsLine {
+    pub task_id: u64,
+    pub line_number: usize,
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +47,15 @@ pub struct ParsedImport {
     pub ambiguous_sections: Vec<String>,
     pub unassigned_ranges: Vec<SourceRange>,
     pub has_unknown_content: bool,
+    pub deps_lines: Vec<DepsLine>,
+    pub deps_warnings: Vec<String>,
+}
+
+impl ParsedImport {
+    /// Every warning recorded while parsing and resolving this source.
+    pub fn warnings(&self) -> Vec<String> {
+        self.deps_warnings.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -334,40 +357,133 @@ fn extract_deps_line<'a>(
     fence_lines: &[bool],
     start: usize,
     end: usize,
-) -> Option<&'a str> {
+) -> Option<(usize, &'a str)> {
     let end = end.min(lines.len());
     for (index, line) in lines.iter().enumerate().take(end).skip(start) {
         if fence_lines.get(index).copied().unwrap_or(false) {
             continue;
         }
         if let Some(value) = line.text.strip_prefix("Deps:") {
-            return Some(value);
+            return Some((index, value));
         }
     }
     None
 }
 
-fn parse_deps_line(value: &str) -> Result<Vec<u64>, AppError> {
-    let value = value.trim();
-    if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
-        return Ok(Vec::new());
+fn is_dep_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+/// Byte ranges of `T-`/`t-` followed by digits, at word boundaries. Backticks
+/// and punctuation around a token are part of the surrounding text, not the ID.
+fn dep_token_ranges(value: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<(usize, char)> = value.char_indices().collect();
+    let mut ranges = Vec::new();
+    let mut position = 0usize;
+    while position < chars.len() {
+        let (start, ch) = chars[position];
+        let dash_next = (ch == 'T' || ch == 't')
+            && chars
+                .get(position + 1)
+                .is_some_and(|(_, next)| *next == '-');
+        if dash_next {
+            let boundary_before = position == 0 || !is_dep_word_char(chars[position - 1].1);
+            let mut digit_end = position + 2;
+            while chars
+                .get(digit_end)
+                .is_some_and(|(_, digit)| digit.is_ascii_digit())
+            {
+                digit_end += 1;
+            }
+            let boundary_after = chars
+                .get(digit_end)
+                .is_none_or(|(_, next)| !is_dep_word_char(*next));
+            if boundary_before && digit_end > position + 2 && boundary_after {
+                let (last_start, last_char) = chars[digit_end - 1];
+                ranges.push((start, last_start + last_char.len_utf8()));
+                position = digit_end;
+                continue;
+            }
+        }
+        position += 1;
     }
-    let mut deps = Vec::new();
-    for raw in value.split(',') {
-        let item = raw.trim();
-        if item.is_empty() {
+    ranges
+}
+
+fn normalize_deps_residual(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        if ch == '`' {
             continue;
         }
-        if item
-            .get(..2)
-            .is_some_and(|head| head.eq_ignore_ascii_case("T-"))
-        {
-            deps.push(parse_task_id(item).map_err(AppError::Validation)?);
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
         }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
     }
-    deps.sort_unstable();
-    deps.dedup();
-    Ok(deps)
+    out.trim_matches(|ch: char| matches!(ch, ' ' | ',' | ';' | ':'))
+        .to_string()
+}
+
+/// Resolve one `Deps:` value against the candidate's task-ID set. Returns the
+/// dependency edges and the residual text that did not become an edge. A value
+/// never fails; anything that cannot become a storable edge is residual.
+fn resolve_deps_value(value: &str, task_id: u64, known: &HashSet<u64>) -> (Vec<u64>, String) {
+    let value = value.trim();
+    if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
+        return (Vec::new(), String::new());
+    }
+    let mut deps = Vec::new();
+    let mut residual = String::new();
+    let mut cursor = 0usize;
+    for (start, end) in dep_token_ranges(value) {
+        residual.push_str(&value[cursor..start]);
+        let id = value[start + 2..end].parse::<u64>().ok();
+        match id {
+            Some(id) if id != task_id && known.contains(&id) => deps.push(id),
+            _ => residual.push_str(&value[start..end]),
+        }
+        cursor = end;
+    }
+    residual.push_str(&value[cursor..]);
+    (deps, normalize_deps_residual(&residual))
+}
+
+/// Recompute every task's `deps` from its canonical metadata block plus the
+/// create-task `Deps:` lines, keeping only tokens that resolve to a task ID in
+/// `known`. Fragments that do not become edges are reported as per-task
+/// warnings; a `Deps:` line never fails the file. The single-file import and the
+/// bulk candidate both call this, so preview and apply agree.
+pub(crate) fn resolve_create_task_deps(parsed: &mut ParsedImport, known: &HashSet<u64>) {
+    parsed.deps_warnings.clear();
+    let mut edges: HashMap<u64, Vec<u64>> = HashMap::new();
+    for line in &parsed.deps_lines {
+        let (resolved, residual) = resolve_deps_value(&line.value, line.task_id, known);
+        if !residual.is_empty() {
+            parsed.deps_warnings.push(format!(
+                "{}: line {}: task T-{:03}: Deps residual '{}' did not become a dependency edge",
+                parsed.source_name, line.line_number, line.task_id, residual
+            ));
+        }
+        edges.entry(line.task_id).or_default().extend(resolved);
+    }
+    debug_assert_eq!(parsed.tasks.len(), parsed.task_previews.len());
+    for (task, preview) in parsed.tasks.iter_mut().zip(parsed.task_previews.iter_mut()) {
+        let mut deps = task.metadata_deps.clone();
+        if let Some(resolved) = edges.get(&task.id) {
+            deps.extend(resolved.iter().copied());
+        }
+        deps.sort_unstable();
+        deps.dedup();
+        preview.deps = deps.clone();
+        task.deps = deps;
+    }
 }
 
 struct MetadataBlock {
@@ -637,6 +753,7 @@ pub(crate) fn parse_with_map(
 
     let mut tasks = Vec::new();
     let mut task_previews = Vec::new();
+    let mut deps_lines = Vec::new();
     let mut seen = HashSet::new();
     let mut duplicate_ids = Vec::new();
     for (position, start_index) in task_starts.iter().enumerate() {
@@ -681,12 +798,14 @@ pub(crate) fn parse_with_map(
             consumed_metadata = metadata.consumed;
         }
         if schema == SourceSchema::CreateTask {
-            if let Some(value) =
+            if let Some((line_index, value)) =
                 extract_deps_line(&lines, &fence_lines, *start_index + 1, end_index)
             {
-                deps.extend(parse_deps_line(value)?);
-                deps.sort_unstable();
-                deps.dedup();
+                deps_lines.push(DepsLine {
+                    task_id: id,
+                    line_number: line_index + 1,
+                    value: value.trim().to_string(),
+                });
                 consumed_metadata.push("Deps".to_string());
             }
         }
@@ -717,6 +836,7 @@ pub(crate) fn parse_with_map(
             title,
             body,
             status,
+            metadata_deps: deps.clone(),
             deps,
         });
     }
@@ -825,7 +945,7 @@ pub(crate) fn parse_with_map(
         });
     }
 
-    Ok(ParsedImport {
+    let mut parsed = ParsedImport {
         source_name: source_name.into(),
         source,
         source_hash,
@@ -839,7 +959,12 @@ pub(crate) fn parse_with_map(
         ambiguous_sections: Vec::new(),
         unassigned_ranges,
         has_unknown_content,
-    })
+        deps_lines,
+        deps_warnings: Vec::new(),
+    };
+    let known: HashSet<u64> = parsed.tasks.iter().map(|task| task.id).collect();
+    resolve_create_task_deps(&mut parsed, &known);
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -882,25 +1007,84 @@ mod tests {
         assert_eq!(parsed.tasks[0].body, canonical.tasks[0].body);
         assert!(parsed.tasks[0].body.contains("Deps: T-2, T-3"));
         assert_eq!(parsed.task_previews[0].deps, vec![2, 3]);
+        assert!(parsed.deps_warnings.is_empty());
     }
 
     #[test]
     fn create_task_schema_ignores_fenced_and_later_deps_lines() {
         let input =
-            b"## ready\n### T-1 One\n```\nDeps: T-2\n```\nDeps: vendor SDK, T-3\nDeps: T-4\nbody\n"
+            b"## ready\n### T-1 One\n```\nDeps: T-2\n```\nDeps: vendor SDK, T-3\nDeps: T-4\nbody\n### T-3 Three\nbody three\n### T-4 Four\nbody four\n"
                 .to_vec();
         let parsed =
             parse_with_schema("fenced-deps.md", input, None, SourceSchema::CreateTask).unwrap();
         assert_eq!(parsed.tasks[0].deps, vec![3]);
+        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
+        assert!(
+            parsed.deps_warnings[0].contains("vendor SDK"),
+            "{:?}",
+            parsed.deps_warnings
+        );
         assert!(parsed.tasks[0].body.contains("Deps: vendor SDK, T-3"));
         assert!(parsed.tasks[0].body.contains("Deps: T-4"));
     }
 
     #[test]
-    fn create_task_deps_typos_fail_only_under_the_opt_in() {
+    fn create_task_deps_typos_warn_instead_of_failing_the_file() {
         let input = b"## backlog\n### T-1 One\nDeps: T-abc\nbody\n".to_vec();
         assert!(parse("typo.md", input.clone(), None).is_ok());
-        assert!(parse_with_schema("typo.md", input, None, SourceSchema::CreateTask).is_err());
+        let parsed = parse_with_schema("typo.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert!(parsed.tasks[0].deps.is_empty());
+        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
+        let warning = &parsed.deps_warnings[0];
+        assert!(warning.contains("typo.md"), "{warning}");
+        assert!(warning.contains("line 3"), "{warning}");
+        assert!(warning.contains("T-001"), "{warning}");
+        assert!(warning.contains("T-abc"), "{warning}");
+    }
+
+    #[test]
+    fn create_task_deps_foreign_backticked_ids_and_prose_become_warnings() {
+        let input =
+            b"## ready\n### T-1 One\nDeps: `T-2`; T-099; vendor SDK\nbody\n### T-2 Two\nbody two\n"
+                .to_vec();
+        let parsed = parse_with_schema("deps.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert_eq!(parsed.tasks[0].deps, vec![2]);
+        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
+        let warning = &parsed.deps_warnings[0];
+        assert!(warning.contains("deps.md"), "{warning}");
+        assert!(warning.contains("line 3"), "{warning}");
+        assert!(warning.contains("T-001"), "{warning}");
+        assert!(warning.contains("T-099"), "{warning}");
+        assert!(warning.contains("vendor SDK"), "{warning}");
+        assert_eq!(parsed.task_previews[0].deps, vec![2]);
+    }
+
+    #[test]
+    fn create_task_deps_self_reference_is_a_warning_not_an_edge() {
+        let input =
+            b"## ready\n### T-1 One\nDeps: T-1, T-2\nbody\n### T-2 Two\nbody two\n".to_vec();
+        let parsed = parse_with_schema("self.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert_eq!(parsed.tasks[0].deps, vec![2]);
+        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
+        assert!(
+            parsed.deps_warnings[0].contains("T-001"),
+            "{:?}",
+            parsed.deps_warnings
+        );
+    }
+
+    #[test]
+    fn create_task_deps_empty_forms_stay_silent() {
+        let input = b"## ready\n### T-1 One\nDeps: -\nbody\n### T-2 Two\nDeps: none\nbody\n### T-3 Three\nDeps:\nbody\n"
+            .to_vec();
+        let parsed =
+            parse_with_schema("empty-deps.md", input, None, SourceSchema::CreateTask).unwrap();
+        assert!(parsed.tasks.iter().all(|task| task.deps.is_empty()));
+        assert!(
+            parsed.deps_warnings.is_empty(),
+            "{:?}",
+            parsed.deps_warnings
+        );
     }
 
     #[test]

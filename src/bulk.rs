@@ -200,6 +200,20 @@ struct CandidateOutcome {
     deleted: usize,
 }
 
+struct ScannedLedger {
+    source: LedgerSource,
+    bytes: Vec<u8>,
+    sha256: String,
+    relative: String,
+    parsed: Result<ParsedImport, AppError>,
+}
+
+fn resolved_task_ids<'a>(parsed: impl Iterator<Item = &'a ParsedImport>) -> HashSet<u64> {
+    parsed
+        .flat_map(|parsed| parsed.tasks.iter().map(|task| task.id))
+        .collect()
+}
+
 pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
     let scan_root = options.scan_root.canonicalize().map_err(|error| {
         AppError::Io(std::io::Error::new(
@@ -986,46 +1000,71 @@ fn process_candidate(
     };
 
     let mut blockers: Vec<String> = Vec::new();
-    let mut parsed_set: Vec<(String, ParsedImport)> = Vec::new();
+    let mut scanned: Vec<ScannedLedger> = Vec::with_capacity(ledger_files.len());
     for source in &ledger_files {
         let bytes = fs::read(&source.path)?;
         let sha256 = markdown::sha256(&bytes);
         let relative = relative_text(scan_root, &source.path);
-        match markdown::parse_with_map(relative.clone(), bytes.clone(), map, options.source_schema)
-        {
+        let parsed =
+            markdown::parse_with_map(relative.clone(), bytes.clone(), map, options.source_schema);
+        scanned.push(ScannedLedger {
+            source: source.clone(),
+            bytes,
+            sha256,
+            relative,
+            parsed,
+        });
+    }
+    // A candidate imports all of its files into one project, so a create-task
+    // `Deps:` reference is resolved against every task ID of the candidate.
+    let known = resolved_task_ids(scanned.iter().filter_map(|item| item.parsed.as_ref().ok()));
+    for item in scanned.iter_mut() {
+        if let Ok(parsed) = item.parsed.as_mut() {
+            markdown::resolve_create_task_deps(parsed, &known);
+        }
+    }
+    let mut parsed_set: Vec<(String, ParsedImport)> = Vec::new();
+    for item in &scanned {
+        match &item.parsed {
             Ok(parsed) => {
-                let preview = Store::import_report(&parsed);
+                let preview = Store::import_report(parsed);
                 if parsed.has_bom {
                     outcome.warnings.push(format!(
-                        "{relative}: starts with a UTF-8 BOM; bytes and SHA-256 are preserved"
+                        "{}: starts with a UTF-8 BOM; bytes and SHA-256 are preserved",
+                        item.relative
                     ));
                 }
+                outcome.warnings.extend(parsed.warnings());
                 outcome.task_count += parsed.tasks.len();
                 outcome.files.push(BulkFileRecord {
-                    path: source.path.display().to_string(),
-                    relative_path: relative.clone(),
-                    bytes: bytes.len(),
-                    sha256,
+                    path: item.source.path.display().to_string(),
+                    relative_path: item.relative.clone(),
+                    bytes: item.bytes.len(),
+                    sha256: item.sha256.clone(),
                     has_bom: parsed.has_bom,
                     error: None,
                     preview: Some(preview),
                 });
-                parsed_set.push((relative, parsed));
             }
             Err(error) => {
-                blockers.push(format!("{relative}: {error}"));
+                blockers.push(format!("{}: {error}", item.relative));
                 outcome.files.push(BulkFileRecord {
-                    path: source.path.display().to_string(),
-                    relative_path: relative,
-                    bytes: bytes.len(),
-                    sha256,
-                    has_bom: bytes.starts_with(&[0xef, 0xbb, 0xbf]),
+                    path: item.source.path.display().to_string(),
+                    relative_path: item.relative.clone(),
+                    bytes: item.bytes.len(),
+                    sha256: item.sha256.clone(),
+                    has_bom: item.bytes.starts_with(&[0xef, 0xbb, 0xbf]),
                     error: Some(error.to_string()),
                     preview: None,
                 });
             }
         }
     }
+    parsed_set.extend(
+        scanned
+            .into_iter()
+            .filter_map(|item| item.parsed.ok().map(|parsed| (item.relative, parsed))),
+    );
     blockers.extend(collect_blockers(&parsed_set));
     if !blockers.is_empty() {
         outcome.bucket = BUCKET_UNRECOGNIZED.to_string();
@@ -1192,6 +1231,10 @@ fn apply_and_verify(
         }
         hashes.push(parsed.source_hash.clone());
         reparsed.push(parsed);
+    }
+    let known = resolved_task_ids(reparsed.iter());
+    for parsed in reparsed.iter_mut() {
+        markdown::resolve_create_task_deps(parsed, &known);
     }
     let explicit_project = Uuid::parse_str(project_id)
         .map_err(|_| AppError::Usage(format!("invalid project id '{project_id}'")))?;

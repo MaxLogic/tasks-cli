@@ -110,3 +110,84 @@ fn create_task_schema_applies_deps_additively_and_round_trips_the_body() {
     );
     assert_eq!(fs::read_to_string(&ledger).expect("source intact"), source);
 }
+
+#[test]
+fn create_task_schema_reports_unresolved_deps_instead_of_dropping_them() {
+    let source = "## ready\n### T-1 Alpha\nOutcome:\n- ok\nDeps: `T-027`; vendor SDK\nbody\n";
+    let work = tempfile::tempdir().expect("work");
+    let root = work.path().join("project");
+    fs::create_dir_all(&root).expect("root");
+    let ledger = root.join("TASKS.md");
+    fs::write(&ledger, source).expect("ledger");
+
+    let init = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "init",
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let project = text_of(&init)
+        .lines()
+        .find_map(|line| line.strip_prefix("project_id: ").map(str::to_string))
+        .expect("project id");
+
+    let preview = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "--project",
+        &project,
+        "import",
+        "--file",
+        ledger.to_str().unwrap(),
+        "--source-schema",
+        "create-task",
+    ]);
+    let preview_text = text_of(&preview);
+    assert!(preview.status.success(), "{preview_text}");
+    assert!(preview_text.contains("deps=[]"), "{preview_text}");
+    assert!(
+        preview_text.contains("warning: ") && preview_text.contains("T-027"),
+        "{preview_text}"
+    );
+    assert!(preview_text.contains("vendor SDK"), "{preview_text}");
+    assert!(preview_text.contains("line 5"), "{preview_text}");
+    let hash = preview_text
+        .lines()
+        .find_map(|line| line.strip_prefix("source_sha256: "))
+        .expect("hash")
+        .to_string();
+
+    let apply = run(&[
+        "--data-root",
+        work.path().to_str().unwrap(),
+        "--project",
+        &project,
+        "import",
+        "--file",
+        ledger.to_str().unwrap(),
+        "--source-schema",
+        "create-task",
+        "--apply",
+        "--expect-sha256",
+        &hash,
+    ]);
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let mut store = Store::open_readonly(work.path(), &project).expect("read store");
+    let detail = store.show_task("T-1").expect("task");
+    assert!(detail.deps.is_empty(), "{:?}", detail.deps);
+    assert_eq!(
+        detail.body,
+        "Outcome:\n- ok\nDeps: `T-027`; vendor SDK\nbody"
+    );
+    assert_eq!(fs::read_to_string(&ledger).expect("source intact"), source);
+}

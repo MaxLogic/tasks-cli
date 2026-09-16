@@ -160,6 +160,8 @@ pub struct ImportReport {
     pub ambiguous_sections: Vec<String>,
     pub unassigned_ranges: Vec<SourceRange>,
     pub has_unknown_content: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
