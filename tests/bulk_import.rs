@@ -925,17 +925,61 @@ fn verification_failure_leaves_the_sources_in_place() {
 }
 
 #[test]
-fn create_task_deps_residuals_are_warnings_and_cross_file_edges_resolve() {
+fn create_task_strict_deps_block_every_real_corpus_form_with_the_fix_text() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
     let corpus = root.join("corpus");
     write(
-        &corpus.join("deps").join("TASKS.md"),
-        "## Next - Today\n### T-1 Alpha\nOutcome:\n- ok\nDeps: `T-099`, T-2; vendor SDK\nbody one\n",
+        &corpus.join("a-backticked-id").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nOutcome:\n- ok\nDeps: `T-27`\nbody one\n",
     );
     write(
-        &corpus.join("deps").join("TASKS.ARCHIVE.md"),
-        "## Done\n### T-2 Beta\nbody two\n",
+        &corpus.join("a-backticked-id").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-27 Watcher\nbody\n",
+    );
+    write(
+        &corpus.join("b-project-name").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: `T-27`, MaxLogicFoundation `T-33`\nbody\n",
+    );
+    write(
+        &corpus.join("b-project-name").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-27 Watcher\nbody\n### T-33 Other project task\nbody\n",
+    );
+    write(
+        &corpus.join("c-semicolon-prose").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-163; defect found during T-164 final review\nbody\n",
+    );
+    write(
+        &corpus.join("c-semicolon-prose").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-163 Watcher\nbody\n### T-164 Reviewer\nbody\n",
+    );
+    write(
+        &corpus.join("d-range-prose").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-2 through T-13, plus any owner-specific fix task created by T-13\nbody\n",
+    );
+    write(
+        &corpus.join("d-range-prose").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Spanner\nbody\n### T-13 Fixes\nbody\n",
+    );
+    write(
+        &corpus.join("e-prose-only").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: existing source-context mapping\nbody\n",
+    );
+    write(
+        &corpus.join("f-trailing-comma").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-2,\nbody\n",
+    );
+    write(
+        &corpus.join("f-trailing-comma").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Beta\nbody\n",
+    );
+    write(
+        &corpus.join("g-second-line").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-2\nDeps: T-3\nbody\n",
+    );
+    write(
+        &corpus.join("g-second-line").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Beta\nbody\n### T-3 Gamma\nbody\n",
     );
     let map = root.join("map.json");
     write_map(&map);
@@ -957,38 +1001,101 @@ fn create_task_deps_residuals_are_warnings_and_cross_file_edges_resolve() {
     ]);
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(2),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let items = candidates(&report_dir);
-    let deps = candidate(&items, "deps");
-    assert_eq!(deps["bucket"], "recognized-with-warnings", "{deps:#?}");
-    assert_eq!(deps["task_count"], 2);
-    let warnings = deps["warnings"].as_array().expect("warnings");
-    assert_eq!(warnings.len(), 1, "{warnings:#?}");
-    let warning = warnings[0].as_str().expect("warning text");
-    assert!(warning.contains("deps/TASKS.md"), "{warning}");
-    assert!(warning.contains("line 5"), "{warning}");
-    assert!(warning.contains("T-001"), "{warning}");
-    assert!(warning.contains("T-099"), "{warning}");
-    assert!(warning.contains("vendor SDK"), "{warning}");
-    let files = deps["files"].as_array().expect("files");
-    let ledger = files
-        .iter()
-        .find(|file| file["relative_path"] == "deps/TASKS.md")
-        .expect("ledger record");
-    assert_eq!(
-        ledger["preview"]["tasks"][0]["deps"],
-        serde_json::json!([2])
-    );
+    assert_eq!(items.len(), 7, "{items:#?}");
+    let expectations = [
+        ("a-backticked-id", "`T-27`", serde_json::json!([27]), 5usize),
+        (
+            "b-project-name",
+            "`T-27`, MaxLogicFoundation `T-33`",
+            serde_json::json!([27]),
+            3,
+        ),
+        (
+            "c-semicolon-prose",
+            "T-163; defect found during T-164 final review",
+            serde_json::json!([163]),
+            3,
+        ),
+        (
+            "d-range-prose",
+            "T-2 through T-13, plus any owner-specific fix task created by T-13",
+            serde_json::json!([]),
+            3,
+        ),
+        (
+            "e-prose-only",
+            "existing source-context mapping",
+            serde_json::json!([]),
+            3,
+        ),
+        ("f-trailing-comma", "T-2,", serde_json::json!([2]), 3),
+        ("g-second-line", "T-3", serde_json::json!([3]), 4),
+    ];
+    for (directory, value, keepable, line) in expectations {
+        let item = candidate(&items, directory);
+        assert_eq!(item["bucket"], "unrecognized", "{item:#?}");
+        assert_eq!(item["problem_counts"]["nonconforming_deps"], 1, "{item:#?}");
+        let problems = item["problems"].as_array().expect("problems");
+        let problem = problems
+            .iter()
+            .find(|problem| problem["kind"] == "nonconforming-deps")
+            .unwrap_or_else(|| panic!("nonconforming problem in {item:#?}"));
+        assert_eq!(problem["value"], value, "{problem:#?}");
+        assert_eq!(problem["keepable_ids"], keepable, "{problem:#?}");
+        let message = problem["message"].as_str().expect("message");
+        assert!(message.contains(&format!("line {line}")), "{message}");
+        assert!(
+            message.contains(
+                "keep only these IDs in Deps and move the rest of the original text to Notes"
+            ),
+            "{message}"
+        );
+    }
     let summary = fs::read_to_string(report_dir.join("summary.md")).expect("summary");
     assert!(
-        summary.contains("- warning: ") && summary.contains("T-099"),
+        summary.contains("1 problem(s): 1 nonconforming Deps"),
         "{summary}"
     );
+    let unrecognized =
+        fs::read_to_string(report_dir.join("unrecognized.md")).expect("unrecognized");
+    assert!(
+        unrecognized.contains("keep only these IDs in Deps"),
+        "{unrecognized}"
+    );
+}
 
-    let apply = run(&[
+#[test]
+fn create_task_id_only_deps_create_edges_and_unknown_ids_block() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path();
+    let corpus = root.join("corpus");
+    write(
+        &corpus.join("good").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-2, T-3\nbody one\n",
+    );
+    write(
+        &corpus.join("good").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Beta\nbody two\n### T-3 Gamma\nbody three\n",
+    );
+    write(
+        &corpus.join("unknown").join("TASKS.md"),
+        "## Next - Today\n### T-1 Alpha\nDeps: T-2, T-99\nbody\n",
+    );
+    write(
+        &corpus.join("unknown").join("TASKS.ARCHIVE.md"),
+        "## Done\n### T-2 Beta\nbody two\n",
+    );
+    let map = root.join("map.json");
+    write_map(&map);
+    let report_dir = root.join("reports");
+    let data_root = root.join("data");
+
+    let output = run(&[
         "--data-root",
         &string_arg(&data_root),
         "bulk-import",
@@ -1003,23 +1110,35 @@ fn create_task_deps_residuals_are_warnings_and_cross_file_edges_resolve() {
         "--apply",
     ]);
     assert_eq!(
-        apply.status.code(),
-        Some(0),
+        output.status.code(),
+        Some(2),
         "{}",
-        String::from_utf8_lossy(&apply.stderr)
+        String::from_utf8_lossy(&output.stderr)
     );
-    let applied = candidates(&report_dir);
-    let deps = candidate(&applied, "deps");
-    assert_eq!(deps["applied"], true);
-    assert_eq!(deps["verified"], true);
-    let project_id = deps["project_id"].as_str().expect("project id").to_string();
-    let mut store = tasks_cli::store::Store::open_readonly(&data_root, &project_id).expect("store");
-    assert_eq!(
-        store.show_task("T-1").expect("T-1").deps,
-        vec![2],
-        "the edge that resolved across the candidate files must reach the store"
+    let items = candidates(&report_dir);
+    let good = candidate(&items, "good");
+    assert_eq!(good["bucket"], "recognized", "{good:#?}");
+    assert_eq!(good["applied"], true, "{good:#?}");
+    assert_eq!(good["verified"], true, "{good:#?}");
+    let project_id = good["project_id"].as_str().expect("project id");
+    let mut store = tasks_cli::store::Store::open_readonly(&data_root, project_id).expect("store");
+    assert_eq!(store.show_task("T-1").expect("T-1").deps, vec![2, 3]);
+
+    let unknown = candidate(&items, "unknown");
+    assert_eq!(unknown["bucket"], "unrecognized", "{unknown:#?}");
+    assert_eq!(unknown["applied"], false, "{unknown:#?}");
+    assert_eq!(unknown["problem_counts"]["unknown_ids"], 1, "{unknown:#?}");
+    let problems = unknown["problems"].as_array().expect("problems");
+    let problem = problems
+        .iter()
+        .find(|problem| problem["kind"] == "unknown-dependency")
+        .unwrap_or_else(|| panic!("unknown-dependency problem in {unknown:#?}"));
+    let message = problem["message"].as_str().expect("message");
+    assert!(
+        message.contains("remove T-099 from Deps; no such task exists"),
+        "{message}"
     );
-    assert!(store.show_task("T-2").expect("T-2").deps.is_empty());
+    assert!(message.contains("line 3"), "{message}");
 }
 
 #[test]

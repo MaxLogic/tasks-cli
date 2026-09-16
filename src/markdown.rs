@@ -1,6 +1,8 @@
 use crate::error::AppError;
 use crate::model::{
-    parse_task_id, ImportSectionPreview, ImportTaskPreview, SourceRange, SourceSchema, TaskStatus,
+    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, SourceRange,
+    SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_SELF_DEPENDENCY,
+    PROBLEM_UNKNOWN_DEPENDENCY,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -24,10 +26,23 @@ pub struct ParsedTask {
 
 /// A create-task `Deps:` line, kept verbatim so dependency edges can be
 /// recomputed against a wider task-ID set: a bulk candidate parses one file at
-/// a time but resolves dependencies across every file of the candidate.
+/// a time but resolves dependencies across every file of the candidate. Every
+/// Deps line is kept, not just the first, so a second line in one task can be
+/// reported instead of silently ignored.
 #[derive(Debug, Clone)]
 pub struct DepsLine {
     pub task_id: u64,
+    pub line_number: usize,
+    pub value: String,
+}
+
+/// A dependency edge that was actually recorded from a create-task `Deps:`
+/// line, with the location needed to report a cycle.
+#[derive(Debug, Clone)]
+pub struct DepsEdge {
+    pub task_id: u64,
+    pub dependency: u64,
+    pub file: String,
     pub line_number: usize,
     pub value: String,
 }
@@ -48,16 +63,15 @@ pub struct ParsedImport {
     pub unassigned_ranges: Vec<SourceRange>,
     pub has_unknown_content: bool,
     pub deps_lines: Vec<DepsLine>,
-    pub deps_warnings: Vec<String>,
+    pub deps_edges: Vec<DepsEdge>,
+    pub deps_problems: Vec<ImportProblem>,
     pub section_warnings: Vec<String>,
 }
 
 impl ParsedImport {
     /// Every warning recorded while parsing and resolving this source.
     pub fn warnings(&self) -> Vec<String> {
-        let mut warnings = self.section_warnings.clone();
-        warnings.extend(self.deps_warnings.iter().cloned());
-        warnings
+        self.section_warnings.clone()
     }
 }
 
@@ -372,126 +386,195 @@ fn parse_dependencies(value: &str) -> Result<Vec<u64>, AppError> {
     Ok(deps)
 }
 
-fn extract_deps_line<'a>(
+fn collect_deps_lines<'a>(
     lines: &[Line<'a>],
     fence_lines: &[bool],
     start: usize,
     end: usize,
-) -> Option<(usize, &'a str)> {
+) -> Vec<(usize, &'a str)> {
     let end = end.min(lines.len());
+    let mut found = Vec::new();
     for (index, line) in lines.iter().enumerate().take(end).skip(start) {
         if fence_lines.get(index).copied().unwrap_or(false) {
             continue;
         }
         if let Some(value) = line.text.strip_prefix("Deps:") {
-            return Some((index, value));
+            found.push((index, value));
         }
     }
-    None
+    found
 }
 
-fn is_dep_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
-}
-
-/// Byte ranges of `T-`/`t-` followed by digits, at word boundaries. Backticks
-/// and punctuation around a token are part of the surrounding text, not the ID.
-fn dep_token_ranges(value: &str) -> Vec<(usize, usize)> {
-    let chars: Vec<(usize, char)> = value.char_indices().collect();
-    let mut ranges = Vec::new();
-    let mut position = 0usize;
-    while position < chars.len() {
-        let (start, ch) = chars[position];
-        let dash_next = (ch == 'T' || ch == 't')
-            && chars
-                .get(position + 1)
-                .is_some_and(|(_, next)| *next == '-');
-        if dash_next {
-            let boundary_before = position == 0 || !is_dep_word_char(chars[position - 1].1);
-            let mut digit_end = position + 2;
-            while chars
-                .get(digit_end)
-                .is_some_and(|(_, digit)| digit.is_ascii_digit())
-            {
-                digit_end += 1;
-            }
-            let boundary_after = chars
-                .get(digit_end)
-                .is_none_or(|(_, next)| !is_dep_word_char(*next));
-            if boundary_before && digit_end > position + 2 && boundary_after {
-                let (last_start, last_char) = chars[digit_end - 1];
-                ranges.push((start, last_start + last_char.len_utf8()));
-                position = digit_end;
-                continue;
-            }
-        }
-        position += 1;
-    }
-    ranges
-}
-
-fn normalize_deps_residual(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut pending_space = false;
-    for ch in raw.chars() {
-        if ch == '`' {
-            continue;
-        }
-        if ch.is_whitespace() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        out.push(ch);
-    }
-    out.trim_matches(|ch: char| matches!(ch, ' ' | ',' | ';' | ':'))
-        .to_string()
-}
-
-/// Resolve one `Deps:` value against the candidate's task-ID set. Returns the
-/// dependency edges and the residual text that did not become an edge. A value
-/// never fails; anything that cannot become a storable edge is residual.
-fn resolve_deps_value(value: &str, task_id: u64, known: &HashSet<u64>) -> (Vec<u64>, String) {
+/// The create-task 3.4.0 Deps grammar: the value is either an empty form or a
+/// comma-separated list in which every trimmed item is exactly `T-<digits>`.
+/// Anything else is `None` and makes the import unrecognized.
+fn parse_deps_value(value: &str) -> Option<Vec<u64>> {
     let value = value.trim();
     if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
-        return (Vec::new(), String::new());
+        return Some(Vec::new());
     }
-    let mut deps = Vec::new();
-    let mut residual = String::new();
-    let mut cursor = 0usize;
-    for (start, end) in dep_token_ranges(value) {
-        residual.push_str(&value[cursor..start]);
-        let id = value[start + 2..end].parse::<u64>().ok();
-        match id {
-            Some(id) if id != task_id && known.contains(&id) => deps.push(id),
-            _ => residual.push_str(&value[start..end]),
+    let mut ids = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        let digits = item.strip_prefix("T-")?;
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
         }
-        cursor = end;
+        ids.push(digits.parse::<u64>().ok()?);
     }
-    residual.push_str(&value[cursor..]);
-    (deps, normalize_deps_residual(&residual))
+    Some(ids)
+}
+
+/// The IDs a clean Deps line would keep: split on "," and ";", strip
+/// surrounding whitespace and backticks, and keep the standalone `T-<digits>`
+/// items that name a task present in this candidate's files.
+fn salvageable_deps_ids(value: &str, known: &HashSet<u64>) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for item in value.split([',', ';']) {
+        let item = item.trim().trim_matches('`').trim();
+        let Some(digits) = item.strip_prefix("T-") else {
+            continue;
+        };
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(id) = digits.parse::<u64>() else {
+            continue;
+        };
+        if known.contains(&id) && !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn deps_fix_text() -> &'static str {
+    "keep only these IDs in Deps and move the rest of the original text to Notes"
+}
+
+fn unknown_dep_fix_text(id: u64) -> String {
+    format!("remove T-{id:03} from Deps; no such task exists")
+}
+
+fn nonconforming_problem(
+    file: &str,
+    line: &DepsLine,
+    known: &HashSet<u64>,
+    second_line: bool,
+) -> ImportProblem {
+    let keepable = salvageable_deps_ids(&line.value, known);
+    let keepable_text = if keepable.is_empty() {
+        "none".to_string()
+    } else {
+        keepable
+            .iter()
+            .map(|id| format!("T-{id:03}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reason = if second_line {
+        "a task may have only one Deps line"
+    } else {
+        "the value is not a comma-separated list of task IDs"
+    };
+    ImportProblem {
+        kind: PROBLEM_NONCONFORMING_DEPS.to_string(),
+        message: format!(
+            "{file}: line {}: task T-{:03}: nonconforming Deps line 'Deps: {}': {reason}; IDs a clean line would keep: {keepable_text}; fix: {}",
+            line.line_number,
+            line.task_id,
+            line.value,
+            deps_fix_text()
+        ),
+        file: Some(file.to_string()),
+        line: Some(line.line_number),
+        task_id: Some(line.task_id),
+        value: Some(line.value.clone()),
+        keepable_ids: keepable,
+        group: Vec::new(),
+        fix: Some(deps_fix_text().to_string()),
+    }
 }
 
 /// Recompute every task's `deps` from its canonical metadata block plus the
-/// create-task `Deps:` lines, keeping only tokens that resolve to a task ID in
-/// `known`. Fragments that do not become edges are reported as per-task
-/// warnings; a `Deps:` line never fails the file. The single-file import and the
-/// bulk candidate both call this, so preview and apply agree.
+/// create-task `Deps:` lines, under the strict create-task grammar. Edges are
+/// recorded only for IDs present in `known`; every nonconforming line and every
+/// unknown or self-referencing ID becomes a blocking problem. The single-file
+/// import and the bulk candidate both call this, so preview and apply agree.
 pub(crate) fn resolve_create_task_deps(parsed: &mut ParsedImport, known: &HashSet<u64>) {
-    parsed.deps_warnings.clear();
+    parsed.deps_problems.clear();
+    parsed.deps_edges.clear();
     let mut edges: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut tasked: HashSet<u64> = HashSet::new();
     for line in &parsed.deps_lines {
-        let (resolved, residual) = resolve_deps_value(&line.value, line.task_id, known);
-        if !residual.is_empty() {
-            parsed.deps_warnings.push(format!(
-                "{}: line {}: task T-{:03}: Deps residual '{}' did not become a dependency edge",
-                parsed.source_name, line.line_number, line.task_id, residual
+        if !tasked.insert(line.task_id) {
+            parsed.deps_problems.push(nonconforming_problem(
+                &parsed.source_name,
+                line,
+                known,
+                true,
             ));
+            continue;
         }
-        edges.entry(line.task_id).or_default().extend(resolved);
+        let Some(ids) = parse_deps_value(&line.value) else {
+            parsed.deps_problems.push(nonconforming_problem(
+                &parsed.source_name,
+                line,
+                known,
+                false,
+            ));
+            continue;
+        };
+        for id in ids {
+            if id == line.task_id {
+                parsed.deps_problems.push(ImportProblem {
+                    kind: PROBLEM_SELF_DEPENDENCY.to_string(),
+                    message: format!(
+                        "{}: line {}: task T-{:03} lists itself in Deps; fix: remove T-{:03} from Deps",
+                        parsed.source_name, line.line_number, line.task_id, line.task_id
+                    ),
+                    file: Some(parsed.source_name.clone()),
+                    line: Some(line.line_number),
+                    task_id: Some(line.task_id),
+                    value: Some(line.value.clone()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some(format!("remove T-{:03} from Deps", line.task_id)),
+                });
+                continue;
+            }
+            if !known.contains(&id) {
+                parsed.deps_problems.push(ImportProblem {
+                    kind: PROBLEM_UNKNOWN_DEPENDENCY.to_string(),
+                    message: format!(
+                        "{}: line {}: task T-{:03} depends on T-{id:03}, which is not present in this project's ledgers; fix: {}",
+                        parsed.source_name,
+                        line.line_number,
+                        line.task_id,
+                        unknown_dep_fix_text(id)
+                    ),
+                    file: Some(parsed.source_name.clone()),
+                    line: Some(line.line_number),
+                    task_id: Some(line.task_id),
+                    value: Some(line.value.clone()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some(unknown_dep_fix_text(id)),
+                });
+                continue;
+            }
+            let recorded = edges.entry(line.task_id).or_default();
+            if !recorded.contains(&id) {
+                recorded.push(id);
+                parsed.deps_edges.push(DepsEdge {
+                    task_id: line.task_id,
+                    dependency: id,
+                    file: parsed.source_name.clone(),
+                    line_number: line.line_number,
+                    value: line.value.clone(),
+                });
+            }
+        }
     }
     debug_assert_eq!(parsed.tasks.len(), parsed.task_previews.len());
     for (task, preview) in parsed.tasks.iter_mut().zip(parsed.task_previews.iter_mut()) {
@@ -504,6 +587,19 @@ pub(crate) fn resolve_create_task_deps(parsed: &mut ParsedImport, known: &HashSe
         preview.deps = deps.clone();
         task.deps = deps;
     }
+}
+
+/// Resolve create-task Deps lines across a whole import set: a bulk candidate
+/// holds several files, and an ID in one file may name a task in another.
+pub fn resolve_create_task_deps_across(sources: &mut [ParsedImport]) -> HashSet<u64> {
+    let known: HashSet<u64> = sources
+        .iter()
+        .flat_map(|parsed| parsed.tasks.iter().map(|task| task.id))
+        .collect();
+    for parsed in sources.iter_mut() {
+        resolve_create_task_deps(parsed, &known);
+    }
+    known
 }
 
 struct MetadataBlock {
@@ -819,15 +915,16 @@ pub(crate) fn parse_with_map(
             consumed_metadata = metadata.consumed;
         }
         if schema == SourceSchema::CreateTask {
-            if let Some((line_index, value)) =
-                extract_deps_line(&lines, &fence_lines, *start_index + 1, end_index)
-            {
+            let found = collect_deps_lines(&lines, &fence_lines, *start_index + 1, end_index);
+            if !found.is_empty() {
+                consumed_metadata.push("Deps".to_string());
+            }
+            for (line_index, value) in found {
                 deps_lines.push(DepsLine {
                     task_id: id,
                     line_number: line_index + 1,
                     value: value.trim().to_string(),
                 });
-                consumed_metadata.push("Deps".to_string());
             }
         }
         let body_end = lines
@@ -1005,7 +1102,8 @@ pub(crate) fn parse_with_map(
         unassigned_ranges,
         has_unknown_content,
         deps_lines,
-        deps_warnings: Vec::new(),
+        deps_edges: Vec::new(),
+        deps_problems: Vec::new(),
         section_warnings,
     };
     let known: HashSet<u64> = parsed.tasks.iter().map(|task| task.id).collect();
@@ -1068,70 +1166,85 @@ mod tests {
         assert_eq!(parsed.tasks[0].body, canonical.tasks[0].body);
         assert!(parsed.tasks[0].body.contains("Deps: T-2, T-3"));
         assert_eq!(parsed.task_previews[0].deps, vec![2, 3]);
-        assert!(parsed.deps_warnings.is_empty());
+        assert!(
+            parsed.deps_problems.is_empty(),
+            "{:?}",
+            parsed.deps_problems
+        );
     }
 
     #[test]
-    fn create_task_schema_ignores_fenced_and_later_deps_lines() {
+    fn create_task_schema_ignores_fenced_deps_and_reports_a_second_line() {
         let input =
-            b"## ready\n### T-1 One\n```\nDeps: T-2\n```\nDeps: vendor SDK, T-3\nDeps: T-4\nbody\n### T-3 Three\nbody three\n### T-4 Four\nbody four\n"
+            b"## ready\n### T-1 One\n```\nDeps: T-9\n```\nDeps: T-2, T-3\nDeps: T-4\nbody\n### T-2 Two\nbody two\n### T-3 Three\nbody three\n### T-4 Four\nbody four\n"
                 .to_vec();
         let parsed =
             parse_with_schema("fenced-deps.md", input, None, SourceSchema::CreateTask).unwrap();
-        assert_eq!(parsed.tasks[0].deps, vec![3]);
-        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
+        assert_eq!(parsed.tasks[0].deps, vec![2, 3]);
+        assert_eq!(parsed.deps_problems.len(), 1, "{:?}", parsed.deps_problems);
+        let problem = &parsed.deps_problems[0];
+        assert_eq!(problem.kind, PROBLEM_NONCONFORMING_DEPS);
+        assert!(problem.message.contains("line 7"), "{}", problem.message);
         assert!(
-            parsed.deps_warnings[0].contains("vendor SDK"),
-            "{:?}",
-            parsed.deps_warnings
+            problem.message.contains("only one Deps line"),
+            "{}",
+            problem.message
         );
-        assert!(parsed.tasks[0].body.contains("Deps: vendor SDK, T-3"));
         assert!(parsed.tasks[0].body.contains("Deps: T-4"));
+        assert!(parsed.tasks[0].body.contains("Deps: T-2, T-3"));
     }
 
     #[test]
-    fn create_task_deps_typos_warn_instead_of_failing_the_file() {
-        let input = b"## backlog\n### T-1 One\nDeps: T-abc\nbody\n".to_vec();
-        assert!(parse("typo.md", input.clone(), None).is_ok());
+    fn create_task_deps_typos_block_with_the_fix_text() {
+        let input = b"## ready\n### T-1 One\nDeps: T-abc\nbody\n### T-2 Two\nbody two\n".to_vec();
         let parsed = parse_with_schema("typo.md", input, None, SourceSchema::CreateTask).unwrap();
         assert!(parsed.tasks[0].deps.is_empty());
-        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
-        let warning = &parsed.deps_warnings[0];
-        assert!(warning.contains("typo.md"), "{warning}");
-        assert!(warning.contains("line 3"), "{warning}");
-        assert!(warning.contains("T-001"), "{warning}");
-        assert!(warning.contains("T-abc"), "{warning}");
+        assert_eq!(parsed.deps_problems.len(), 1, "{:?}", parsed.deps_problems);
+        let problem = &parsed.deps_problems[0];
+        assert_eq!(problem.kind, PROBLEM_NONCONFORMING_DEPS);
+        assert_eq!(problem.file.as_deref(), Some("typo.md"));
+        assert_eq!(problem.line, Some(3));
+        assert_eq!(problem.task_id, Some(1));
+        assert_eq!(problem.value.as_deref(), Some("T-abc"));
+        assert!(problem.message.contains("T-abc"), "{}", problem.message);
+        assert!(
+            problem.message.contains("keep only these IDs in Deps"),
+            "{}",
+            problem.message
+        );
     }
 
     #[test]
-    fn create_task_deps_foreign_backticked_ids_and_prose_become_warnings() {
+    fn create_task_nonconforming_deps_lists_the_ids_a_clean_line_would_keep() {
         let input =
-            b"## ready\n### T-1 One\nDeps: `T-2`; T-099; vendor SDK\nbody\n### T-2 Two\nbody two\n"
+            b"## ready\n### T-1 One\nDeps: `T-2`, vendor SDK T-4\nbody\n### T-2 Two\nbody two\n### T-4 Four\nbody four\n"
                 .to_vec();
         let parsed = parse_with_schema("deps.md", input, None, SourceSchema::CreateTask).unwrap();
-        assert_eq!(parsed.tasks[0].deps, vec![2]);
-        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
-        let warning = &parsed.deps_warnings[0];
-        assert!(warning.contains("deps.md"), "{warning}");
-        assert!(warning.contains("line 3"), "{warning}");
-        assert!(warning.contains("T-001"), "{warning}");
-        assert!(warning.contains("T-099"), "{warning}");
-        assert!(warning.contains("vendor SDK"), "{warning}");
-        assert_eq!(parsed.task_previews[0].deps, vec![2]);
+        assert!(
+            parsed.tasks[0].deps.is_empty(),
+            "{:?}",
+            parsed.tasks[0].deps
+        );
+        assert_eq!(parsed.deps_problems.len(), 1, "{:?}", parsed.deps_problems);
+        let problem = &parsed.deps_problems[0];
+        assert_eq!(problem.keepable_ids, vec![2], "{problem:#?}");
+        assert!(problem.message.contains("T-002"), "{}", problem.message);
+        assert!(
+            problem.message.contains("vendor SDK"),
+            "{}",
+            problem.message
+        );
     }
 
     #[test]
-    fn create_task_deps_self_reference_is_a_warning_not_an_edge() {
+    fn create_task_deps_self_reference_is_a_problem_not_an_edge() {
         let input =
             b"## ready\n### T-1 One\nDeps: T-1, T-2\nbody\n### T-2 Two\nbody two\n".to_vec();
         let parsed = parse_with_schema("self.md", input, None, SourceSchema::CreateTask).unwrap();
         assert_eq!(parsed.tasks[0].deps, vec![2]);
-        assert_eq!(parsed.deps_warnings.len(), 1, "{:?}", parsed.deps_warnings);
-        assert!(
-            parsed.deps_warnings[0].contains("T-001"),
-            "{:?}",
-            parsed.deps_warnings
-        );
+        assert_eq!(parsed.deps_problems.len(), 1, "{:?}", parsed.deps_problems);
+        assert_eq!(parsed.deps_problems[0].kind, PROBLEM_SELF_DEPENDENCY);
+        assert!(parsed.deps_problems[0].message.contains("T-001"));
     }
 
     #[test]
@@ -1142,9 +1255,9 @@ mod tests {
             parse_with_schema("empty-deps.md", input, None, SourceSchema::CreateTask).unwrap();
         assert!(parsed.tasks.iter().all(|task| task.deps.is_empty()));
         assert!(
-            parsed.deps_warnings.is_empty(),
+            parsed.deps_problems.is_empty(),
             "{:?}",
-            parsed.deps_warnings
+            parsed.deps_problems
         );
     }
 

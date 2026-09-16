@@ -5,7 +5,9 @@ use tasks_cli::cli::{Cli, Command, OutputFormat, ParsedDeps, RulesCommand};
 use tasks_cli::error::AppError;
 use tasks_cli::interop;
 use tasks_cli::markdown;
-use tasks_cli::model::{parse_task_id, ImportReport, TaskStatus, TaskUpdate};
+use tasks_cli::model::{
+    parse_task_id, ImportProblem, ImportReport, ProblemCounts, TaskStatus, TaskUpdate,
+};
 use tasks_cli::output::{CommandPayload, Envelope, ImportFileReport};
 use tasks_cli::registry;
 use tasks_cli::store::Store;
@@ -56,6 +58,8 @@ fn envelope(project_id: Option<String>, data: CommandPayload, format: OutputForm
 fn import_payload(
     files: &[PathBuf],
     reports: Vec<ImportReport>,
+    problems: Vec<ImportProblem>,
+    problem_counts: ProblemCounts,
     already_imported: bool,
     applied: bool,
 ) -> CommandPayload {
@@ -65,6 +69,8 @@ fn import_payload(
             return CommandPayload::Import {
                 path: files[0].display().to_string(),
                 report,
+                problems,
+                problem_counts,
                 already_imported,
                 applied,
             };
@@ -80,6 +86,8 @@ fn import_payload(
         .collect();
     CommandPayload::ImportBatch {
         files: entries,
+        problems,
+        problem_counts,
         already_imported,
         applied,
     }
@@ -400,6 +408,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         }
                         parsed.push(item);
                     }
+                    markdown::resolve_create_task_deps_across(&mut parsed);
+                    let problems = {
+                        let refs: Vec<&markdown::ParsedImport> = parsed.iter().collect();
+                        tasks_cli::problems::analyze(&refs)
+                    };
+                    let problem_counts = ProblemCounts::of(&problems);
                     if apply {
                         if expect_sha256.len() != files.len() {
                             return Err(AppError::Usage(
@@ -410,6 +424,17 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             return Err(AppError::Usage(
                                 "--apply requires re-readable import files".to_string(),
                             ));
+                        }
+                        if !problems.is_empty() {
+                            let details = problems
+                                .iter()
+                                .map(|problem| format!("- {}", problem.message))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            return Err(AppError::Validation(format!(
+                                "import blocked by {}:\n{details}",
+                                problem_counts.line()
+                            )));
                         }
                         let mut reparsed = Vec::with_capacity(files.len());
                         for (index, path) in files.iter().enumerate() {
@@ -428,11 +453,19 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             }
                             reparsed.push(item);
                         }
+                        markdown::resolve_create_task_deps_across(&mut reparsed);
                         let (reports, already) =
                             store.import_apply_many(reparsed, &expect_sha256)?;
                         envelope(
                             Some(project_id),
-                            import_payload(&files, reports, already, true),
+                            import_payload(
+                                &files,
+                                reports,
+                                problems,
+                                problem_counts,
+                                already,
+                                true,
+                            ),
                             cli.format,
                         );
                         return Ok(());
@@ -440,7 +473,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     let reports = store.import_preview_many(parsed);
                     envelope(
                         Some(project_id),
-                        import_payload(&files, reports, false, false),
+                        import_payload(&files, reports, problems, problem_counts, false, false),
                         cli.format,
                     );
                 }

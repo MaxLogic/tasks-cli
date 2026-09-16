@@ -1,5 +1,7 @@
 use crate::bulk::BulkRun;
-use crate::model::{HistoryEvent, ImportReport, RuleRecord, TaskDetail, TaskSummary};
+use crate::model::{
+    HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, TaskDetail, TaskSummary,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -55,11 +57,15 @@ pub enum CommandPayload {
     Import {
         path: String,
         report: ImportReport,
+        problems: Vec<ImportProblem>,
+        problem_counts: ProblemCounts,
         already_imported: bool,
         applied: bool,
     },
     ImportBatch {
         files: Vec<ImportFileReport>,
+        problems: Vec<ImportProblem>,
+        problem_counts: ProblemCounts,
         already_imported: bool,
         applied: bool,
     },
@@ -170,6 +176,15 @@ impl Envelope {
         out.push_str(&format!("has_bom: {}\n", report.has_bom));
         for warning in &report.warnings {
             out.push_str(&format!("warning: {warning}\n"));
+        }
+        out
+    }
+
+    /// The count line always comes first, then every problem in one list.
+    fn import_problem_lines(problems: &[ImportProblem], counts: &ProblemCounts) -> String {
+        let mut out = format!("problems: {}\n", counts.line());
+        for problem in problems {
+            out.push_str(&format!("problem: {}\n", problem.message));
         }
         out
     }
@@ -288,14 +303,22 @@ impl Envelope {
             CommandPayload::Import {
                 path,
                 report,
+                problems,
+                problem_counts,
                 already_imported,
                 applied,
-            } => format!(
-                "file: {path}\napplied: {applied}\nalready_imported: {already_imported}\n{}",
-                Self::import_report_lines(report)
-            ),
+            } => {
+                let mut out = format!(
+                    "file: {path}\napplied: {applied}\nalready_imported: {already_imported}\n{}",
+                    Self::import_report_lines(report)
+                );
+                out.push_str(&Self::import_problem_lines(problems, problem_counts));
+                out
+            }
             CommandPayload::ImportBatch {
                 files,
+                problems,
+                problem_counts,
                 already_imported,
                 applied,
             } => {
@@ -307,6 +330,7 @@ impl Envelope {
                     out.push_str(&format!("file: {}\n", entry.path));
                     out.push_str(&Self::import_report_lines(&entry.report));
                 }
+                out.push_str(&Self::import_problem_lines(problems, problem_counts));
                 out
             }
             CommandPayload::Export { out, task_count } => {
@@ -409,6 +433,21 @@ mod tests {
 
     #[test]
     fn import_text_preview_is_line_oriented() {
+        let problem = ImportProblem {
+            kind: "nonconforming-deps".to_string(),
+            message: "input.md: line 3: task T-001: nonconforming Deps line 'Deps: T-099'"
+                .to_string(),
+            file: Some("input.md".to_string()),
+            line: Some(3),
+            task_id: Some(1),
+            value: Some("T-099".to_string()),
+            keepable_ids: Vec::new(),
+            group: Vec::new(),
+            fix: Some(
+                "keep only these IDs in Deps and move the rest of the original text to Notes"
+                    .to_string(),
+            ),
+        };
         let envelope = Envelope {
             schema_version: 1,
             project_id: None,
@@ -441,8 +480,10 @@ mod tests {
                         preview: "leftover".to_string(),
                     }],
                     has_unknown_content: true,
-                    warnings: vec!["input.md: line 2: task T-001: Deps residual 'T-099' did not become a dependency edge".to_string()],
+                    warnings: vec!["input.md: line 2: task T-001: section warning".to_string()],
                 },
+                problem_counts: ProblemCounts::of(std::slice::from_ref(&problem)),
+                problems: vec![problem],
                 already_imported: false,
                 applied: false,
             },
