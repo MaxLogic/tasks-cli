@@ -145,16 +145,18 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             );
         }
         Command::List {
+            label,
             status,
             after,
             limit,
         } => {
             let project_id = resolved_project(&cli, &data_root)?;
             let status_text = status.as_ref().map(ToString::to_string);
-            let page = Store::open_readonly(&data_root, &project_id)?.list_tasks(
+            let page = Store::open_readonly(&data_root, &project_id)?.list_tasks_with_label(
                 status_text.as_deref(),
                 *after,
                 limit.unwrap_or(20),
+                label.as_deref(),
             )?;
             envelope(
                 Some(project_id),
@@ -166,22 +168,44 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 cli.format,
             );
         }
-        Command::Search { text, after, limit } => {
+        Command::Search {
+            text,
+            after,
+            limit,
+            ranked,
+            prefix,
+            offset,
+            label,
+        } => {
             let project_id = resolved_project(&cli, &data_root)?;
-            let page = Store::open_readonly(&data_root, &project_id)?.search_tasks(
-                text,
-                *after,
-                limit.unwrap_or(20),
-            )?;
-            envelope(
-                Some(project_id),
+            let mut store = Store::open_readonly(&data_root, &project_id)?;
+            let payload = if *ranked {
+                let page = store.search_ranked(
+                    text,
+                    *prefix,
+                    label.as_deref(),
+                    offset.unwrap_or(0),
+                    limit.unwrap_or(20),
+                )?;
+                CommandPayload::SearchRanked {
+                    items: page.items,
+                    has_more: page.has_more,
+                    next_offset: page.next_after,
+                }
+            } else {
+                let page = store.search_tasks_with_label(
+                    text,
+                    *after,
+                    limit.unwrap_or(20),
+                    label.as_deref(),
+                )?;
                 CommandPayload::Search {
                     items: page.items,
                     has_more: page.has_more,
                     next_after: page.next_after,
-                },
-                cli.format,
-            );
+                }
+            };
+            envelope(Some(project_id), payload, cli.format);
         }
         Command::Show { id } => {
             let project_id = resolved_project(&cli, &data_root)?;
@@ -303,6 +327,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             };
             match cli.command.clone() {
                 Command::Create {
+                    labels,
                     title,
                     body_file,
                     status,
@@ -320,8 +345,17 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         .unwrap_or_default();
                     let deps = if clear_deps { Vec::new() } else { deps };
                     let status = status.unwrap_or(TaskStatus::Backlog);
-                    let (id, version, event_id) =
-                        store.create_task(&title, &body, status.clone(), deps)?;
+                    let (id, version, event_id) = store.create_task_with_labels(
+                        &title,
+                        &body,
+                        status.clone(),
+                        deps,
+                        labels
+                            .as_deref()
+                            .map(tasks_cli::labels::parse)
+                            .transpose()?
+                            .unwrap_or_default(),
+                    )?;
                     envelope(
                         Some(project_id),
                         CommandPayload::Create {
@@ -334,6 +368,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     );
                 }
                 Command::Update {
+                    labels,
+                    clear_labels,
                     id,
                     expect_version,
                     title,
@@ -355,6 +391,14 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         id,
                         expect_version,
                         TaskUpdate {
+                            labels: if clear_labels {
+                                Some(Vec::new())
+                            } else {
+                                labels
+                                    .as_deref()
+                                    .map(tasks_cli::labels::parse)
+                                    .transpose()?
+                            },
                             title,
                             body,
                             status,

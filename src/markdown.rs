@@ -23,6 +23,7 @@ pub struct ParsedTask {
     /// `Deps:` line is resolution-dependent, so `deps` is recomputed from this
     /// baseline by `resolve_create_task_deps`.
     pub deps: Vec<u64>,
+    pub labels: Vec<String>,
     pub metadata_deps: Vec<u64>,
     /// 1-based line of the canonical `Depends on:` line, when the task has one.
     pub metadata_deps_line: Option<usize>,
@@ -730,6 +731,7 @@ pub fn resolve_create_task_deps_across(sources: &mut [ParsedImport]) -> HashSet<
 }
 
 struct MetadataBlock {
+    labels: Vec<String>,
     title: Option<String>,
     status: Option<TaskStatus>,
     deps: Vec<u64>,
@@ -766,6 +768,7 @@ fn metadata_block(
 
     if title.is_none() && lines[cursor].text.trim() == "Body:" {
         return Ok(Some(MetadataBlock {
+            labels: Vec::new(),
             title: None,
             status: None,
             deps: Vec::new(),
@@ -797,9 +800,6 @@ fn metadata_block(
         else {
             return Ok(None);
         };
-        if lines.get(cursor + 3).map(|line| line.text.trim()) != Some("Body:") {
-            return Ok(None);
-        }
         (Some(version_value), deps_value, cursor + 3)
     } else {
         if cursor + 2 >= end {
@@ -811,12 +811,20 @@ fn metadata_block(
         else {
             return Ok(None);
         };
-        if lines.get(cursor + 2).map(|line| line.text.trim()) != Some("Body:") {
-            return Ok(None);
-        }
         (None, deps_value, cursor + 2)
     };
 
+    let labels_value = lines
+        .get(body_index)
+        .and_then(|line| metadata_value(line, "Labels:"));
+    let body_index = body_index + usize::from(labels_value.is_some());
+    if body_index >= end || lines[body_index].text.trim() != "Body:" {
+        return Ok(None);
+    }
+    let labels = labels_value
+        .map(crate::labels::parse)
+        .transpose()?
+        .unwrap_or_default();
     let status = status_value.parse::<TaskStatus>().map_err(|error| {
         AppError::Validation(format!(
             "{source_name}:{}: invalid Status value '{status_value}': {error}",
@@ -851,8 +859,13 @@ fn metadata_block(
     if version_value.is_some() {
         consumed.push("Version".to_string());
     }
-    consumed.extend(["Depends on".to_string(), "Body".to_string()]);
+    consumed.push("Depends on".to_string());
+    if labels_value.is_some() {
+        consumed.push("Labels".to_string());
+    }
+    consumed.push("Body".to_string());
     Ok(Some(MetadataBlock {
+        labels,
         title,
         status: Some(status),
         deps,
@@ -1057,6 +1070,7 @@ pub(crate) fn parse_with_map(
             .unwrap_or_else(|| NO_SECTION.to_string());
         let mut status = map.status_for(&section).unwrap_or(TaskStatus::Backlog);
         let mut deps = Vec::new();
+        let mut labels = Vec::new();
         let mut metadata_deps_line = None;
         let mut body_start = lines[*start_index].end;
         let mut consumed_metadata = Vec::new();
@@ -1067,6 +1081,7 @@ pub(crate) fn parse_with_map(
             if let Some(metadata_status) = metadata.status {
                 status = metadata_status;
             }
+            labels = metadata.labels;
             deps = metadata.deps;
             metadata_deps_line = metadata.deps_line;
             body_start = metadata.body_start;
@@ -1103,6 +1118,7 @@ pub(crate) fn parse_with_map(
             )));
         }
         task_previews.push(ImportTaskPreview {
+            labels: labels.clone(),
             id,
             title: title.clone(),
             section: section.clone(),
@@ -1111,6 +1127,7 @@ pub(crate) fn parse_with_map(
             consumed_metadata,
         });
         tasks.push(ParsedTask {
+            labels,
             id,
             heading_line: *start_index + 1,
             title,

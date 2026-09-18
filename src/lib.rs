@@ -12,3 +12,6 @@ pub mod storage;
 pub mod store;
 
 pub use error::AppError;
+
+pub mod full_text;
+pub mod labels;

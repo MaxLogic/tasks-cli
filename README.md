@@ -30,7 +30,7 @@ That gives you a project, a task, and a backlog you can read at a glance:
 
 ```text
 project_id: 3a785d75-2e1c-4351-80e3-8ba9e7fab992
-T-001	backlog	v1	Write release notes	[]
+T-001	draft	v1	Write release notes	[]	labels=[]
 has_more: false
 ```
 
@@ -39,10 +39,11 @@ has_more: false
 ```text
 $ tasks show T-2
 id: T-002
-status: backlog
+status: draft
 version: 1
+labels:
 dependencies: 1
-depends_on: T-001	ready	v2	Write release notes
+depends_on: T-001	todo	v2	Write release notes
 title:
 Tag the release
 body:
@@ -79,18 +80,30 @@ isolated root, which is what the tests do.
 ## Everyday commands
 
 ```text
-tasks list [--status backlog] [--after 20] [--limit 20]
+tasks list [--status draft] [--after 20] [--limit 20]
 tasks search "release notes"
 tasks show T-12
 tasks create --title "Write release notes" --body-file notes.md
-tasks update T-12 --expect-version 1 --status ready
+tasks update T-12 --expect-version 1 --status todo
 tasks update T-12 --expect-version 2 --clear-deps
 tasks history T-12
 tasks rules show
 tasks rules set --body-file RULES.md --expect-version 1
 ```
 
-Statuses are `backlog`, `ready`, `in-progress`, `blocked`, `done`, and
+An agent can retrieve a previous task revision without loading the whole history:
+
+```text
+tasks history T-12 --format json
+tasks history T-12 --event 42 --format json
+```
+
+The first command lists event IDs and `resulting_version`. Select the event for
+the desired task version; the second returns its complete `snapshot_json`.
+Event IDs and task version numbers are different. Reading an old snapshot does
+not restore it or change the current task.
+
+Statuses are `draft`, `todo`, `in-progress`, `blocked`, `done`, and
 `cancelled`. Bodies come from a file, and `-` reads standard input. Page limits
 run from 1 to 100, and `--after` continues from the cursor the previous page
 reported. `rules` holds the shared text that every `show` returns beside the
@@ -99,6 +112,42 @@ backlog.
 
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
+
+## Labels and ranked search
+
+```text
+tasks create --title "Review cache" --body-file task.md --labels performance,security
+tasks update T-12 --expect-version 2 --labels performance,needs-human
+tasks update T-12 --expect-version 3 --clear-labels
+tasks list --label performance
+tasks list --status blocked --label needs-human
+tasks search "cache latency" --ranked --label performance --format json
+tasks search "cach lat" --ranked --prefix --limit 20 --offset 20
+```
+
+Labels are trimmed, lowercased, sorted and deduplicated. Each task may have up to
+32 labels, each 1–64 ASCII letters, digits or `-_.:` characters. `--labels` replaces
+the complete set; omission preserves it. Label changes use the same version check
+and history transaction as other task edits. `needs-human` is a workflow convention,
+not a special state. Use `draft` for ideas needing brainstorming.
+
+Plain `search` already supports literal title/body substrings. `--ranked` adds
+SQLite FTS5 word search: all query terms must match; title matches receive more
+weight than body matches. `--prefix` matches word beginnings. Query text is quoted
+as literal terms, not interpreted as FTS operators. Ranked queries are limited to
+64 whitespace-separated terms and 4096 UTF-8 bytes. This is lexical retrieval,
+without typo correction, synonyms or embeddings.
+
+Ranked results use `next_offset` and `--offset`, not the ID-based `--after` cursor.
+Both search modes return bounded summaries and may include done/cancelled tasks.
+Ordinary `list` excludes done/cancelled but still includes draft and blocked tasks.
+Every page is internally consistent; changes between requests can move ranked
+results, so restart pagination after relevant edits.
+
+Existing databases require explicit `tasks migrate`: schema 3 adds labels and
+builds the search index after a validated backup. Schema 1 states become
+`draft`/`todo`; existing history snapshots remain unchanged. New databases start
+at schema 3. No live project is migrated automatically.
 
 ## Every write says what it expects
 
@@ -146,13 +195,14 @@ under `data`, errors still go to stderr, and the exit codes above still hold.
   "data": {
     "command": "show",
     "id": 2,
-    "status": "backlog",
+    "status": "draft",
     "version": 1,
     "title": "Tag the release",
     "body": "Ship it.\n",
     "deps": [1],
+    "labels": [],
     "dependency_summaries": [
-      { "id": 1, "status": "ready", "version": 2, "title": "Write release notes" }
+      { "id": 1, "status": "todo", "version": 2, "title": "Write release notes" }
     ],
     "rule_version": 1,
     "rules": ""
@@ -269,7 +319,7 @@ is not Linux proof.
 
 ## Tests
 
-The 2026-09-18 verification ran 137 tests on Windows and 139 on Ubuntu/WSL
+The 2026-09-18 verification ran 155 tests on Windows and 157 on Ubuntu/WSL
 with `cargo test --locked`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
@@ -294,6 +344,6 @@ never modified by the suite.
 `spec.md` is the normative contract when you need the exact rule behind any of
 this.
 
-The proposed AI workflow additions (labels, priority, draft/decision queues and
-shared skill integration) are described in [workflow-proposal.md](workflow-proposal.md).
-They are not part of the current CLI contract yet.
+States, labels and ranked search are implemented. Priority, actionable-default
+listing, unlock queries and shared skill integration remain proposals in
+[workflow-proposal.md](workflow-proposal.md).

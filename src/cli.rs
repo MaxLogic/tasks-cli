@@ -40,6 +40,8 @@ pub enum Command {
     },
     List {
         #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
         status: Option<TaskStatus>,
         #[arg(long)]
         after: Option<u64>,
@@ -49,6 +51,14 @@ pub enum Command {
     Search {
         text: String,
         #[arg(long)]
+        ranked: bool,
+        #[arg(long, requires = "ranked")]
+        prefix: bool,
+        #[arg(long, requires = "ranked")]
+        offset: Option<u64>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "ranked")]
         after: Option<u64>,
         #[arg(long)]
         limit: Option<usize>,
@@ -57,6 +67,8 @@ pub enum Command {
         id: String,
     },
     Create {
+        #[arg(long)]
+        labels: Option<String>,
         #[arg(long)]
         title: String,
         #[arg(long = "body-file")]
@@ -69,6 +81,10 @@ pub enum Command {
         clear_deps: bool,
     },
     Update {
+        #[arg(long, conflicts_with = "clear_labels")]
+        labels: Option<String>,
+        #[arg(long)]
+        clear_labels: bool,
         id: String,
         #[arg(long = "expect-version")]
         expect_version: u64,

@@ -74,7 +74,7 @@ fn section_patterns_and_default_status_reach_the_store_through_the_cli() {
         "{preview_text}"
     );
     assert!(
-        preview_text.contains("section: Mystery status=backlog contains_tasks=true"),
+        preview_text.contains("section: Mystery status=draft contains_tasks=true"),
         "{preview_text}"
     );
     let hash = preview_text

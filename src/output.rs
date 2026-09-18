@@ -31,6 +31,11 @@ pub enum CommandPayload {
         has_more: bool,
         next_after: Option<u64>,
     },
+    SearchRanked {
+        items: Vec<TaskSummary>,
+        has_more: bool,
+        next_offset: Option<u64>,
+    },
     Show(TaskDetail),
     Create {
         id: u64,
@@ -228,6 +233,11 @@ impl Envelope {
                 items,
                 has_more,
                 next_after,
+            }
+            | CommandPayload::SearchRanked {
+                items,
+                has_more,
+                next_offset: next_after,
             } => {
                 let mut out = String::new();
                 for item in items {
@@ -238,17 +248,23 @@ impl Envelope {
                         .collect::<Vec<_>>()
                         .join(",");
                     out.push_str(&format!(
-                        "T-{0:03}\t{1}\tv{2}\t{3}\t[{4}]\n",
+                        "T-{0:03}\t{1}\tv{2}\t{3}\t[{4}]\tlabels=[{5}]\n",
                         item.id,
                         item.status,
                         item.version,
                         Self::bound_title(&item.title),
-                        deps
+                        deps,
+                        item.labels.join(",")
                     ));
                 }
                 out.push_str(&format!("has_more: {has_more}\n"));
                 if let Some(next) = next_after {
-                    out.push_str(&format!("next_after: {next}\n"));
+                    let cursor_name = if matches!(self.data, CommandPayload::SearchRanked { .. }) {
+                        "next_offset"
+                    } else {
+                        "next_after"
+                    };
+                    out.push_str(&format!("{cursor_name}: {next}\n"));
                 }
                 out
             }
@@ -257,6 +273,7 @@ impl Envelope {
                 out.push_str(&format!("id: T-{0:03}\n", task.id));
                 out.push_str(&format!("status: {}\n", task.status));
                 out.push_str(&format!("version: {}\n", task.version));
+                out.push_str(&format!("labels: {}\n", task.labels.join(", ")));
                 out.push_str(&format!("dependencies: {}\n", task.deps.len()));
                 for dependency in &task.dependency_summaries {
                     out.push_str(&format!(
@@ -416,6 +433,7 @@ mod tests {
             project_id: None,
             data: CommandPayload::List {
                 items: vec![TaskSummary {
+                    labels: vec![],
                     id: 1,
                     status: crate::model::TaskStatus::Backlog,
                     version: 1,
@@ -458,6 +476,7 @@ mod tests {
                     has_bom: true,
                     task_count: 1,
                     tasks: vec![crate::model::ImportTaskPreview {
+                        labels: vec![],
                         id: 1,
                         title: "Title".to_string(),
                         section: "ready".to_string(),
