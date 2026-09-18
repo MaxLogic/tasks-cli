@@ -1348,10 +1348,7 @@ struct ApplyOutcome {
 /// these are removed by a rollback, so a re-run never touches what an earlier
 /// run or `tasks init` created.
 struct CreatedArtifacts {
-    binding: bool,
     db: bool,
-    wal: bool,
-    shm: bool,
     lock: bool,
     directory: bool,
 }
@@ -1378,76 +1375,121 @@ fn apply_and_verify(
     options: &BulkOptions,
     project_id: &str,
 ) -> Result<ApplyOutcome, AppError> {
-    let db_path = crate::store::data_root_project_path(&options.data_root, project_id);
-    let created = CreatedArtifacts {
-        binding: existing_binding(&options.data_root, dir)?.is_none(),
-        db: !db_path.exists(),
-        wal: !sqlite_sidecar(&db_path, "-wal").exists(),
-        shm: !sqlite_sidecar(&db_path, "-shm").exists(),
-        lock: !db_path.with_extension("create.lock").exists(),
-        directory: !db_path.parent().map(Path::exists).unwrap_or(false),
-    };
-    match apply_and_verify_inner(
-        index,
-        dir,
-        ledger_files,
-        preview,
-        files,
-        relative_directory,
-        map,
-        options,
-        project_id,
-    ) {
-        Ok(mut outcome) => {
-            if !outcome.verified {
-                outcome.rolled_back = true;
-                if let Some(problem) =
-                    roll_back_apply(&options.data_root, dir, project_id, &created)
-                {
-                    let reason = outcome
-                        .verification_error
-                        .take()
-                        .unwrap_or_else(|| "verification failed".to_string());
-                    outcome.verification_error =
-                        Some(format!("{reason}; rollback failed: {problem}"));
-                }
+    // The test seam pauses immediately before the protected apply stage.
+    before_candidate_apply()?;
+    let mut result = None;
+    registry::Registry::with_bindings(&options.data_root, |registry| {
+        let existing = registry
+            .bindings
+            .iter()
+            .find(|binding| same_path(Path::new(&binding.root), dir));
+        if let Some(binding) = existing {
+            if Uuid::parse_str(&binding.project_id).ok() != Uuid::parse_str(project_id).ok() {
+                return Err(AppError::Usage(format!(
+                    "{} was bound to another project after preview; rerun bulk-import",
+                    dir.display()
+                )));
             }
-            Ok(outcome)
         }
-        Err(error) => match roll_back_apply(&options.data_root, dir, project_id, &created) {
-            None => Err(error),
-            Some(problem) => Err(AppError::Validation(format!(
-                "{error}; rollback failed: {problem}"
-            ))),
-        },
-    }
+        let needs_binding = existing.is_none();
+        let db_path = crate::store::data_root_project_path(&options.data_root, project_id);
+        // Absence only proves ownership while init/bind/other bulk applies are
+        // excluded. Never treat a new sidecar on an existing DB as ours to delete.
+        let created = CreatedArtifacts {
+            db: !db_path.exists(),
+            lock: !db_path.with_extension("create.lock").exists(),
+            directory: !db_path.parent().map(Path::exists).unwrap_or(false),
+        };
+        let attempt = apply_and_verify_inner(
+            index,
+            ledger_files,
+            preview,
+            files,
+            relative_directory,
+            map,
+            options,
+            project_id,
+        );
+        result = Some(match attempt {
+            Ok(mut outcome) => {
+                if outcome.verified {
+                    if needs_binding {
+                        registry.bindings.push(registry::RegistryBinding {
+                            root: dir.to_string_lossy().into_owned(),
+                            project_id: project_id.to_owned(),
+                        });
+                    }
+                } else {
+                    outcome.rolled_back = true;
+                    if let Some(problem) = roll_back_apply(&options.data_root, project_id, &created)
+                    {
+                        let reason = outcome
+                            .verification_error
+                            .take()
+                            .unwrap_or_else(|| "verification failed".to_owned());
+                        outcome.verification_error =
+                            Some(format!("{reason}; rollback failed: {problem}"));
+                    }
+                }
+                Ok(outcome)
+            }
+            Err(error) => match roll_back_apply(&options.data_root, project_id, &created) {
+                None => Err(error),
+                Some(problem) => Err(AppError::Validation(format!(
+                    "{error}; rollback failed: {problem}"
+                ))),
+            },
+        });
+        Ok(())
+    })?;
+    result.ok_or_else(|| AppError::Database("bulk apply produced no result".to_owned()))?
 }
 
-/// Remove exactly what an apply created: the registry binding, the database
-/// files and the project directory, never recursively and never anything that
+#[cfg(feature = "test-hooks")]
+fn before_candidate_apply() -> Result<(), AppError> {
+    let Some(marker) = std::env::var_os("TASKS_TEST_BULK_READY") else {
+        return Ok(());
+    };
+    let Some(release) = std::env::var_os("TASKS_TEST_BULK_RELEASE") else {
+        return Ok(());
+    };
+    let marker = PathBuf::from(marker);
+    fs::write(&marker, b"ready")
+        .map_err(|error| AppError::io_path("write test marker", &marker, error))?;
+    let started = std::time::Instant::now();
+    while !Path::new(&release).exists() {
+        if started.elapsed() > std::time::Duration::from_secs(15) {
+            return Err(AppError::Validation("bulk test hook timed out".to_string()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn before_candidate_apply() -> Result<(), AppError> {
+    Ok(())
+}
+
+/// Remove only the database files and project directory this apply created.
+/// No new binding has been published yet. Never remove recursively or anything that
 /// existed before. Every step reports its failure so the caller can say what
 /// is left behind.
 fn roll_back_apply(
     data_root: &Path,
-    dir: &Path,
     project_id: &str,
     created: &CreatedArtifacts,
 ) -> Option<String> {
     let mut problems = Vec::new();
-    if created.binding {
-        if let Err(error) = registry::remove_binding(data_root, dir, project_id) {
-            problems.push(format!("remove the registry binding: {error}"));
-        }
-    }
     let db_path = crate::store::data_root_project_path(data_root, project_id);
     if created.db && db_path.exists() {
         if let Err(error) = fs::remove_file(&db_path) {
             problems.push(format!("delete {}: {error}", db_path.display()));
         }
     }
-    for (created_sidecar, suffix) in [(created.wal, "-wal"), (created.shm, "-shm")] {
+    for suffix in ["-wal", "-shm"] {
         let path = sqlite_sidecar(&db_path, suffix);
-        if created_sidecar && path.exists() {
+        if created.db && path.exists() {
             if let Err(error) = fs::remove_file(&path) {
                 problems.push(format!("delete {}: {error}", path.display()));
             }
@@ -1483,7 +1525,6 @@ fn roll_back_apply(
 #[allow(clippy::too_many_arguments)]
 fn apply_and_verify_inner(
     index: usize,
-    dir: &Path,
     ledger_files: &[LedgerSource],
     preview: &[(String, ParsedImport)],
     files: &[BulkFileRecord],
@@ -1525,7 +1566,7 @@ fn apply_and_verify_inner(
                 "bulk-import produced project id '{project_id}', which is not a UUID ({error}); re-run the scan"
             ))
         })?;
-    registry::init_root(&options.data_root, dir, Some(explicit_project))?;
+    crate::store::create_project_db(&options.data_root, &explicit_project)?;
     let mut store = Store::open_rw(&options.data_root, project_id)?;
     let (_, already_imported) = store.import_apply_many(reparsed, &hashes)?;
 
