@@ -63,7 +63,10 @@ with the real two binaries, not just argument mocks.
 - Tests must receive an explicit unique temporary data root. Never use the real
   default task store, recursively clean a repository, or kill unrelated workers.
 - Preserve unrelated changes. Do not push, migrate a live backlog or replace an
-  in-use executable without authorization. No automatic commit requirement here.
+  in-use executable without authorization.
+- After completing and verifying each task or milestone, create a local Git
+  commit for that related batch. Stage only its owned changes, inspect the staged
+  diff, and keep unrelated work separate. Commit authority does not authorize push.
 - If Git is initialized, ignore only generated `target/` and local skill-link
   directories `.agents/skills/`, `.claude/skills/`. Do not blanket-ignore `.agents`.
   User task databases, backups and exports live outside this source repository.
