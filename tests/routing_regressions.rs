@@ -5,6 +5,64 @@ use tasks_cli::store::create_project_db;
 use uuid::Uuid;
 
 #[test]
+fn bind_rejects_invalid_database_identity_without_publishing_registry() {
+    for wrong_identity in [false, true] {
+        let data = tempfile::tempdir().expect("data root");
+        let root = tempfile::tempdir().expect("workspace");
+        let id = Uuid::new_v4();
+        let info = create_project_db(data.path(), &id).expect("database");
+        if wrong_identity {
+            let conn = rusqlite::Connection::open(&info.db_path).expect("fixture connection");
+            conn.execute(
+                "UPDATE project SET project_id = ?1",
+                [Uuid::new_v4().to_string()],
+            )
+            .expect("different database identity");
+        } else {
+            std::fs::write(&info.db_path, b"not a sqlite database").expect("corrupt fixture");
+        }
+        let result = registry::bind_root(data.path(), root.path(), Some(id.to_string()));
+        assert!(
+            result.is_err(),
+            "bind accepted invalid database: {result:?}"
+        );
+        assert!(
+            !data.path().join("registry.json").exists(),
+            "failed bind published registry"
+        );
+    }
+}
+
+#[test]
+fn accepted_uuid_spellings_resolve_and_bind_the_canonical_database() {
+    let data = tempfile::tempdir().expect("data root");
+    let root = tempfile::tempdir().expect("workspace");
+    let id = Uuid::parse_str("abcdef12-abcd-4def-8123-abcdef123456").expect("UUID");
+    create_project_db(data.path(), &id).expect("database");
+    for spelling in [
+        id.to_string().to_uppercase(),
+        id.simple().to_string(),
+        id.braced().to_string(),
+    ] {
+        assert_eq!(
+            registry::resolve_project(data.path(), Some(&spelling), None).expect("resolve"),
+            id.to_string()
+        );
+        assert_eq!(
+            registry::bind_root(data.path(), root.path(), Some(spelling)).expect("bind"),
+            id.to_string()
+        );
+    }
+    assert_eq!(
+        registry::list_bindings(data.path())
+            .expect("bindings")
+            .bindings
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn repeated_init_reuses_identity_and_does_not_create_orphans() {
     let data = tempfile::tempdir().expect("data root");
     let project_root = tempfile::tempdir().expect("project root");
