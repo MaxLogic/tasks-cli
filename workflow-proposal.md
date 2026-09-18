@@ -1,7 +1,7 @@
 # Proposed AI task workflow
 
-Status: recommendation, not implemented CLI behavior. No live skills or task
-ledgers have been switched. `spec.md` remains the current implementation contract.
+Status: states, labels and ranked word/prefix search are implemented. Other
+sections remain recommendations. No live skills or task ledgers have been switched. `spec.md` remains the current implementation contract.
 
 ## Keep the SQLite CLI
 
@@ -26,8 +26,8 @@ research reports are retained under `target/evidence/tool-landscape-20260918/`.
 
 ## States, labels and priority
 
-Use six states. Replace the current `backlog`/`ready` vocabulary with `draft`/`todo`
-in a future explicit schema/import migration; retain the other four names.
+The approved six states are implemented. Explicit schema migration replaces
+`backlog`/`ready` with `draft`/`todo` while preserving existing history.
 
 | State | Meaning |
 | --- | --- |
@@ -125,9 +125,9 @@ no event. `history T-N --event N` retrieves a selected revision. A second revisi
 table would duplicate this. A future restore command should make a new
 version-checked update and event, preserving later history.
 
-First add labels and priority queries. Then consider SQLite FTS5 for ranked word,
-phrase and prefix search, with an index updated transactionally. Preserve the
-existing literal substring mode for identifiers and exact fragments. FTS5 supports
+Labels and SQLite FTS5 ranked word/prefix search are now implemented, with an
+index updated transactionally. Plain `search` preserves literal substring
+matching for identifiers and exact fragments. Priority queries remain proposed. FTS5 supports
 ranking and tokenization, but is not semantic similarity or general typo
 correction. See the [SQLite FTS5 documentation](https://www.sqlite.org/fts5.html).
 

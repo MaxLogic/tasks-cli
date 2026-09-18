@@ -1,8 +1,96 @@
 # tasks-cli verification report
 
-## Current verification: 2026-09-18
+## Current verification: states, labels and ranked search — 2026-09-18
 
-Candidate: the uncommitted reliability fixes in this workspace. No live task
+The approved states are `draft`, `todo`, `in-progress`, `blocked`, `done`, and
+`cancelled`. State migration was committed as `3e71089`. The subsequent labels
+and search milestone adds schema 3, normalized labels in task snapshots and
+Markdown round trips, exact label filtering, and opt-in FTS5 ranked word/prefix
+search. Plain substring search remains compatible. History already supported
+retrieving a complete earlier snapshot by event ID; README now shows the query.
+No live project migration, installed-skill change, executable deployment or push
+was performed. AGENTS.md requires a local commit after each verified milestone.
+
+### Proof and platform gates
+
+- State RED: four behavioral failures and one pass; state GREEN: five passes.
+  Logs: `target/evidence/states-20260918/red-windows-2.log`,
+  `green-windows-1.log`, `focused-windows.log`, `focused-linux.log`.
+- Labels/search CLI RED: four failures from unavailable label/search options,
+  one validation test already passing. GREEN: all five passed. Engine RED:
+  seven failures against the temporary no-op implementation; GREEN: seven
+  passed. Logs under `target/evidence/search-labels-20260918/`: `red.log`,
+  `fts-red.log`, `fts-green.log`, `focused-green.log`.
+- Supplemental schema-2 migration coverage verifies index rebuild over existing
+  content, unchanged history, an independently readable schema-2 backup and
+  subsequent version-checked label edits. This extra test was added after the
+  main RED/GREEN cycle; it is not claimed as a separate RED/GREEN reproduction.
+- Final `cargo fmt --check`, `cargo clippy --locked --all-targets`,
+  `cargo test --locked`, and `cargo build --release --locked` passed on native
+  Windows and Ubuntu/WSL. Linux used `CARGO_TARGET_DIR=target/linux` and
+  Linux-owned temporary databases. Totals: **155 Windows / 157 Linux**, zero
+  failures or ignored tests. Feature-enabled `bulk_rollback` passed separately
+  on both platforms (one additional test each).
+- Full logs: `target/evidence/search-labels-20260918/{windows,linux}-fmt.log`,
+  `*-clippy.log`, `*-test-final.log`, `*-bulk-rollback.log`, `*-build.log`.
+  Counts and release hashes: `gates-summary.json` in that directory.
+- Initial wider runs exposed a legacy fixture setup error introduced during this
+  change and an old `backlog` output assertion in `section_map`. Both were
+  corrected; original logs remain as `windows-test-1.log`, `windows-test.log`
+  and `linux-test.log`. The first Linux gate-script launch also had CRLF shell
+  line endings; no checks ran in that launch. The corrected LF script completed
+  the recorded final gates. No passing wrapper exit was used as proof of tests.
+
+### Release measurements
+
+Measurements use 10,000 tasks and 50,000 seeded events, plus one label mutation.
+Each sample is a new release process: one first run, five additional warmups,
+then 50 measured samples; p95 is nearest rank. Output is captured. Modes run
+sequentially after builds finish. Linux native stores use `/tmp`; delegated
+stores use unique Windows TEMP directories and only the Windows binary opens
+SQLite. The harness and complete samples are retained under
+`target/evidence/search-labels-20260918/measure.py` and `perf-*.json`.
+
+| Operation | Windows p95 ms | Linux p95 ms | Delegated p95 ms |
+| --- | ---: | ---: | ---: |
+| list | 43.2 | 83.3 | 153.2 |
+| show | 45.3 | 142.8 | 142.9 |
+| search-hit | 34.0 | 92.9 | 147.5 |
+| search-miss | 139.8 | 153.9 | 271.3 |
+| ranked-hit | 149.7 | 151.7 | 297.3 |
+| ranked-miss | 52.8 | 63.2 | 197.2 |
+| ranked-prefix-label | 224.7 | 132.6 | 280.5 |
+| export | 529.5 | 401.0 | 549.5 |
+| update | 71.1 | 175.3 | 217.2 |
+
+All measured calls exited 0. These are fixture observations, not upper bounds for
+arbitrary backlogs. Ranking is not uniformly faster than substring search: common
+terms require scoring many matches. Native Linux show and update exceeded the
+spec's diagnostic p95 targets of 100/150 ms; this is recorded rather than hidden
+by a retry. No durability setting was weakened. Every measured operation's p95
+was below 550 ms, including full export and delegated process startup. Memory
+was not remeasured in this milestone.
+
+The real two-binary delegation smoke passed label create/show, ranked prefix and
+label filtering, selected full history snapshots, Unicode/CRLF stdin, literal
+`--out=needle` / `--windows-exe=needle` query arguments and missing-task exit 3.
+It used a disposable Windows-owned store, not a live backlog. Full results are
+in `perf-delegated.json` under `delegation_smoke`.
+
+Release SHA-256:
+
+- `target/release/tasks.exe`: `fea156efc4cd15e64c095059f9405335e614bb7aa6da49975e89d3fea0ad3b6c`.
+- `target/linux/release/tasks`: `22426ac9097f9426c07d62aaa0d9255eb48182e047042aeebe3071b33057d736`.
+
+Remaining scope: priority, actionable-only default lists, unlock queries, automatic
+project-file discovery and live skill integration. Current default lists omit
+done/cancelled but include draft/blocked; `--label needs-human` selects an ordinary
+label. Search includes terminal states. Ranked pages can move across separate
+requests if tasks change; each individual request uses a consistent snapshot.
+
+## Earlier reliability checkpoint: 2026-09-18
+
+Candidate: reliability commits 198e6d1, c5dc0c9 and 27912eb. No live task
 ledger was migrated and no installed skill was changed. The pre-existing README
 rewrite was preserved and updated where necessary.
 
@@ -120,15 +208,14 @@ missing-task exit code 3. See `performance-final-delegated.json`.
 - `target/release/tasks.exe`: 5,227,008 bytes; SHA-256 `6bc28fe28d5affdf4f2767fb3c3e5ef4a74782814b7b61d66b6ddf49596cbb85`.
 - `target/linux/release/tasks`: 7,038,728 bytes; SHA-256 `a22196401af552e81ec67c5d2984d6547e45369e6d638d7156b4a3fb7bf8bbbc`.
 
-The reliability fixes are implemented. Labels, priority, draft/decision queues,
+At this earlier checkpoint, labels, priority, draft/decision queues,
 runnable-only default listings, unlock ranking, automatic project-file discovery
-and shared-skill integration are **proposals**, not shipped behavior. Current
-lists still include nonterminal blocked/backlog items. Existing event history
-already stores full revisions. See [workflow-proposal.md](workflow-proposal.md).
+and shared-skill integration were proposals. Later state/labels/search results
+are recorded above. Existing event history already stored full revisions.
 
-No live cutover, skill deployment, commit or push was performed. The historical
-report below retains prior evidence; its counts, hashes and statements about the
-then-current candidate do not describe this candidate.
+No live cutover or skill deployment occurred. These reliability changes were
+subsequently committed locally; no push occurred. The historical report below
+retains prior evidence, with its original counts and artifact hashes.
 
 <details>
 <summary>Historical verification: 2026-09-16</summary>

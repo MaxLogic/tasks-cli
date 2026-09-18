@@ -1637,9 +1637,11 @@ fn verify_project(
                             task.status, other.status
                         ));
                     }
-                    if sorted_deps(&other.deps) != sorted_deps(&task.deps) {
+                    if sorted_deps(&other.deps) != sorted_deps(&task.deps)
+                        || other.labels != task.labels
+                    {
                         mismatches.push(format!(
-                            "{name}: {id} dependencies differ from the re-export"
+                            "{name}: {id} dependencies or labels differ from the re-export"
                         ));
                     }
                 }
@@ -1662,8 +1664,12 @@ fn verify_project(
                             task.status, detail.status
                         ));
                     }
-                    if sorted_deps(&detail.deps) != sorted_deps(&task.deps) {
-                        mismatches.push(format!("{name}: {id} dependencies differ in the store"));
+                    if sorted_deps(&detail.deps) != sorted_deps(&task.deps)
+                        || detail.labels != task.labels
+                    {
+                        mismatches.push(format!(
+                            "{name}: {id} dependencies or labels differ in the store"
+                        ));
                     }
                 }
                 Err(error) => mismatches.push(format!("{name}: {id} cannot be read back: {error}")),

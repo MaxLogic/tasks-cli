@@ -64,7 +64,7 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
     let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 2));
+    assert_eq!((from, to), (0, 3));
     let backup = backup_path.expect("backup path");
     assert!(backup.is_file());
 
@@ -110,6 +110,7 @@ fn every_migration_attempt_backups_the_current_live_database() {
         [],
     )
     .expect("new live task");
+    conn.execute_batch("DROP TRIGGER tasks_fts_insert; DROP TRIGGER tasks_fts_update; DROP TRIGGER tasks_fts_delete; DROP TABLE tasks_fts; DROP TABLE task_labels;").unwrap();
     conn.pragma_update(None, "user_version", 0i64)
         .expect("reset version for reproduction");
     drop(conn);

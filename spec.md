@@ -150,11 +150,11 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | --- | --- |
 | `init --root PATH` | Create project and return UUID/database path; existing binding is a no-op |
 | `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
-| `list [--status STATUS] [--after N] [--limit N]` | Default nonterminal tasks; numeric ID order; default 20, max 100 |
+| `list [--status STATUS] [--label LABEL] [--after N] [--limit N]` | Default nonterminal tasks; numeric ID order; default 20, max 100 |
 | `show T-N` | Full task, version, project rules and direct dependency summaries |
-| `search TEXT [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; same paging as list |
+| `search TEXT [--label LABEL] [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; same paging as list |
 | `create --title TEXT --body-file PATH` | Optional `--status`, default draft; allocate next ID atomically |
-| `update T-N --expect-version N ...` | At least one of title, body-file, status or full dependency replacement |
+| `update T-N --expect-version N ...` | At least one of title, body-file, status, labels or full dependency replacement |
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
@@ -178,8 +178,36 @@ upgrades through schema 1 in the same transaction. Older Markdown headings,
 metadata and section maps may still use `backlog`/`ready` as import aliases;
 new CLI values, output and exports use the canonical names.
 
+Schema 3 adds `task_labels(task_id,label)` with a composite primary key, task
+foreign key and `(label,task_id)` index, plus external-content FTS5 `tasks_fts`
+on title/body using unicode61 and prefix indexes for lengths 2 and 3. Insert,
+delete and changed-title/body triggers keep the index in the task transaction.
+Migration rebuilds the index from existing content without rewriting events.
+Upgrades from schemas 0, 1 and 2 remain explicit, backed up and atomic.
+
+Create/update accept `--labels LABEL,...`; update omission preserves the set,
+`--labels` replaces it and mutually exclusive `--clear-labels` empties it.
+Normalize by trimming, ASCII lowercasing, sorting and deduplicating; allow at
+most 32 labels of 1–64 ASCII letters, digits or `-_.:`. Labels appear in show,
+summary rows, history snapshots, import previews and optional canonical metadata.
+Exact normalized `--label` filtering is available for list and both search modes.
+No reserved-label behavior is enforced by the CLI.
+
+`search TEXT --ranked [--prefix] [--label LABEL] [--offset N] [--limit N]`
+uses FTS5 BM25, title weight 10/body weight 1, then numeric ID to break ties.
+Query input is 1–64 whitespace-separated terms and at most 4096 UTF-8 bytes;
+each term is quoted with embedded quotes escaped, joined with AND. Prefix mode
+adds a suffix wildcard outside each quoted term; raw FTS operators are never
+accepted. Punctuation follows unicode61 tokenization. No fuzzy/semantic service
+or new dependency is required. Ranked JSON has command `search_ranked`,
+`items`, `has_more`, `next_offset`. The default/max limits remain 20/100;
+read limit+1 in SQL. `--after` conflicts with `--ranked`; `--prefix` and
+`--offset` require `--ranked`. Offset must fit SQLite's signed integer range.
+Search includes terminal states. Pages may shift after concurrent edits;
+no cross-command snapshot is promised.
+
 List/search rows contain only ID, status, version, title (display bounded to 120
-Unicode characters), and dependency IDs. Include `has_more` and `next_after`; read
+Unicode characters), dependency IDs and normalized labels. Include `has_more` and `next_after`; read
 limit+1 rows, do not COUNT(*) on each request. `--after` is the numeric ID from the
 last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
 concurrent edits can change later pages. Each list, search, show and export call
@@ -232,7 +260,8 @@ Add index `(status, id)` on tasks, reverse dependency index, and `(task_id,event
 on events. Parameterize every value. Use a fixed whitelist for SQL choices, never
 insert user-provided identifiers/order clauses. Substring search may scan bodies
 in v1, but filters/projections/limits stay in SQL. Define ASCII case folding
-explicitly; Unicode case-insensitive search and FTS are deferred until needed.
+explicitly. Ranked search uses FTS5 unicode61 tokenization and its case folding;
+plain substring matching remains ASCII case-insensitive.
 
 Writer connections use foreign_keys=ON, WAL, synchronous=FULL and a 5-second busy
 timeout. Configure journal mode at initialization/migration, not on every read.
@@ -309,7 +338,7 @@ sections in import provenance, and expose the proposed rules in the preview.
 Do not infer dependencies from arbitrary T-N mentions; keep prose references.
 
 The canonical export metadata block is ordered `Status:`, `Version:`,
-`Depends on:`, `Body:`; an optional `Title:` may precede it for compatible
+`Depends on:`, optional `Labels:`, `Body:`; an optional `Title:` may precede it for compatible
 inputs. The importer consumes metadata only when that ordered block is present.
 For compatibility it also accepts the older ordered `Status:`, `Depends on:`,
 `Body:` form and an exact standalone `Body:` marker. `Body:` is a hard
@@ -544,7 +573,7 @@ Measure output bytes; only claim token counts when a named tokenizer was used.
 Record peak process memory for show/list; investigate >64 MiB. Export/backup may
 scale with data size, but stream where practical. Never read all bodies/history
 for list. Use EXPLAIN QUERY PLAN to verify ID/status/history access paths; do not
-add FTS/caching or change durability merely to meet targets. Bound dependency
+add caches or change durability merely to meet targets. Bound dependency
 count to 1000 per task; reject oversized replacement rather than truncate it.
 
 ## Verification and implementation slices

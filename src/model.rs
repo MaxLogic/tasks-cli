@@ -197,6 +197,8 @@ pub struct TaskSummary {
     pub version: u64,
     pub title: String,
     pub deps: Vec<u64>,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +209,8 @@ pub struct TaskDetail {
     pub title: String,
     pub body: String,
     pub deps: Vec<u64>,
+    #[serde(default)]
+    pub labels: Vec<String>,
     pub dependency_summaries: Vec<DependencySummary>,
     pub rule_version: u64,
     pub rules: String,
@@ -227,6 +231,7 @@ pub struct TaskUpdate {
     pub status: Option<TaskStatus>,
     pub deps: Option<Vec<u64>>,
     pub clear_deps: bool,
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +289,8 @@ pub struct ImportTaskPreview {
     pub status: TaskStatus,
     #[serde(default)]
     pub deps: Vec<u64>,
+    #[serde(default)]
+    pub labels: Vec<String>,
     #[serde(default)]
     pub consumed_metadata: Vec<String>,
 }

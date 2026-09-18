@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug)]
 pub struct Store {
@@ -167,6 +167,7 @@ fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError>
 fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(), AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     create_schema_objects(&tx)?;
+    crate::labels::create_schema(&tx)?;
     tx.execute(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
         [project_id.to_string()],
@@ -194,7 +195,15 @@ fn validate_current_schema(
             db_path.display()
         )));
     }
-    for table in ["project", "tasks", "dependencies", "events", "imports"] {
+    for table in [
+        "project",
+        "tasks",
+        "dependencies",
+        "events",
+        "imports",
+        "task_labels",
+        "tasks_fts",
+    ] {
         if !table_exists(conn, table)? {
             return Err(missing(&format!("the {table} table")));
         }
@@ -224,6 +233,8 @@ fn validate_current_schema(
     }
     for (table, columns) in [
         ("dependencies", ["task_id", "depends_on_id"].as_slice()),
+        ("task_labels", ["task_id", "label"].as_slice()),
+        ("tasks_fts", ["title", "body"].as_slice()),
         (
             "events",
             [
@@ -253,6 +264,16 @@ fn validate_current_schema(
             if !column_exists(conn, table, column)? {
                 return Err(missing(&format!("the {table}.{column} column")));
             }
+        }
+    }
+    for trigger in ["tasks_fts_insert", "tasks_fts_update", "tasks_fts_delete"] {
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+            [trigger],
+            |r| r.get(0),
+        )?;
+        if count != 1 {
+            return Err(missing(&format!("the {trigger} trigger")));
         }
     }
     let project_count: i64 =
@@ -1075,6 +1096,17 @@ impl Store {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Pagination<TaskSummary>, AppError> {
+        self.list_tasks_with_label(status, after, limit, None)
+    }
+
+    pub fn list_tasks_with_label(
+        &mut self,
+        status: Option<&str>,
+        after: Option<u64>,
+        limit: usize,
+        label: Option<&str>,
+    ) -> Result<Pagination<TaskSummary>, AppError> {
+        let label = crate::labels::filter(label)?;
         let page_size = validate_limit(limit)?;
         let snapshot = self.conn.unchecked_transaction()?;
         let fetch = page_size + 1;
@@ -1083,21 +1115,21 @@ impl Store {
             self.conn.prepare(
                 "SELECT id, status, version, title
                  FROM tasks
-                 WHERE status = ?1 AND id > ?2
+                 WHERE status = ?1 AND id > ?2 AND (?4 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?4))
                  ORDER BY id ASC LIMIT ?3",
             )?
         } else {
             self.conn.prepare(
                 "SELECT id, status, version, title
                  FROM tasks
-                 WHERE status NOT IN ('done','cancelled') AND id > ?1
+                 WHERE status NOT IN ('done','cancelled') AND id > ?1 AND (?3 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?3))
                  ORDER BY id ASC LIMIT ?2",
             )?
         };
         let mut rows = if let Some(status) = status {
-            stmt.query(params![status, after.unwrap_or(0), fetch as i64])?
+            stmt.query(params![status, after.unwrap_or(0), fetch as i64, label])?
         } else {
-            stmt.query(params![after.unwrap_or(0), fetch as i64])?
+            stmt.query(params![after.unwrap_or(0), fetch as i64, label])?
         };
         while let Some(row) = rows.next()? {
             let status_text: String = row.get(1)?;
@@ -1114,6 +1146,7 @@ impl Store {
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
                 deps: Vec::new(),
+                labels: Vec::new(),
             });
         }
         drop(rows);
@@ -1129,8 +1162,10 @@ impl Store {
         let next_after = if has_more { next_after } else { None };
         let ids = summaries.iter().map(|task| task.id).collect::<Vec<_>>();
         let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut labels = crate::labels::read_many(&self.conn, &ids)?;
         for row in summaries.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
+            row.labels = labels.remove(&row.id).unwrap_or_default();
         }
         snapshot.commit()?;
         Ok(Pagination {
@@ -1146,6 +1181,17 @@ impl Store {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Pagination<TaskSummary>, AppError> {
+        self.search_tasks_with_label(needle, after, limit, None)
+    }
+
+    pub fn search_tasks_with_label(
+        &mut self,
+        needle: &str,
+        after: Option<u64>,
+        limit: usize,
+        label: Option<&str>,
+    ) -> Result<Pagination<TaskSummary>, AppError> {
+        let label = crate::labels::filter(label)?;
         if needle.is_empty() {
             return Err(AppError::Validation(
                 "tasks search: the search text is empty; pass a non-empty search argument"
@@ -1159,13 +1205,13 @@ impl Store {
             "
             SELECT id, status, version, title
             FROM tasks
-             WHERE id > ?1 AND (LOWER(title) LIKE ?2 ESCAPE '\\' OR LOWER(body) LIKE ?2 ESCAPE '\\')
+             WHERE id > ?1 AND (?4 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?4)) AND (LOWER(title) LIKE ?2 ESCAPE '\\' OR LOWER(body) LIKE ?2 ESCAPE '\\')
             ORDER BY id ASC LIMIT ?3
             ",
         )?;
         let mut out = Vec::new();
         let pattern = format!("%{}%", escape_like_literal(&needle.to_ascii_lowercase()));
-        let mut iter = rows.query(params![after.unwrap_or(0), pattern, fetch as i64])?;
+        let mut iter = rows.query(params![after.unwrap_or(0), pattern, fetch as i64, label])?;
         while let Some(row) = iter.next()? {
             let status_text: String = row.get(1)?;
             let task_status = TaskStatus::from_row(&status_text).ok_or_else(|| {
@@ -1181,6 +1227,7 @@ impl Store {
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
                 deps: Vec::new(),
+                labels: Vec::new(),
             });
         }
         drop(iter);
@@ -1194,14 +1241,57 @@ impl Store {
         }
         let ids = out.iter().map(|task| task.id).collect::<Vec<_>>();
         let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut labels = crate::labels::read_many(&self.conn, &ids)?;
         for row in out.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
+            row.labels = labels.remove(&row.id).unwrap_or_default();
         }
         snapshot.commit()?;
         Ok(Pagination {
             items: out,
             has_more,
             next_after,
+        })
+    }
+
+    pub fn search_ranked(
+        &mut self,
+        text: &str,
+        prefix: bool,
+        label: Option<&str>,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Pagination<TaskSummary>, AppError> {
+        let size = validate_limit(limit)?;
+        let label = crate::labels::filter(label)?;
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut matches =
+            crate::full_text::search(&self.conn, text, prefix, label.as_deref(), offset, size + 1)?;
+        let has_more = matches.len() > size;
+        matches.truncate(size);
+        let mut items = Vec::new();
+        let ids = matches.iter().map(|r| r.id).collect::<Vec<_>>();
+        let mut deps = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut labels = crate::labels::read_many(&self.conn, &ids)?;
+        for row in matches {
+            items.push(TaskSummary {
+                id: row.id,
+                status: validate_status(&row.status)?,
+                version: row.version,
+                title: row.title,
+                deps: deps.remove(&row.id).unwrap_or_default(),
+                labels: labels.remove(&row.id).unwrap_or_default(),
+            });
+        }
+        snapshot.commit()?;
+        Ok(Pagination {
+            items,
+            has_more,
+            next_after: if has_more {
+                Some(offset + size as u64)
+            } else {
+                None
+            },
         })
     }
 
@@ -1312,6 +1402,7 @@ impl Store {
         })?;
         let rule = self.project_rules()?;
         let detail = TaskDetail {
+            labels: crate::labels::read(&self.conn, id)?,
             id,
             status: validate_status(&status_text)?,
             version: version as u64,
@@ -1555,6 +1646,17 @@ impl Store {
         status: TaskStatus,
         deps: Vec<u64>,
     ) -> Result<(u64, u64, Option<u64>), AppError> {
+        self.create_task_with_labels(title, body, status, deps, vec![])
+    }
+    pub fn create_task_with_labels(
+        &mut self,
+        title: &str,
+        body: &str,
+        status: TaskStatus,
+        deps: Vec<u64>,
+        labels: Vec<String>,
+    ) -> Result<(u64, u64, Option<u64>), AppError> {
+        let labels = crate::labels::normalize(labels)?;
         let who = format!("create in project {}", self.project_id);
         validate_title_body(&who, title, body)?;
         let deps = normalize_dependencies(deps);
@@ -1600,6 +1702,7 @@ impl Store {
         Self::validate_task_dependencies_exist(&tx, id, &deps, &HashSet::new())?;
         Self::validate_dependency_cycle(&tx, id, &deps)?;
         Self::replace_dependencies(&tx, id, &deps)?;
+        crate::labels::replace(&tx, id, &labels)?;
         let snapshot = json!({
             "id": id,
             "title": title,
@@ -1607,6 +1710,7 @@ impl Store {
             "status": status.to_string(),
             "version": 1,
             "deps": deps,
+            "labels": labels,
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
@@ -1635,9 +1739,10 @@ impl Store {
             && changes.status.is_none()
             && changes.deps.is_none()
             && !changes.clear_deps
+            && changes.labels.is_none()
         {
             return Err(AppError::Usage(format!(
-                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps or --clear-deps (project {project_id})",
+                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels or --clear-labels (project {project_id})",
                 render_task_id(id)
             )));
         }
@@ -1726,8 +1831,15 @@ impl Store {
         );
         validate_title_body(&who, &next_title, &next_body)?;
 
+        let current_labels = crate::labels::read(&tx, id)?;
+        let next_labels = changes
+            .labels
+            .map(crate::labels::normalize)
+            .transpose()?
+            .unwrap_or_else(|| current_labels.clone());
         let current_deps = Self::task_dependencies_from(&tx, id)?;
-        let no_change = next_title == cur_title
+        let no_change = next_labels == current_labels
+            && next_title == cur_title
             && next_body == cur_body
             && next_status == cur_status
             && match (&requested_deps, changes.clear_deps) {
@@ -1766,6 +1878,7 @@ impl Store {
         } else if changes.clear_deps {
             Self::replace_dependencies(&tx, id, &[])?;
         }
+        crate::labels::replace(&tx, id, &next_labels)?;
         let new_version: i64 = tx.query_row(
             "SELECT version FROM tasks WHERE id = ?1",
             [id as i64],
@@ -1778,6 +1891,7 @@ impl Store {
             "status": next_status,
             "version": new_version,
             "deps": Self::task_dependencies_from(&tx, id)?,
+            "labels": next_labels,
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
@@ -2013,6 +2127,11 @@ impl Store {
                 Self::validate_task_dependencies_exist(&tx, task.id, &task.deps, &known)?;
                 Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
                 Self::replace_dependencies(&tx, task.id, &task.deps)?;
+                crate::labels::replace(
+                    &tx,
+                    task.id,
+                    &crate::labels::normalize(task.labels.clone())?,
+                )?;
             }
         }
         for item in &parsed {
@@ -2029,6 +2148,7 @@ impl Store {
                             "body": task.body,
                             "status": task.status.to_string(),
                             "version": 1,
+                            "labels": task.labels,
                             "deps": task.deps
                         })
                         .to_string()
@@ -2106,10 +2226,12 @@ impl Store {
             all.push(row?);
         }
         drop(stmt);
+        let mut export_labels = HashMap::new();
         let mut count = 0usize;
         let mut sections = HashMap::<String, Vec<(u64, String, String, Vec<u64>, i64)>>::new();
         for (id, title, body, status, version) in all {
             count += 1;
+            export_labels.insert(id as u64, crate::labels::read(&self.conn, id as u64)?);
             let deps = Self::task_dependencies_from(&self.conn, id as u64)?;
             sections
                 .entry(status)
@@ -2145,6 +2267,9 @@ impl Store {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
+                    if let Some(labels) = export_labels.get(&id).filter(|v| !v.is_empty()) {
+                        out_text.push_str(&format!("Labels: {}\n", labels.join(", ")));
+                    }
                     out_text.push_str("Body:\n");
                     out_text.push_str(&body);
                     if !body.ends_with('\n') {
@@ -2220,7 +2345,11 @@ impl Store {
             if current == 0 {
                 migrate_v0_to_v1(&tx, &self.project_id, &self.db_path)?;
             }
-            migrate_v1_to_v2(&tx)?;
+            if current < 2 {
+                migrate_v1_to_v2(&tx)?;
+            }
+            crate::labels::create_schema(&tx)?;
+            tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;
             let mut foreign_rows = tx.prepare("PRAGMA foreign_key_check")?;
             if foreign_rows.query([])?.next()?.is_some() {
