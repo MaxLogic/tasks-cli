@@ -80,36 +80,67 @@ fn path_flag(arg: &str) -> Option<(&'static str, Option<&str>)> {
     None
 }
 
-fn convert_args(args: &[String]) -> Result<Vec<String>, AppError> {
+// Derive value-taking options from Clap so adding an option does not silently
+// turn its literal value into a path or delegation flag.
+fn value_flags() -> std::collections::HashSet<String> {
+    use clap::CommandFactory;
+    fn collect(command: &clap::Command, flags: &mut std::collections::HashSet<String>) {
+        for arg in command.get_arguments() {
+            if arg.get_action().takes_values() {
+                if let Some(long) = arg.get_long() {
+                    flags.insert(format!("--{long}"));
+                }
+            }
+        }
+        for child in command.get_subcommands() {
+            collect(child, flags);
+        }
+    }
+    let mut flags = std::collections::HashSet::new();
+    collect(&Cli::command(), &mut flags);
+    flags
+}
+
+fn convert_args(
+    args: &[String],
+    translate: impl Fn(&Path) -> Result<PathBuf, AppError>,
+) -> Result<Vec<String>, AppError> {
+    let values = value_flags();
     let mut out = Vec::with_capacity(args.len());
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if let Some((flag, inline)) = path_flag(arg) {
-            if let Some(value) = inline {
-                if value == "-" {
-                    out.push(arg.clone());
+        if arg == "--" {
+            out.extend_from_slice(&args[index..]);
+            break;
+        }
+        let (flag, inline) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
+        if values.contains(flag) {
+            let value = inline.or_else(|| args.get(index + 1).map(String::as_str));
+            if flag != "--windows-exe" {
+                if let Some(value) = value {
+                    let value = if path_flag(flag).is_some() && value != "-" {
+                        translate(Path::new(value))?.to_string_lossy().into_owned()
+                    } else {
+                        value.to_owned()
+                    };
+                    if inline.is_some() {
+                        out.push(format!("{flag}={value}"));
+                    } else {
+                        out.push(arg.clone());
+                        out.push(value);
+                    }
                 } else {
-                    out.push(format!(
-                        "{flag}={}",
-                        translate(Path::new(value))?.to_string_lossy()
-                    ));
-                }
-            } else {
-                out.push(arg.clone());
-                if index + 1 < args.len() && args[index + 1] != "-" {
-                    index += 1;
-                    out.push(
-                        translate(Path::new(&args[index]))?
-                            .to_string_lossy()
-                            .to_string(),
-                    );
+                    out.push(arg.clone());
                 }
             }
+            index += if inline.is_some() { 1 } else { 2 };
         } else {
             out.push(arg.clone());
+            index += 1;
         }
-        index += 1;
     }
     Ok(out)
 }
@@ -140,21 +171,7 @@ pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
             )
         })?;
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let mut filtered = Vec::with_capacity(args.len());
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--windows-exe" {
-            index += 2;
-            continue;
-        }
-        if args[index].starts_with("--windows-exe=") {
-            index += 1;
-            continue;
-        }
-        filtered.push(args[index].clone());
-        index += 1;
-    }
-    let mut child_args = convert_args(&filtered)?;
+    let mut child_args = convert_args(&args, translate)?;
     if should_inject_project_context(cli) {
         if let Some(project) = std::env::var_os("TASKS_PROJECT") {
             child_args.insert(0, project.to_string_lossy().to_string());
@@ -190,6 +207,29 @@ pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn delegation_preserves_literals_after_separator_and_option_values() {
+        for args in [
+            vec!["search", "--", "--out=needle"],
+            vec!["search", "--", "--windows-exe=needle"],
+            vec!["create", "--title", "--out=needle", "--body-file", "-"],
+            vec![
+                "create",
+                "--title",
+                "--windows-exe=needle",
+                "--body-file",
+                "-",
+            ],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let result = convert_args(&args, |path| {
+                Ok(PathBuf::from(format!("translated:{}", path.display())))
+            })
+            .unwrap();
+            assert_eq!(result, args);
+        }
+    }
 
     #[test]
     fn inline_path_flags_are_recognized_without_touching_text() {
