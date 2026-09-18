@@ -260,11 +260,11 @@ fn dry_run_classifies_the_fixture_corpus_and_writes_only_inside_the_report_dir()
     assert_eq!(alpha["task_count"], 5);
     assert_eq!(
         section_status(alpha, "alpha/TASKS.md", "Next - Today"),
-        "ready"
+        "todo"
     );
     assert_eq!(
         section_status(alpha, "alpha/TASKS.md", "Next \u{2013} This Week"),
-        "ready"
+        "todo"
     );
     assert_eq!(
         section_status(alpha, "alpha/TASKS.md", "Ongoing"),
@@ -405,10 +405,10 @@ fn dash_spellings_dated_archives_and_prose_sections_resolve() {
         section_status(one, "one/TASKS.md", "Ongoing"),
         "in-progress"
     );
-    assert_eq!(section_status(one, "one/TASKS.md", "Next - Today"), "ready");
+    assert_eq!(section_status(one, "one/TASKS.md", "Next - Today"), "todo");
     assert_eq!(
         section_status(one, "one/TASKS.md", "Next \u{2013} Later"),
-        "backlog"
+        "draft"
     );
     assert_eq!(section_status(one, "one/TASKS.md", "Notes"), Value::Null);
     assert_eq!(

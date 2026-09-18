@@ -23,7 +23,7 @@ fn run(args: Args) -> Result<(), tasks_cli::AppError> {
     for id in 1..=args.tasks {
         tx.execute(
             "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
-             VALUES (?1,?2,?3,'backlog',1,?4,?4)",
+             VALUES (?1,?2,?3,'draft',1,?4,?4)",
             rusqlite::params![id as i64, format!("Performance task {id}"), body, id as i64],
         )?;
     }

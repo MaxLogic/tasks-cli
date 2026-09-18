@@ -23,7 +23,7 @@ fn store_with_tasks(count: u64) -> (TempDir, Store) {
     for id in 1..=count {
         tx.execute(
             "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
-             VALUES (?1, ?2, '', 'ready', 1, 0, 0)",
+             VALUES (?1, ?2, '', 'todo', 1, 0, 0)",
             params![id as i64, format!("fixture {id}")],
         )
         .expect("fixture task");

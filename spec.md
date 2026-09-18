@@ -153,7 +153,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | `list [--status STATUS] [--after N] [--limit N]` | Default nonterminal tasks; numeric ID order; default 20, max 100 |
 | `show T-N` | Full task, version, project rules and direct dependency summaries |
 | `search TEXT [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; same paging as list |
-| `create --title TEXT --body-file PATH` | Optional `--status`, default backlog; allocate next ID atomically |
+| `create --title TEXT --body-file PATH` | Optional `--status`, default draft; allocate next ID atomically |
 | `update T-N --expect-version N ...` | At least one of title, body-file, status or full dependency replacement |
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
@@ -166,9 +166,17 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 
 Define `update --deps T-1,T-2` as complete replacement; `--clear-deps` means empty,
 and omission preserves dependencies. They are mutually exclusive. The same
-optional dependency flags apply to create. Status values: backlog, ready,
+optional dependency flags apply to create. Status values: draft, todo,
 in-progress, blocked, done, cancelled. All explicit status transitions are allowed;
 done/cancelled are terminal for default lists. No hard-delete command in v1.
+
+Schema 2 stores and emits canonical `draft` and `todo` names. Explicit migration
+from schema 1 changes `backlog` to `draft` and `ready` to `todo` atomically after
+a validated fresh backup. It preserves task IDs, versions, timestamps, rules,
+dependencies, import provenance and existing event snapshot bytes. Schema 0
+upgrades through schema 1 in the same transaction. Older Markdown headings,
+metadata and section maps may still use `backlog`/`ready` as import aliases;
+new CLI values, output and exports use the canonical names.
 
 List/search rows contain only ID, status, version, title (display bounded to 120
 Unicode characters), and dependency IDs. Include `has_more` and `next_after`; read
