@@ -116,6 +116,8 @@ stdout, stderr and child exit code. Convert filesystem-valued arguments (`--root
 `--data-root`, `--body-file` except `-`, `--map-file`, `--file`, `--out`,
 `--scan-root`, `--report-dir`, `--quarantine-dir`) with
 `wslpath -w` as argument arrays; leave task text, IDs and search strings untouched.
+Stop option processing at `--`; consume option values as values even when they
+resemble flags. Only actual delegation options are removed from the child argv.
 Resolve relative paths in the Linux caller's cwd before conversion, including
 not-yet-created output paths. For delegated data-root/root bindings, require
 Windows-local paths; Linux UNC locations are not valid Windows database roots.
@@ -127,10 +129,15 @@ the Windows registry and the same UUID/database as native Windows commands.
 
 Store
 live databases on local disks, not UNC/network shares or cloud-synced folders.
-Reject identifiable remote paths and document that redirected/cloud storage
+On Linux inspect the owning mount in `/proc/self/mountinfo`, including custom
+DrvFs mountpoints and canonicalized existing ancestors of new paths. Reject
+identifiable remote paths and document that redirected/cloud storage
 cannot be reliably detected by path syntax alone.
 
 ## CLI and output contract
+
+Normalize accepted project UUID spellings to lowercase hyphenated form before
+resolving database paths or storing bindings.
 
 Global options: `--data-root`, `--project`, `--format text|json` (default text).
 No interactive prompts or color in v1. UTF-8 output. Stdout contains results only;
@@ -142,7 +149,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | Command | Required behavior |
 | --- | --- |
 | `init --root PATH` | Create project and return UUID/database path; existing binding is a no-op |
-| `bind --root PATH --project UUID` | Register another root without duplicating tasks |
+| `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
 | `list [--status STATUS] [--after N] [--limit N]` | Default nonterminal tasks; numeric ID order; default 20, max 100 |
 | `show T-N` | Full task, version, project rules and direct dependency summaries |
 | `search TEXT [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; same paging as list |
@@ -167,7 +174,11 @@ List/search rows contain only ID, status, version, title (display bounded to 120
 Unicode characters), and dependency IDs. Include `has_more` and `next_after`; read
 limit+1 rows, do not COUNT(*) on each request. `--after` is the numeric ID from the
 last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
-concurrent edits can change later pages. History pages similarly use event IDs.
+concurrent edits can change later pages. Each list, search, show and export call
+reads its task rows, dependencies and rules within one deferred read transaction.
+In WAL mode, writers can commit while that read retains its original snapshot.
+Release the read transaction before rendering or publishing an export. History
+pages similarly use event IDs.
 `show` never silently truncates body text. History full snapshots and export are
 explicit bulk access, not default context. Dependency cycles and self-links fail.
 Create, update and import enforce the same dependency-list limit: at most 1000
@@ -319,9 +330,10 @@ that exist in the candidate's files) and the fix text `keep only these IDs in
 Deps and move the rest of the original text to Notes`. A conforming line that
 names an ID absent from the candidate's files is equally blocking, reported with
 the fix text `remove T-### from Deps; no such task exists`. Extraction stays
-additive: the `Deps:` line and every other source byte remain in the stored body
-byte for byte, nothing is consumed, and non-task prerequisite text stays
-descriptive. Each task preview still carries `deps` (the resolved edges), and
+additive: the `Deps:` line and other task content remain in the stored body;
+non-task prerequisite text stays descriptive. Import may normalize structural
+separators and boundary whitespace; exact Markdown formatting is not required.
+The original source bytes remain available in import provenance. Each task preview still carries `deps` (the resolved edges), and
 `consumed_metadata` still gains `Deps` when the line exists. The default schema,
 preview semantics and export round-trip are unchanged.
 
@@ -391,6 +403,10 @@ Each source records its own bytes and SHA-256 in provenance; shared rules are
 concatenated in file order. A repeated identical apply reports already
 imported; a set mixing already-imported sources with new ones is refused.
 
+Publish the complete export without overwriting an existing or concurrently
+created destination. The current same-directory hard-link publication requires
+a filesystem supporting hard links; unsupported destinations return an error.
+
 Export contains a snapshot warning, project UUID, shared rules, all tasks ordered
 by ID, status, version, dependency IDs and complete bodies. It is human-readable,
 not a live authority or full-fidelity database backup. No generated-at timestamp
@@ -434,25 +450,28 @@ Stages, in order:
    dependency graph holds a cycle; all of those problems are recorded in one
    pass, never just the first.
 4. Preview every recognized candidate through the import preview.
-5. Apply, only with `--apply`. The default is all-or-nothing: the complete
+5. Apply, only with `--apply`. Preflight is all-or-nothing by default: the complete
    dry-run validation for every candidate runs first, and when any candidate
    is unrecognized or holds any problem the run writes nothing - no registry
    change, no project directory, no database, no quarantine - exits 2 and
    prints the full problem list. `--allow-partial` applies only the clean
    candidates instead and reports the rest as unmigrated. For each applied
-   candidate the run initializes the project against its directory, imports
-   all of its ledger files in one apply with the hashes from step 4, then
-   verifies. A candidate that fails after its project directory was created is
-   rolled back: its registry binding is removed, then only the exact files
-   this run created (`TASKS.sqlite`, its `TASKS.create.lock` and its `-wal` and
-   `-shm` sidecars) are deleted, and the project directory is removed with a
-   non-recursive `rmdir`.
-   Nothing that existed before the run is removed, nothing is deleted
-   recursively, and a rollback never touches a candidate's sources.
-6. Verify by re-exporting and comparing task count, every ID, every title, every
-   body byte, every extracted dependency and the section-to-status assignment
-   against the preview and the store. A project failing verification is left in
-   place, its sources are not quarantined, and the run continues and reports it.
+   candidate the run creates or validates the project database, imports all of
+   its ledger files in one transaction with the hashes from step 4, then verifies.
+   Hold the registry lock from checking artifact ownership through apply,
+   verification and cleanup; publish a new root binding only after verification.
+   Lock acquisition has a five-second timeout; the protected operation itself
+   may take longer for large imports. A failed candidate removes only its newly
+   created database, associated sidecars/create lock and empty project directory.
+   Never remove sidecars belonging to a pre-existing database. Preserve any
+   pre-existing database and binding, and report cleanup failures.
+   Successful earlier candidates remain imported. There is no cross-project
+   crash-atomic rollback. Nothing is deleted recursively, and rollback never
+   touches source files.
+6. Verify by re-exporting and comparing task count, every ID, title, normalized
+   body, extracted dependency and section-to-status assignment against the preview
+   and store. Verification failure follows the same candidate-local cleanup as
+   apply failure. Its sources are not quarantined; the run reports the failure.
 7. Quarantine, only with `--quarantine-dir` and only for verified projects: move
    the sources below the quarantine directory, mirroring their path below the
    scan root, and write a manifest with the original absolute path, size,
@@ -460,6 +479,11 @@ Stages, in order:
    copies afterwards and requires `--apply`, `--quarantine-dir` and a clean
    verify for that project; it has no form that deletes a source that was never
    quarantined. Without `--quarantine-dir`, nothing is moved or deleted.
+
+Migration is an offline operation: stop all Markdown writers and task workers
+before apply, and keep them stopped through verification and quarantine. Do not
+edit source ledgers or address an unpublished new project UUID during this window.
+This prerequisite avoids adding a second live-source coordination protocol.
 
 A dry run performs stages 1 to 4 and reports exactly what stages 5 to 7 would
 do, including the project UUID it would create, the per-section status
@@ -513,7 +537,7 @@ Record peak process memory for show/list; investigate >64 MiB. Export/backup may
 scale with data size, but stream where practical. Never read all bodies/history
 for list. Use EXPLAIN QUERY PLAN to verify ID/status/history access paths; do not
 add FTS/caching or change durability merely to meet targets. Bound dependency
-count to 100 per task; reject oversized replacement rather than truncate it.
+count to 1000 per task; reject oversized replacement rather than truncate it.
 
 ## Verification and implementation slices
 

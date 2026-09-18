@@ -1,5 +1,138 @@
 # tasks-cli verification report
 
+## Current verification: 2026-09-18
+
+Candidate: the uncommitted reliability fixes in this workspace. No live task
+ledger was migrated and no installed skill was changed. The pre-existing README
+rewrite was preserved and updated where necessary.
+
+Implemented:
+
+- rusqlite 0.40.2 / libsqlite3-sys 0.38.2, bundling SQLite 3.53.2, confirmed by
+  `doctor` on both release binaries. SQLite upstream lists 3.53.4; this records
+  the actual crate bundle, not the newest upstream patch.
+- Bulk ownership checks, apply, verification and candidate cleanup share the
+  registry lock. A new binding is published after verification. Pre-existing
+  databases and their sidecars are preserved. Successful earlier candidates
+  remain imported; migration requires stopped workers.
+- List/search/show/export use deferred read transactions for one snapshot per
+  response. Export renders after commit and publishes without overwriting another
+  writer's file. This uses ordinary WAL snapshot isolation.
+- Bind validates schema/identity under the registry lock before publication;
+  accepted UUID spellings route to the canonical database.
+- WSL delegation respects `--` and option-value boundaries. Linux storage checks
+  inspect the owning mount, including custom DrvFs mountpoints.
+- Documentation reconciles the 1000-dependency limit, content versus formatting
+  preservation, and candidate-local cleanup versus cross-project transactions.
+
+Sources: [SQLite isolation](https://www.sqlite.org/isolation.html),
+[SQLite release history](https://www.sqlite.org/changes.html),
+[rusqlite](https://github.com/rusqlite/rusqlite).
+
+### Final gates
+
+Both Windows x64 and native Linux x64 inside Ubuntu/WSL passed:
+
+```text
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo test --locked --features test-hooks --test bulk_rollback --test routing_regressions
+cargo build --release --locked
+```
+
+Linux used `CARGO_TARGET_DIR=target/linux`; its native databases were unique
+Linux-owned temporary stores. Default-suite totals: **137 passed on Windows,
+139 passed on Linux**, zero failed/ignored. The additional feature-enabled run
+passed the bulk rollback regression (1 test) and routing regressions (5 tests)
+on each platform. The default-suite zero-test `bulk_rollback` target is not
+counted as proof; the explicit feature-enabled run supplies that proof.
+
+Evidence root: `target/evidence/fix-20260918/`. Final gates:
+`windows-final-{fmt,clippy,test,build}.log`,
+`linux-final-{fmt,clippy,test,build}.log`,
+`routing-interop/final-binding-lock.log`, `linux-final-regressions.log`.
+The first strict Windows Clippy attempt rejected the deprecated SQLite trace
+callback; the tests were moved to `trace_v2`. Its failure remains in
+`windows-clippy-initial.log`. Dependency upgrade compatibility changes retained
+fallible unsigned bindings and adopted `MAIN_DB` for the backup API.
+
+### RED/GREEN evidence
+
+| Regression | Observed RED | Evidence below the evidence root |
+| --- | --- | --- |
+| Bulk rollback ownership | Paused importer deleted a task database committed by another process | `bulk/red.log`, `bulk/green.log`, final feature-enabled runs |
+| Invalid bind / UUID spelling | Invalid database was bound; accepted UUID text was not canonicalized | `routing-interop/routing-red.log`, `routing-green.log`, final routing runs |
+| Mixed read snapshots / export overwrite | Four new tests failed with mixed data or overwritten output | `snapshots-red.log`, `snapshots-green.log`, final full suites |
+| WSL literal argument | `--out=needle` after `--` was translated as a path | `routing-interop/interop-red.log`, `interop-green.log` |
+| Custom Windows mount | Old binary treated a custom DrvFs bind mount as a native storage root | `routing-interop/mount-live-red.log`, `mount-live-green.log`; mount parser test in final suites |
+
+The bulk test uses actual CLI subprocesses and a temporary SQLite database with
+a deterministic pause before protected apply. The read tests commit through a
+second real SQLite connection between reader statements. They demonstrate both
+snapshot consistency and that a WAL writer can commit while the reader is active.
+
+The initial custom-mount RED shell harness captured the old not-found response,
+then encountered a CRLF shell error. The corrected LF harness rejected that
+class of mount with exit 2. It never opened a Windows database from Linux; the
+disposable mount was unmounted and removed. This live check preceded the final
+bind-lock adjustment; unchanged storage code was included in the final gates.
+
+### Measured command latency
+
+Hardware: AMD Ryzen 9 5950X (16 cores / 32 logical processors).
+Toolchain: rustc 1.98.1 (48a229cea 2026-09-01). Fixture: 10,000 tasks, 2080-byte
+bodies, 50,000 initial events, no dependency edges. Each command uses a fresh
+release process: first invocation recorded separately, five additional warmups,
+50 measured samples; p95 is nearest-rank. Setup and output validation are outside
+timing. Stdout/stderr capture and process startup are included. No compilation
+ran during the final measurement series.
+
+The Linux executable resides on `/mnt/f`; its native database resides in `/tmp`.
+Delegated measurements start inside WSL and include Linux CLI, `wslpath` and
+Windows process startup. Only Windows executables access the Windows database.
+These are candidate timings, not a claimed before/after speedup.
+
+| Command | Windows p50 / p95 ms | Linux p50 / p95 ms | Delegated p50 / p95 ms |
+| --- | ---: | ---: | ---: |
+| list | 21.6 / 28.0 | 35.2 / 53.0 | 91.3 / 114.4 |
+| show | 23.1 / 30.3 | 34.1 / 44.9 | 93.8 / 120.0 |
+| search, matching | 24.8 / 31.1 | 34.0 / 41.0 | 91.3 / 122.1 |
+| search, no match | 86.3 / 98.8 | 63.8 / 73.2 | 142.9 / 183.6 |
+| export | 168.9 / 225.0 | 159.2 / 202.1 | 272.3 / 362.4 |
+| update | 34.7 / 46.8 | 63.0 / 79.4 | 93.8 / 117.3 |
+
+All measured subprocesses returned 0. The no-match search scans the fixture;
+export writes the 10,000-task fixture and the harness checks its final task is
+present. Raw samples, first-run/max timings,
+output sizes and artifact hashes are in `performance-final-{windows,linux,delegated}.json`.
+Harness: `measure.py`. Requests were below the suggested 1–2 seconds in this
+fixture. This is not a hard deadline: lock waits may reach five seconds, and
+larger imports/exports scale with input size. Export publication requires
+hard-link support in its output filesystem.
+
+The final delegated smoke verified `--out=needle` and `--windows-exe=needle` as
+literal search text, Unicode/CRLF stdin body preservation, and propagation of
+missing-task exit code 3. See `performance-final-delegated.json`.
+
+### Release artifacts and remaining integration work
+
+- `target/release/tasks.exe`: 5,227,008 bytes; SHA-256 `6bc28fe28d5affdf4f2767fb3c3e5ef4a74782814b7b61d66b6ddf49596cbb85`.
+- `target/linux/release/tasks`: 7,038,728 bytes; SHA-256 `a22196401af552e81ec67c5d2984d6547e45369e6d638d7156b4a3fb7bf8bbbc`.
+
+The reliability fixes are implemented. Labels, priority, draft/decision queues,
+runnable-only default listings, unlock ranking, automatic project-file discovery
+and shared-skill integration are **proposals**, not shipped behavior. Current
+lists still include nonterminal blocked/backlog items. Existing event history
+already stores full revisions. See [workflow-proposal.md](workflow-proposal.md).
+
+No live cutover, skill deployment, commit or push was performed. The historical
+report below retains prior evidence; its counts, hashes and statements about the
+then-current candidate do not describe this candidate.
+
+<details>
+<summary>Historical verification: 2026-09-16</summary>
+
 Date: 2026-09-16
 Candidate: main after numbered maintenance commits and the follow-up recovery-test fix
 Scope: Windows x64 release binary and Ubuntu 22.04 WSL x64 release binary.
@@ -200,3 +333,5 @@ Evidence:
 ## Release judgment
 
 Ready with minor fixes. The requested maintenance changes, the follow-up recovery-test fix, and the current-binary platform evidence are complete; the post-fix gate runs above are first-run passes. No push was performed.
+
+</details>
