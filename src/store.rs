@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug)]
 pub struct Store {
@@ -130,7 +130,7 @@ fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError>
             created_ms INTEGER NOT NULL,
             updated_ms INTEGER NOT NULL,
             CHECK (version > 0),
-            CHECK (status IN ('backlog','ready','in-progress','blocked','done','cancelled'))
+            CHECK (status IN ('draft','todo','in-progress','blocked','done','cancelled'))
         );
         CREATE TABLE dependencies(
             task_id INTEGER NOT NULL,
@@ -171,7 +171,7 @@ fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
         [project_id.to_string()],
     )?;
-    tx.execute_batch("PRAGMA user_version = 1")?;
+    tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
 }
@@ -603,7 +603,34 @@ fn migrate_v0_to_v1(
         [next],
     )?;
     tx.execute_batch("PRAGMA user_version = 1")?;
-    validate_current_schema(tx, expected_project, db_path)?;
+    Ok(())
+}
+
+fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    // Rebuild only tasks: changing its CHECK constraint in place is unsupported.
+    // The caller disables foreign keys before BEGIN so DROP cannot cascade into
+    // dependencies or append-only history. Both are validated before COMMIT.
+    tx.execute_batch(
+        "CREATE TABLE tasks_v2(
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            created_ms INTEGER NOT NULL,
+            updated_ms INTEGER NOT NULL,
+            CHECK (version > 0),
+            CHECK (status IN ('draft','todo','in-progress','blocked','done','cancelled'))
+        );
+        INSERT INTO tasks_v2(id,title,body,status,version,created_ms,updated_ms)
+        SELECT id,title,body,
+            CASE status WHEN 'backlog' THEN 'draft' WHEN 'ready' THEN 'todo' ELSE status END,
+            version,created_ms,updated_ms FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v2 RENAME TO tasks;
+        CREATE INDEX idx_tasks_status_id ON tasks(status,id);
+        PRAGMA user_version = 2;",
+    )?;
     Ok(())
 }
 
@@ -2098,8 +2125,8 @@ impl Store {
         out_text.push_str(&rules.body);
         out_text.push_str("\n\n");
         for status in [
-            "backlog",
-            "ready",
+            "draft",
+            "todo",
             "in-progress",
             "blocked",
             "done",
@@ -2178,21 +2205,40 @@ impl Store {
         };
         publish_backup(&self.conn, &pre_upgrade, backup_project, Some(current))?;
         configure_writer(&self.conn)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let locked_version = schema_version(&tx)?;
-        if locked_version != current {
-            return Err(AppError::Database(format!(
-                "{} changed schema from version {current} to {locked_version} while migration was preparing; retry the migration",
-                self.db_path.display()
-            )));
-        }
-        migrate_v0_to_v1(&tx, &self.project_id, &self.db_path).map_err(|error| {
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let migration_result = (|| -> Result<(), AppError> {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let locked_version = schema_version(&tx)?;
+            if locked_version != current {
+                return Err(AppError::Database(format!(
+                    "{} changed schema from version {current} to {locked_version} while migration was preparing; retry the migration",
+                    self.db_path.display()
+                )));
+            }
+            if current == 0 {
+                migrate_v0_to_v1(&tx, &self.project_id, &self.db_path)?;
+            }
+            migrate_v1_to_v2(&tx)?;
+            validate_current_schema(&tx, &self.project_id, &self.db_path)?;
+            let mut foreign_rows = tx.prepare("PRAGMA foreign_key_check")?;
+            if foreign_rows.query([])?.next()?.is_some() {
+                return Err(AppError::Database(
+                    "migration contains foreign-key violations; restore the database from a backup"
+                        .to_string(),
+                ));
+            }
+            drop(foreign_rows);
+            tx.commit()?;
+            Ok(())
+        })();
+        // Restore enforcement after either COMMIT or the transaction's rollback.
+        let restore_result = self.conn.pragma_update(None, "foreign_keys", "ON");
+        migration_result.map_err(|error| {
             error.context(&format!("cannot migrate {}", self.db_path.display()))
         })?;
-        tx.commit()?;
-        validate_current_schema(&self.conn, &self.project_id, &self.db_path)?;
+        restore_result?;
         Ok((current, CURRENT_SCHEMA_VERSION, Some(pre_upgrade)))
     }
 

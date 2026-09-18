@@ -198,8 +198,8 @@ fn parse_task_heading(text: &str) -> Option<(u64, String)> {
 
 fn canonical_status(section: &str) -> Option<TaskStatus> {
     match section {
-        "backlog" => Some(TaskStatus::Backlog),
-        "ready" => Some(TaskStatus::Ready),
+        "draft" | "backlog" => Some(TaskStatus::Backlog),
+        "todo" | "ready" => Some(TaskStatus::Ready),
         "in-progress" => Some(TaskStatus::InProgress),
         "blocked" => Some(TaskStatus::Blocked),
         "done" => Some(TaskStatus::Done),
@@ -210,8 +210,8 @@ fn canonical_status(section: &str) -> Option<TaskStatus> {
 
 fn parse_mapping_status(value: &str) -> Option<TaskStatus> {
     match value {
-        "backlog" => Some(TaskStatus::Backlog),
-        "ready" => Some(TaskStatus::Ready),
+        "draft" | "backlog" => Some(TaskStatus::Backlog),
+        "todo" | "ready" => Some(TaskStatus::Ready),
         "in-progress" => Some(TaskStatus::InProgress),
         "blocked" => Some(TaskStatus::Blocked),
         "done" => Some(TaskStatus::Done),
@@ -292,7 +292,7 @@ fn parse_mapping_status_value(
         .and_then(parse_mapping_status)
         .ok_or_else(|| {
             AppError::Validation(format!(
-                "map file {}: {context} must be one of backlog, ready, in-progress, blocked, done, cancelled; found {}",
+                "map file {}: {context} must be one of draft, todo, in-progress, blocked, done, cancelled (legacy backlog/ready are also accepted); found {}",
                 map_path.display(),
                 value
             ))

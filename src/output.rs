@@ -489,8 +489,8 @@ mod tests {
             },
         };
         let text = envelope.text();
-        assert!(text.contains("T-001 ready ready consumed=[Status,Body] deps=[] Title"));
-        assert!(text.contains("section: ready status=ready contains_tasks=true"));
+        assert!(text.contains("T-001 todo ready consumed=[Status,Body] deps=[] Title"));
+        assert!(text.contains("section: ready status=todo contains_tasks=true"));
         assert!(text.contains("unassigned: 4-8 leftover"));
         assert!(text.contains("has_bom: true"));
         assert!(text.contains("warning: input.md: line 2"));

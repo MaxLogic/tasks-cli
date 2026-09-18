@@ -101,7 +101,7 @@ fn concurrent_subprocess_creates_receive_unique_ids() {
         );
     }
     let mut store = Store::open_rw(temp.path(), &id.to_string()).expect("open");
-    let page = store.list_tasks(Some("backlog"), None, 100).expect("list");
+    let page = store.list_tasks(Some("draft"), None, 100).expect("list");
     let ids = page
         .items
         .iter()

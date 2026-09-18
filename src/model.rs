@@ -11,9 +11,12 @@ pub const ID_PREFIX: &str = "T-";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
-    #[value(name = "backlog")]
+    // Keep the Rust identifiers stable for callers while exposing canonical names.
+    #[value(name = "draft")]
+    #[serde(rename = "draft", alias = "backlog")]
     Backlog,
-    #[value(name = "ready")]
+    #[value(name = "todo")]
+    #[serde(rename = "todo", alias = "ready")]
     Ready,
     #[value(name = "in-progress")]
     #[serde(rename = "in-progress")]
@@ -29,8 +32,8 @@ pub enum TaskStatus {
 impl Display for TaskStatus {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let as_text = match self {
-            Self::Backlog => "backlog",
-            Self::Ready => "ready",
+            Self::Backlog => "draft",
+            Self::Ready => "todo",
             Self::InProgress => "in-progress",
             Self::Blocked => "blocked",
             Self::Done => "done",
@@ -46,14 +49,14 @@ impl FromStr for TaskStatus {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let norm = value.trim().to_ascii_lowercase();
         match norm.as_str() {
-            "backlog" => Ok(Self::Backlog),
-            "ready" => Ok(Self::Ready),
+            "draft" | "backlog" => Ok(Self::Backlog),
+            "todo" | "ready" => Ok(Self::Ready),
             "in-progress" | "inprogress" => Ok(Self::InProgress),
             "blocked" => Ok(Self::Blocked),
             "done" => Ok(Self::Done),
             "cancelled" | "canceled" => Ok(Self::Cancelled),
             _ => Err(format!(
-                "invalid status '{value}'; expected one of backlog, ready, in-progress, blocked, done, cancelled"
+                "invalid status '{value}'; expected one of draft, todo, in-progress, blocked, done, cancelled"
             )),
         }
     }

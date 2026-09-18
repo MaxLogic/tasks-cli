@@ -64,7 +64,7 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
     let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 1));
+    assert_eq!((from, to), (0, 2));
     let backup = backup_path.expect("backup path");
     assert!(backup.is_file());
 
@@ -106,7 +106,7 @@ fn every_migration_attempt_backups_the_current_live_database() {
 
     let conn = Connection::open(&db_path).expect("current database");
     conn.execute(
-        "INSERT INTO tasks(id, title, body, status, version, created_ms, updated_ms) VALUES (8, 'new title', 'new body', 'backlog', 1, 0, 0)",
+        "INSERT INTO tasks(id, title, body, status, version, created_ms, updated_ms) VALUES (8, 'new title', 'new body', 'draft', 1, 0, 0)",
         [],
     )
     .expect("new live task");
