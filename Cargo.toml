@@ -26,7 +26,7 @@ required-features = ["test-hooks"]
 clap = { version = "4.5.4", features = ["derive"] }
 fs2 = "0.4.3"
 regex = "1.11.1"
-rusqlite = { version = "0.32.1", features = ["bundled", "backup", "trace"] }
+rusqlite = { version = "0.40.2", default-features = false, features = ["cache", "bundled", "backup", "trace", "fallible_uint"] }
 serde = { version = "1.0.211", features = ["derive"] }
 serde_json = "1.0.128"
 sha2 = "0.10.8"

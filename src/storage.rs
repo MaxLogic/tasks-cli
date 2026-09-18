@@ -105,6 +105,38 @@ fn has_linux_windows_mount(path: &Path) -> bool {
                 && is_drive(&components[4])))
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn windows_or_remote_mount(path: &Path, mountinfo: &str) -> bool {
+    let mut owner = None;
+    for line in mountinfo.lines() {
+        let Some((fields, filesystem)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(mountpoint) = fields.split_whitespace().nth(4) else {
+            continue;
+        };
+        // mountinfo escapes whitespace and backslashes as octal sequences.
+        let mountpoint = mountpoint
+            .replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\");
+        let mountpoint = Path::new(&mountpoint);
+        if !path.starts_with(mountpoint) {
+            continue;
+        }
+        let depth = mountpoint.components().count();
+        if owner.is_some_and(|(best, _)| best > depth) {
+            continue;
+        }
+        let fs_type = filesystem.split_whitespace().next().unwrap_or("");
+        let prohibited = matches!(fs_type, "drvfs" | "cifs" | "smb3" | "nfs" | "nfs4")
+            || (fs_type == "9p" && filesystem.contains("aname=drvfs"));
+        owner = Some((depth, prohibited));
+    }
+    owner.is_some_and(|(_, prohibited)| prohibited)
+}
+
 fn has_unc_prefix(path: &Path) -> bool {
     let value = path.to_string_lossy().replace('/', "\\");
     let upper = value.to_ascii_uppercase();
@@ -174,6 +206,22 @@ pub fn validate_storage_root(root: &Path) -> Result<PathBuf, AppError> {
     }
     if let Ok(canonical) = existing.canonicalize() {
         validate_storage_root_for(&canonical, platform)?;
+        #[cfg(target_os = "linux")]
+        {
+            let mounts = std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+                AppError::io_path(
+                    "read filesystem ownership",
+                    Path::new("/proc/self/mountinfo"),
+                    error,
+                )
+            })?;
+            if windows_or_remote_mount(&canonical, &mounts) {
+                return Err(AppError::InvalidPath(format!(
+                    "storage root {} is on a Windows or remote filesystem; use Linux-owned storage or delegate to tasks.exe",
+                    validated.display()
+                )));
+            }
+        }
     }
     Ok(validated)
 }
@@ -183,6 +231,27 @@ mod tests {
     use super::*;
     use fs2::FileExt;
     use std::fs::OpenOptions;
+
+    #[test]
+    fn mountinfo_detects_custom_drvfs_mounts_and_respects_nested_linux_mounts() {
+        let mounts = "30 1 8:1 / / rw - ext4 /dev/sda rw\n31 30 0:5 / /srv/windows\\040disk rw - 9p C:\\ rw,aname=drvfs;path=C:\\;symlinkroot=/mnt/\n32 31 8:2 / /srv/windows\\040disk/linux rw - ext4 /dev/sdb rw\n33 30 0:6 / /custom/d rw - drvfs D:\\ rw\n";
+        assert!(windows_or_remote_mount(
+            Path::new("/srv/windows disk/tasks/new"),
+            mounts
+        ));
+        assert!(windows_or_remote_mount(
+            Path::new("/custom/d/tasks"),
+            mounts
+        ));
+        assert!(!windows_or_remote_mount(
+            Path::new("/srv/windows disk/linux/tasks"),
+            mounts
+        ));
+        assert!(!windows_or_remote_mount(
+            Path::new("/srv/windows diskette/tasks"),
+            mounts
+        ));
+    }
 
     #[test]
     fn linux_rejects_drvfs_and_unc_roots() {

@@ -836,7 +836,7 @@ fn publish_backup(
     drop(reserved);
     let result = (|| {
         conn.backup(
-            rusqlite::DatabaseName::Main,
+            rusqlite::MAIN_DB,
             &temp,
             None::<fn(rusqlite::backup::Progress)>,
         )?;
@@ -865,20 +865,50 @@ fn publish_backup(
     }
 }
 
+// Publish a complete rendered export without replacing a competing writer's file.
+fn publish_export(out: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    use std::io::Write;
+    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+    let temp = parent.join(format!(".tasks-export-{}.tmp", Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|error| AppError::io_path("create temporary export", &temp, error))?;
+    let result = (|| {
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| AppError::io_path("write export", &temp, error))?;
+        fs::hard_link(&temp, out).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                AppError::Usage(format!(
+                    "refusing to overwrite {}: it already exists; choose a different --out path",
+                    out.display()
+                ))
+            } else {
+                AppError::io_path("publish export", out, error)
+            }
+        })
+    })();
+    drop(file);
+    let _ = fs::remove_file(&temp);
+    result
+}
+
 fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid), AppError> {
     let data_root = validate_storage_root(data_root)?;
-    let db_path = data_root_project_path(&data_root, project);
+    let project_id = Uuid::parse_str(project).map_err(|error| {
+        AppError::Usage(format!(
+            "--project '{project}' is not a UUID ({error}); pass the UUID printed by tasks init"
+        ))
+    })?;
+    let db_path = data_root_project_path(&data_root, &project_id.to_string());
     if !db_path.is_file() {
         return Err(AppError::NotFoundCode(format!(
             "project {project} has no database at {}; run tasks init --root <dir> to create and bind a project, or pass an existing --project <UUID>",
             db_path.display()
         )));
     }
-    let project_id = Uuid::parse_str(project).map_err(|error| {
-        AppError::Usage(format!(
-            "--project '{project}' is not a UUID ({error}); pass the UUID printed by tasks init"
-        ))
-    })?;
     Ok((db_path, project_id))
 }
 
@@ -990,7 +1020,7 @@ impl Store {
         })
     }
 
-    pub fn project_rules(&mut self) -> Result<RuleRecord, AppError> {
+    pub fn project_rules(&self) -> Result<RuleRecord, AppError> {
         let row = self
             .conn
             .query_row(
@@ -1019,6 +1049,7 @@ impl Store {
         limit: usize,
     ) -> Result<Pagination<TaskSummary>, AppError> {
         let page_size = validate_limit(limit)?;
+        let snapshot = self.conn.unchecked_transaction()?;
         let fetch = page_size + 1;
         let mut summaries = Vec::new();
         let mut stmt = if status.is_some() {
@@ -1074,6 +1105,7 @@ impl Store {
         for row in summaries.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
         }
+        snapshot.commit()?;
         Ok(Pagination {
             items: summaries,
             has_more,
@@ -1094,6 +1126,7 @@ impl Store {
             ));
         }
         let page_size = validate_limit(limit)?;
+        let snapshot = self.conn.unchecked_transaction()?;
         let fetch = page_size + 1;
         let mut rows = self.conn.prepare(
             "
@@ -1137,6 +1170,7 @@ impl Store {
         for row in out.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
         }
+        snapshot.commit()?;
         Ok(Pagination {
             items: out,
             has_more,
@@ -1226,6 +1260,7 @@ impl Store {
 
     pub fn show_task(&mut self, raw_id: &str) -> Result<TaskDetail, AppError> {
         let id = parse_task_id(raw_id).map_err(AppError::Validation)?;
+        let snapshot = self.conn.unchecked_transaction()?;
         let row = self
             .conn
             .query_row(
@@ -1249,7 +1284,7 @@ impl Store {
             ))
         })?;
         let rule = self.project_rules()?;
-        Ok(TaskDetail {
+        let detail = TaskDetail {
             id,
             status: validate_status(&status_text)?,
             version: version as u64,
@@ -1259,7 +1294,9 @@ impl Store {
             dependency_summaries: self.dependency_summaries(id)?,
             rule_version: rule.version,
             rules: rule.body,
-        })
+        };
+        snapshot.commit()?;
+        Ok(detail)
     }
 
     pub fn history(
@@ -2023,6 +2060,7 @@ impl Store {
                 out.display()
             )));
         }
+        let snapshot = self.conn.unchecked_transaction()?;
         let rules = self.project_rules()?;
         let mut stmt = self
             .conn
@@ -2051,6 +2089,7 @@ impl Store {
                 .or_default()
                 .push((id as u64, title, body, deps, version));
         }
+        snapshot.commit()?;
         let mut out_text = String::new();
         out_text.push_str("# Task Backlog\n\n");
         out_text.push_str("> Snapshot export; the SQLite database is the recovery authority.\n\n");
@@ -2088,8 +2127,7 @@ impl Store {
                 }
             }
         }
-        std::fs::write(out, out_text)
-            .map_err(|error| AppError::io_path("write export", out, error))?;
+        publish_export(out, out_text.as_bytes())?;
         Ok(count)
     }
 

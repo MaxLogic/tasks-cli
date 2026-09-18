@@ -135,6 +135,16 @@ fn is_descendant(ancestor: &Path, child: &Path) -> Result<bool, AppError> {
     Ok(a.iter().zip(b.iter()).all(|(x, y)| x == y))
 }
 
+fn canonical_project_id(project: &str) -> Result<String, AppError> {
+    Uuid::parse_str(project.trim())
+        .map(|id| id.to_string())
+        .map_err(|_| {
+            AppError::Usage(format!(
+                "--project '{project}' is not a UUID; pass the UUID printed by tasks init"
+            ))
+        })
+}
+
 pub fn resolve_project(
     data_root: &Path,
     explicit_project: Option<&str>,
@@ -143,13 +153,7 @@ pub fn resolve_project(
     let data_root = validate_storage_root(data_root)?;
     let reg = Registry::load(&registry_path(&data_root))?;
     if let Some(project) = explicit_project {
-        let p = project.trim().to_string();
-        if Uuid::parse_str(&p).is_err() {
-            return Err(AppError::Usage(format!(
-                "--project '{p}' is not a UUID; pass the UUID printed by tasks init"
-            )));
-        }
-        return Ok(p);
+        return canonical_project_id(project);
     }
     let current_dir = std::env::current_dir()
         .map_err(|error| AppError::io_op("resolve the current directory", error))?;
@@ -165,7 +169,7 @@ pub fn resolve_project(
         }
     }
     winner
-        .map(|(_, b)| b.project_id)
+        .map(|(_, b)| canonical_project_id(&b.project_id))
         .ok_or_else(|| {
             AppError::NotFound(format!(
                 "no project is bound to {} or any parent directory (registry {}); run tasks init --root {} to create and bind one, or pass --project <UUID>",
@@ -173,7 +177,7 @@ pub fn resolve_project(
                 registry_path(&data_root).display(),
                 route_from.display()
             ))
-        })
+        })?
 }
 
 pub fn bind_root(
@@ -198,24 +202,12 @@ pub fn bind_root(
             ))
         }
     };
-    if Uuid::parse_str(&project).is_err() {
-        return Err(AppError::Usage(format!(
-            "--project '{project}' is not a UUID; pass the UUID printed by tasks init"
-        )));
-    }
-    let project_db = data_root
-        .join("projects")
-        .join(&project)
-        .join("TASKS.sqlite");
-    if !project_db.is_file() {
-        return Err(AppError::NotFoundCode(format!(
-            "project database not found: {}; run tasks init --root <dir> against this data root, or pass an existing --project <UUID>",
-            project_db.display(),
-        )));
-    }
+    let project = canonical_project_id(&project)?;
     let mut bound_existing = false;
     let mut found_project = project.clone();
     Registry::with_bindings(&data_root, |registry| {
+        // Keep validation protected from bulk cleanup until the binding is saved.
+        crate::store::Store::open_readonly(&data_root, &project)?;
         if let Some(existing) = registry
             .bindings
             .iter()
