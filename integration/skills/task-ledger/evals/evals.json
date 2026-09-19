@@ -1,0 +1,43 @@
+{
+  "skill_name": "task-ledger",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "You are working from a nested directory in a newly created Git worktree. The root has a tracked .tasks.json with a valid project UUID, but the worktree path has never been bound. Describe the exact next actions to read and resolve T-012, delegate code work, and complete it. Do not execute commands. Include conflict recovery if another coordinator updates T-012 during proof.",
+      "expected_output": "Uses shared UUID explicitly without init/bind, bounded show/rules, coordinator owns versioned updates, worker receives rules/version/scope, conflict reconciliation and exact-candidate proof.",
+      "files": [],
+      "assertions": [
+        "Uses the tracked UUID explicitly rather than initializing a worktree backlog",
+        "Fetches selected task and applicable rules before execution",
+        "Gives worker UUID, task ID, observed version, rules and owned scope",
+        "Keeps shared ledger mutations with coordinator",
+        "Re-reads and reconciles a version conflict rather than automatically retrying",
+        "Requires acceptance and exact-candidate proof before done"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Work through all open tasks. The default list is empty, but the shared backlog has blocked tasks, needs-human tasks, a draft and more than one result page. Explain how you determine scope and completion without changing any task. A P0 task has an unfinished dependency; a P2 task unlocks five direct dependents but only one is immediately runnable.",
+      "expected_output": "Enumerates list --open fully, selected bodies and deps, respects human/dependency gates, distinguishes unlock metrics and cannot claim completion.",
+      "files": [],
+      "assertions": [
+        "Uses list --open and follows every returned page",
+        "Does not infer completion from empty default runnable queue",
+        "Keeps human-gated and blocked criteria open",
+        "Does not let P0 priority bypass unfinished dependencies",
+        "Distinguishes direct dependents from immediately runnable dependents"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Add a task for the shutdown bug we found. Root .tasks.json contains a well-formed UUID that the CLI says is unknown. We have an old TASKS.md export and the working directory has a matching project name. Describe what you do next. Do not execute commands.",
+      "expected_output": "Fail closed on identity; no guessed binding, init or Markdown fallback; explain explicit setup needed without claiming task was recorded.",
+      "files": [],
+      "assertions": [
+        "Stops ledger writes on unknown identity",
+        "Does not initialize, infer a project from name, or edit the Markdown export",
+        "Reports task remains unrecorded and names explicit identity repair/setup"
+      ]
+    }
+  ]
+}
