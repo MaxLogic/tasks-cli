@@ -27,6 +27,7 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
     let pattern = Regex::new(r"\bT-?([0-9]+)\b")
         .map_err(|e| AppError::Validation(format!("invalid task-reference pattern: {e}")))?;
     let mut ids = BTreeSet::new();
+    let mut occurrences = Vec::new();
     for capture in pattern.captures_iter(text) {
         let Some(found) = capture.get(0) else {
             continue;
@@ -37,10 +38,12 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
         if !eligible(text, found.start(), found.end()) {
             continue;
         }
-        if let Ok(id) = number.as_str().parse::<u64>() {
-            if id > 0 && id <= i64::MAX as u64 {
-                ids.insert(id);
-            }
+        let Ok(id) = number.as_str().parse::<u64>() else {
+            continue;
+        };
+        if id > 0 && id <= i64::MAX as u64 {
+            occurrences.push((found.start(), found.end(), id));
+            ids.insert(id);
         }
         if ids.len() > MAX_DISTINCT_IDS {
             return Err(AppError::Validation(
@@ -74,10 +77,28 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
         }
     }
     snapshot.commit()?;
-    let unknown_ids = ids
-        .into_iter()
-        .filter(|id| !titles.contains_key(id))
-        .collect();
+    // Resolve annotation protection after reading titles.  The first pass
+    // cannot know whether `(Title)` is an exact annotation until the title
+    // lookup completes.  IDs inside such an annotation are excluded from
+    // diagnostics as well as from replacements; an occurrence of the same
+    // unknown ID elsewhere remains reportable.
+    let mut unknown = BTreeSet::new();
+    let mut protected_until = 0;
+    for (start, end, id) in &occurrences {
+        if *start < protected_until {
+            continue;
+        }
+        if let Some(title) = titles.get(id) {
+            let annotation = format!(" ({title})");
+            if text[*end..].starts_with(&annotation) {
+                protected_until = *end + annotation.len();
+                continue;
+            }
+        }
+        if !titles.contains_key(id) {
+            unknown.insert(*id);
+        }
+    }
     let mut output = String::with_capacity(text.len());
     let mut copied = 0;
     let mut protected_until = 0;
@@ -119,6 +140,6 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
     Ok(EnrichedText {
         text: output,
         replacements,
-        unknown_ids,
+        unknown_ids: unknown.into_iter().collect(),
     })
 }

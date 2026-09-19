@@ -59,3 +59,29 @@ fn concurrent_backups_publish_at_most_one_destination() {
         1
     );
 }
+
+#[test]
+fn existing_destination_sidecars_are_preserved_and_block_backup_publication() {
+    let root = tempfile::tempdir().expect("temporary directory");
+    let project = Uuid::new_v4();
+    create_project_db(root.path(), &project).expect("database");
+    let mut store = Store::open_rw(root.path(), &project.to_string()).expect("open");
+    store
+        .create_task("backup task", "body", TaskStatus::Ready, Vec::new())
+        .expect("task");
+    let out = root.path().join("protected.sqlite");
+    let wal = std::path::PathBuf::from(format!("{}-wal", out.display()));
+    let shm = std::path::PathBuf::from(format!("{}-shm", out.display()));
+    std::fs::write(&wal, b"existing wal").expect("wal");
+    std::fs::write(&shm, b"existing shm").expect("shm");
+    let error = store
+        .backup(&out)
+        .expect_err("sidecars must block publication");
+    assert!(error.to_string().contains("sidecar"), "{error}");
+    assert_eq!(std::fs::read(&wal).expect("wal bytes"), b"existing wal");
+    assert_eq!(std::fs::read(&shm).expect("shm bytes"), b"existing shm");
+    assert!(
+        !out.exists(),
+        "backup destination was published beside owned sidecars"
+    );
+}

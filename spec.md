@@ -401,7 +401,27 @@ boundary and all following source text belongs to the task body. A
 metadata-like first body line is preserved when it is not an ordered metadata
 form, and preview lists the consumed metadata fields. A task before the first
 `##` heading is reported under the pseudo-section `<no section>` and blocks
-apply unless that exact pseudo-section is explicitly mapped.
+apply unless that exact pseudo-section is explicitly mapped. `default_status`
+and `section_patterns` never resolve `<no section>`; a literal map entry is
+required for that pseudo-section.
+
+Canonical exports also contain the exact standalone marker `Task schema: 1` in
+their header, before the first section or task and outside fenced or framed
+content. The parser recognizes the marker only in that position; matching text
+inside a fence, task body, rules body or other protected content is ordinary
+content.
+The shared rules body and every task body are framed by readable comments of
+the form `<!-- tasks-cli:canonical-v1:{body|rules} bytes=N sha256=HEX -->`
+and a matching end comment. `N` is the UTF-8 byte length of the raw body and
+`HEX` is its SHA-256. A frame is recognized only immediately after `Body:` or
+at the start of a `Rules`/`Shared Rules` section. Its end marker must start at
+the exact byte offset after the body, with only an optional LF or CRLF
+separator, and its length and hash must match. Corrupt, truncated, misplaced,
+or mixed framed/unframed content is a blocking problem; the parser does not
+fall back to heading discovery inside the advertised frame. Multiple rules
+frames are concatenated in source order with one LF separator when needed.
+Legacy files without the exact schema marker retain the existing heading and
+metadata compatibility behavior.
 
 `import --source-schema canonical` (the default) keeps that metadata contract
 unchanged. `--source-schema create-task` additionally recognizes the
@@ -464,7 +484,8 @@ content still blocks apply, which is what catches a ledger schema this tool does
 not understand.
 
 A ledger is recognized by its content, never by the marker. Each parsed ledger
-file is classified `schema-1` when a `Task schema: 1` line is present,
+file is classified `schema-1` when the exact standalone `Task schema: 1` line
+is present,
 `legacy-compatible` when there is no marker but every task heading sits under a
 section the map or the canonical names resolve, and `unsupported` when a task
 heading sits before the first section or under a section nothing resolves. A
@@ -493,11 +514,17 @@ empty-store precondition once, requires IDs to be unique across the whole set
 dependencies, initial events, rules and provenance rows in one transaction.
 Each source records its own bytes and SHA-256 in provenance; shared rules are
 concatenated in file order. A repeated identical apply reports already
-imported; a set mixing already-imported sources with new ones is refused.
+imported; a set mixing already-imported sources with new ones is refused. An
+incoming source set must also contain each SHA-256 at most once, even when two
+filenames have identical bytes; preview names both files and apply refuses the
+set before opening the write transaction.
 
 Publish the complete export without overwriting an existing or concurrently
 created destination. The current same-directory hard-link publication requires
 a filesystem supporting hard links; unsupported destinations return an error.
+Backup publication refuses an existing destination or destination `-wal`/`-shm`
+sidecar and rechecks those sidecars immediately before publication, preserving
+any pre-existing sidecar bytes.
 
 Export contains a snapshot warning, project UUID, shared rules, all tasks ordered
 by ID, status, version, dependency IDs and complete bodies. It is human-readable,
@@ -507,6 +534,7 @@ in deterministic export content. Exact native recovery uses database backups.
 Use SQLite online backup, not copying only TASKS.sqlite while WAL is active.
 Write an exclusively created temporary backup next to the requested destination,
 validate integrity/foreign keys/project UUID, then publish without overwriting.
+Only temporary sidecars created beside that temporary file are removed.
 On failure retain actionable diagnostics and never claim a usable backup. Do not
 hold a write transaction while backing up. Schema upgrades require a successful
 backup before an atomic migration and must recheck schema under the migration
@@ -514,8 +542,13 @@ lock. Test upgrade failure rollback. Automatic backup retention/deletion is defe
 
 V1 recovery procedure: stop task clients, preserve the whole damaged store directory
 for diagnosis, validate a backup at a new isolated data root, then explicitly bind
-the restored UUID there. No in-place destructive restore command. Back up registry
-bindings separately or recreate them with bind after restoring the UUID directory.
+the restored UUID there. The restored layout is exactly
+`<isolated-root>/projects/<UUID>/TASKS.sqlite`; create that directory and copy the
+backup there before running `doctor`, then run `bind --root <worktree> --project
+<UUID>` with the isolated `--data-root`. Do not run `init` for this layout because
+it creates a new project identity. No in-place destructive restore command. Back up
+registry bindings separately or recreate them with bind after restoring the UUID
+directory.
 
 ## Bulk migration
 
@@ -556,7 +589,12 @@ Stages, in order:
    may take longer for large imports. A failed candidate removes only its newly
    created database, associated sidecars/create lock and empty project directory.
    Never remove sidecars belonging to a pre-existing database. Preserve any
-   pre-existing database and binding, and report cleanup failures.
+   pre-existing database and binding, and report cleanup failures. If an import
+   or verification failure committed rows into a pre-existing database, those
+   rows remain and the candidate reports `rolled_back: false`; `rolled_back:
+true` means the failed candidate's database mutation and every database artifact
+created by this run were actually removed; verification exports and reports are
+retained for diagnosis.
    Successful earlier candidates remain imported. There is no cross-project
    crash-atomic rollback. Nothing is deleted recursively, and rollback never
    touches source files.
@@ -566,11 +604,17 @@ Stages, in order:
    apply failure. Its sources are not quarantined; the run reports the failure.
 7. Quarantine, only with `--quarantine-dir` and only for verified projects: move
    the sources below the quarantine directory, mirroring their path below the
-   scan root, and write a manifest with the original absolute path, size,
-   SHA-256 and destination. `--delete-quarantined` deletes the quarantined
-   copies afterwards and requires `--apply`, `--quarantine-dir` and a clean
-   verify for that project; it has no form that deletes a source that was never
-   quarantined. Without `--quarantine-dir`, nothing is moved or deleted.
+   scan root. Preflight validates report files, verification-export targets,
+   quarantine destinations and the audit-manifest path before any database
+   mutation. The manifest is published by a same-directory atomic rename and
+   records each file before its move (`planned`), after the move (`moved`), and
+   after an optional delete (`deleted`). A later report or delete failure keeps
+   prior manifest records and never removes an old audit file. The manifest
+   carries the original absolute path, size, SHA-256 and destination.
+   `--delete-quarantined` deletes the quarantined copies afterwards and requires
+   `--apply`, `--quarantine-dir` and a clean verify for that project; it has no
+   form that deletes a source that was never quarantined. Without
+   `--quarantine-dir`, nothing is moved or deleted.
 
 Migration is an offline operation: stop all Markdown writers and task workers
 before apply, and keep them stopped through verification and quarantine. Do not
@@ -586,7 +630,10 @@ wins.
 
 Reporting writes `run.jsonl` (one JSON object per candidate), `summary.md` for a
 human, and `unrecognized.md` (every unmigrated file with its reason) under
-`--report-dir`, plus `quarantine-manifest.json` when quarantine runs. Per
+`--report-dir`, plus `quarantine-manifest.json` when quarantine runs. Existing
+ordinary report files may be reused only when they are writable; directories,
+symlinks, read-only/ACL-denied targets and an existing quarantine manifest are
+refused before apply. Per
 migrated root the reports list every `AGENTS.md` and `CLAUDE.md` below it that
 contains the string `TASKS.md`, with line numbers; the tool reports those files
 and never edits them. Each candidate carries its schema class per file, its

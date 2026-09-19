@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tasks_cli::bulk::{self, BulkOptions};
 use tasks_cli::model::{SourceSchema, TaskStatus};
-use tasks_cli::store::Store;
+use tasks_cli::store::{create_project_db, Store};
+use uuid::Uuid;
 
 #[test]
 fn failed_bulk_import_preserves_a_project_created_by_another_process() {
@@ -107,4 +108,135 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
         "failed import removed another process's binding"
     );
     assert_eq!(registry.bindings[0].project_id, project);
+}
+
+#[test]
+fn verification_failure_on_a_preexisting_database_reports_retained_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(
+        root.join("TASKS.md"),
+        "## ready\n### T-1 Imported\nBody:\nbody\n",
+    )
+    .unwrap();
+    let map = temp.path().join("map.json");
+    fs::write(&map, "{\"sections\":{\"ready\":\"ready\"}}").unwrap();
+    let data = temp.path().join("data");
+    let preview = bulk::run(BulkOptions {
+        data_root: data.clone(),
+        scan_root: root.clone(),
+        map_file: map.clone(),
+        report_dir: temp.path().join("preview"),
+        excludes: vec![],
+        apply: false,
+        quarantine_dir: None,
+        delete_quarantined: false,
+        allow_partial: false,
+        source_schema: SourceSchema::Canonical,
+    })
+    .unwrap();
+    let project = Uuid::parse_str(&preview.candidates[0].project_id).unwrap();
+    create_project_db(&data, &project).unwrap();
+
+    let report_dir = temp.path().join("apply");
+    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .args([
+            "--data-root",
+            data.to_str().unwrap(),
+            "bulk-import",
+            "--scan-root",
+            root.to_str().unwrap(),
+            "--map-file",
+            map.to_str().unwrap(),
+            "--report-dir",
+            report_dir.to_str().unwrap(),
+            "--apply",
+        ])
+        .env("TASKS_TEST_BULK_FAIL_VERIFY", "1")
+        .env_remove("TASKS_WINDOWS_EXE")
+        .env_remove("TASKS_PROJECT")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let lines = fs::read_to_string(report_dir.join("run.jsonl")).unwrap();
+    let candidate: serde_json::Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    assert_eq!(candidate["applied"], true, "{candidate:#?}");
+    assert_eq!(candidate["verified"], false, "{candidate:#?}");
+    assert_eq!(candidate["rolled_back"], false, "{candidate:#?}");
+    let mut retained = Store::open_readonly(&data, &project.to_string()).unwrap();
+    assert_eq!(retained.show_task("T-1").unwrap().title, "Imported");
+}
+
+#[test]
+fn competing_verification_export_reports_committed_preexisting_db_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("TASKS.md"), "## ready\n### T-1 Imported\nbody\n").unwrap();
+    let map = temp.path().join("map.json");
+    fs::write(&map, "{\"sections\":{\"ready\":\"ready\"}}").unwrap();
+    let data = temp.path().join("data");
+    let preview = bulk::run(BulkOptions {
+        data_root: data.clone(),
+        scan_root: root.clone(),
+        map_file: map.clone(),
+        report_dir: temp.path().join("preview"),
+        excludes: vec![],
+        apply: false,
+        quarantine_dir: None,
+        delete_quarantined: false,
+        allow_partial: false,
+        source_schema: SourceSchema::Canonical,
+    })
+    .unwrap();
+    let project = Uuid::parse_str(&preview.candidates[0].project_id).unwrap();
+    create_project_db(&data, &project).unwrap();
+
+    let report_dir = temp.path().join("apply");
+    let ready = temp.path().join("ready-export");
+    let release = temp.path().join("release-export");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .args([
+            "--data-root",
+            data.to_str().unwrap(),
+            "bulk-import",
+            "--scan-root",
+            root.to_str().unwrap(),
+            "--map-file",
+            map.to_str().unwrap(),
+            "--report-dir",
+            report_dir.to_str().unwrap(),
+            "--apply",
+        ])
+        .env("TASKS_TEST_BULK_READY", &ready)
+        .env("TASKS_TEST_BULK_RELEASE", &release)
+        .env_remove("TASKS_WINDOWS_EXE")
+        .env_remove("TASKS_PROJECT")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while !ready.exists() {
+        if started.elapsed() > Duration::from_secs(10) || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("bulk import did not reach export race point: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let export = report_dir.join("exports").join("001-root.md");
+    fs::write(&export, b"another process's export").unwrap();
+    fs::write(&release, b"go").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let lines = fs::read_to_string(report_dir.join("run.jsonl")).unwrap();
+    let candidate: serde_json::Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+    assert_eq!(candidate["applied"], true, "{candidate:#?}");
+    assert_eq!(candidate["verified"], false, "{candidate:#?}");
+    assert_eq!(candidate["rolled_back"], false, "{candidate:#?}");
+    assert_eq!(fs::read(&export).unwrap(), b"another process's export");
+    let mut retained = Store::open_readonly(&data, &project.to_string()).unwrap();
+    assert_eq!(retained.list_tasks(None, None, 20).unwrap().items.len(), 1);
 }

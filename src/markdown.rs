@@ -10,6 +10,145 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const NO_SECTION: &str = "<no section>";
+const SCHEMA_MARKER: &str = "Task schema: 1";
+const CANONICAL_FRAME_PREFIX: &str = "<!-- tasks-cli:canonical-v1:";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalFrameKind {
+    Body,
+    Rules,
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalFrame {
+    kind: CanonicalFrameKind,
+    content_start: usize,
+    content_end: usize,
+    end_line: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalFrameHeader {
+    kind: CanonicalFrameKind,
+    bytes: usize,
+    sha256: String,
+}
+
+fn canonical_frame_start(value: &str) -> Option<CanonicalFrameHeader> {
+    let value = value.trim();
+    let inner = value
+        .strip_prefix(CANONICAL_FRAME_PREFIX)?
+        .strip_suffix("-->")?
+        .trim();
+    let mut fields = inner.split_whitespace();
+    let kind = match fields.next()? {
+        "body" => CanonicalFrameKind::Body,
+        "rules" => CanonicalFrameKind::Rules,
+        _ => return None,
+    };
+    let bytes = fields.next()?.strip_prefix("bytes=")?.parse().ok()?;
+    let sha256 = fields.next()?.strip_prefix("sha256=")?.to_string();
+    if fields.next().is_some()
+        || sha256.len() != 64
+        || !sha256.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(CanonicalFrameHeader {
+        kind,
+        bytes,
+        sha256,
+    })
+}
+
+fn canonical_frame_end(value: &str, kind: CanonicalFrameKind, sha256: &str) -> bool {
+    let value = value.trim();
+    let name = match kind {
+        CanonicalFrameKind::Body => "body",
+        CanonicalFrameKind::Rules => "rules",
+    };
+    value == format!("{CANONICAL_FRAME_PREFIX}end-{name} sha256={sha256} -->")
+}
+
+fn framed_block(
+    text: &str,
+    lines: &[Line<'_>],
+    marker_line: usize,
+    header: &CanonicalFrameHeader,
+) -> Option<CanonicalFrame> {
+    let content_start = lines.get(marker_line)?.end;
+    let content_end = content_start.checked_add(header.bytes)?;
+    if content_end > text.len()
+        || !text.is_char_boundary(content_start)
+        || !text.is_char_boundary(content_end)
+    {
+        return None;
+    }
+    let mut candidates = vec![content_end];
+    if text[content_end..].starts_with('\n') {
+        candidates.push(content_end + 1);
+    }
+    if text[content_end..].starts_with("\r\n") {
+        candidates.push(content_end + 2);
+    }
+    for marker_start in candidates {
+        if marker_start > text.len() || !text.is_char_boundary(marker_start) {
+            continue;
+        }
+        let Ok(end_line) = lines.binary_search_by_key(&marker_start, |line| line.start) else {
+            continue;
+        };
+        if !canonical_frame_end(lines[end_line].text, header.kind, &header.sha256) {
+            continue;
+        }
+        if sha256(text.as_bytes().get(content_start..content_end)?) != header.sha256 {
+            continue;
+        }
+        return Some(CanonicalFrame {
+            kind: header.kind,
+            content_start,
+            content_end,
+            end_line,
+        });
+    }
+    None
+}
+
+fn canonical_frame_position_kind(
+    lines: &[Line<'_>],
+    marker_line: usize,
+) -> Option<CanonicalFrameKind> {
+    if marker_line
+        .checked_sub(1)
+        .and_then(|index| lines.get(index))
+        .is_some_and(|line| line.text.trim() == "Body:")
+    {
+        return Some(CanonicalFrameKind::Body);
+    }
+    let mut index = marker_line;
+    while let Some(previous) = index.checked_sub(1) {
+        index = previous;
+        let value = lines[index].text.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if matches!(value, "## Rules" | "## Shared Rules" | "## rules") {
+            return Some(CanonicalFrameKind::Rules);
+        }
+        break;
+    }
+    None
+}
+
+fn protect_untrusted_frame_tail(protected_lines: &mut [bool], marker_line: usize) {
+    for protected in protected_lines.iter_mut().skip(marker_line) {
+        *protected = true;
+    }
+}
+
+fn line_is_inside_frame(line: &Line<'_>, frame: &CanonicalFrame) -> bool {
+    line.start < frame.content_end && line.end > frame.content_start
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedTask {
@@ -71,8 +210,10 @@ pub struct ParsedImport {
     pub deps_lines: Vec<DepsLine>,
     pub deps_edges: Vec<DepsEdge>,
     pub deps_problems: Vec<ImportProblem>,
+    pub parse_problems: Vec<ImportProblem>,
     pub section_warnings: Vec<String>,
     pub has_schema_marker: bool,
+    pub has_canonical_rules_frame: bool,
     pub schema_class: SchemaClass,
 }
 
@@ -252,6 +393,13 @@ impl SectionMap {
     fn resolve(&self, section: &str) -> Option<(TaskStatus, StatusSource)> {
         if let Some(status) = self.literal.get(section) {
             return Some((status.clone(), StatusSource::Literal));
+        }
+        // Tasks before the first section are deliberately not covered by a
+        // pattern or a default.  They are an explicit safety boundary: a
+        // caller must map the literal `<no section>` name when it intends to
+        // import those tasks.
+        if section == NO_SECTION {
+            return None;
         }
         if let Some((_, status)) = self
             .patterns
@@ -739,6 +887,8 @@ struct MetadataBlock {
     deps: Vec<u64>,
     deps_line: Option<usize>,
     body_start: usize,
+    body_end: Option<usize>,
+    body_frame_end_line: Option<usize>,
     consumed: Vec<String>,
 }
 
@@ -751,6 +901,7 @@ fn metadata_block(
     start: usize,
     end: usize,
     source_name: &str,
+    frames: &HashMap<usize, CanonicalFrame>,
 ) -> Result<Option<MetadataBlock>, AppError> {
     let mut cursor = start;
     let mut title = None;
@@ -769,6 +920,9 @@ fn metadata_block(
     }
 
     if title.is_none() && lines[cursor].text.trim() == "Body:" {
+        let frame = frames
+            .get(&(cursor + 1))
+            .filter(|frame| frame.kind == CanonicalFrameKind::Body && frame.end_line < end);
         return Ok(Some(MetadataBlock {
             priority: Priority::default(),
             labels: Vec::new(),
@@ -776,7 +930,11 @@ fn metadata_block(
             status: None,
             deps: Vec::new(),
             deps_line: None,
-            body_start: lines[cursor].end,
+            body_start: frame
+                .map(|frame| frame.content_start)
+                .unwrap_or(lines[cursor].end),
+            body_end: frame.map(|frame| frame.content_end),
+            body_frame_end_line: frame.map(|frame| frame.end_line),
             consumed: vec!["Body".to_string()],
         }));
     }
@@ -881,6 +1039,9 @@ fn metadata_block(
         consumed.push("Priority".to_string());
     }
     consumed.push("Body".to_string());
+    let frame = frames
+        .get(&(body_index + 1))
+        .filter(|frame| frame.kind == CanonicalFrameKind::Body && frame.end_line < end);
     Ok(Some(MetadataBlock {
         priority,
         labels,
@@ -888,7 +1049,11 @@ fn metadata_block(
         status: Some(status),
         deps,
         deps_line: Some(deps_line),
-        body_start: lines[body_index].end,
+        body_start: frame
+            .map(|frame| frame.content_start)
+            .unwrap_or(lines[body_index].end),
+        body_end: frame.map(|frame| frame.content_end),
+        body_frame_end_line: frame.map(|frame| frame.end_line),
         consumed,
     }))
 }
@@ -1010,23 +1175,129 @@ pub(crate) fn parse_with_map(
     let source_hash = sha256(&source);
     let has_bom = source.starts_with(&[0xef, 0xbb, 0xbf]);
     let lines = lines_with_offsets(text);
+    let mut marker_fences = None;
+    let mut saw_section_or_task = false;
+    let mut has_schema_marker = false;
+    for line in &lines {
+        if marker_fences.is_some() {
+            update_fence(&mut marker_fences, line.text);
+            continue;
+        }
+        if fence_candidate(line.text).is_some() {
+            update_fence(&mut marker_fences, line.text);
+            continue;
+        }
+        let Some(structural) = structural_text(line.text) else {
+            continue;
+        };
+        if structural.starts_with("## ")
+            || (structural.starts_with("### ") && parse_task_heading(structural).is_some())
+        {
+            saw_section_or_task = true;
+        }
+        if !saw_section_or_task && structural == SCHEMA_MARKER {
+            has_schema_marker = true;
+        }
+    }
     let mut fences = None;
     let mut fence_lines = vec![false; lines.len()];
+    let mut protected_lines = vec![false; lines.len()];
+    let mut canonical_marker_lines = vec![false; lines.len()];
+    let mut canonical_frames = HashMap::<usize, CanonicalFrame>::new();
+    let mut frame_problems = Vec::new();
     let mut sections: Vec<(usize, String)> = Vec::new();
     let mut task_starts = Vec::new();
     let mut top_level_starts = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
+    let mut index = 0;
+    while index < lines.len() {
+        let line = &lines[index];
         if fences.is_some() {
             fence_lines[index] = true;
             update_fence(&mut fences, line.text);
+            index += 1;
             continue;
         }
         if fence_candidate(line.text).is_some() {
             fence_lines[index] = true;
             update_fence(&mut fences, line.text);
+            index += 1;
+            continue;
+        }
+        if has_schema_marker {
+            if let Some(header) = canonical_frame_start(line.text) {
+                let position_kind = canonical_frame_position_kind(&lines, index);
+                if position_kind == Some(header.kind) {
+                    if let Some(frame) = framed_block(text, &lines, index, &header) {
+                        protected_lines[index..=frame.end_line].fill(true);
+                        canonical_marker_lines[index] = true;
+                        canonical_marker_lines[frame.end_line] = true;
+                        canonical_frames.insert(index, frame);
+                        index = canonical_frames
+                            .get(&index)
+                            .map(|frame| frame.end_line + 1)
+                            .unwrap_or(index + 1);
+                        continue;
+                    }
+                }
+                frame_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{source_name}:{}: malformed canonical {} frame; repair its byte length, separator, SHA-256 and end marker",
+                        index + 1,
+                        match header.kind {
+                            CanonicalFrameKind::Body => "body",
+                            CanonicalFrameKind::Rules => "rules",
+                        }
+                    ),
+                    file: Some(source_name.clone()),
+                    line: Some(index + 1),
+                    task_id: None,
+                    value: Some(line.text.to_string()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some("re-export the project or restore the canonical frame exactly".to_string()),
+                });
+                if position_kind.is_some() {
+                    // Once a structural frame has been advertised, the
+                    // importer cannot safely rediscover task headings in its
+                    // unbounded body.  Preserve the remainder as opaque
+                    // content and keep the blocking diagnostic above.
+                    protect_untrusted_frame_tail(&mut protected_lines, index);
+                    canonical_marker_lines[index] = true;
+                    index = lines.len();
+                    continue;
+                }
+            } else if structural_text(line.text)
+                .is_some_and(|value| value.starts_with(CANONICAL_FRAME_PREFIX))
+            {
+                frame_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{source_name}:{}: malformed or misplaced canonical frame marker; frame markers are allowed only after Body: or at the start of the Rules section",
+                        index + 1
+                    ),
+                    file: Some(source_name.clone()),
+                    line: Some(index + 1),
+                    task_id: None,
+                    value: Some(line.text.to_string()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some("re-export the project or remove the misplaced frame marker".to_string()),
+                });
+                if canonical_frame_position_kind(&lines, index).is_some() {
+                    protect_untrusted_frame_tail(&mut protected_lines, index);
+                    canonical_marker_lines[index] = true;
+                    index = lines.len();
+                    continue;
+                }
+            }
+        }
+        if protected_lines[index] {
+            index += 1;
             continue;
         }
         let Some(structural) = structural_text(line.text) else {
+            index += 1;
             continue;
         };
         if let Some(section) = structural.strip_prefix("## ") {
@@ -1038,6 +1309,7 @@ pub(crate) fn parse_with_map(
         if structural.starts_with("### ") && parse_task_heading(structural).is_some() {
             task_starts.push(index);
         }
+        index += 1;
     }
 
     if !map.relaxed_missing_sections {
@@ -1054,6 +1326,7 @@ pub(crate) fn parse_with_map(
     let mut tasks = Vec::new();
     let mut task_previews = Vec::new();
     let mut deps_lines = Vec::new();
+    let mut parse_problems = frame_problems;
     let mut seen = HashSet::new();
     let mut duplicate_ids = Vec::new();
     for (position, start_index) in task_starts.iter().enumerate() {
@@ -1092,20 +1365,49 @@ pub(crate) fn parse_with_map(
         let mut priority = Priority::default();
         let mut metadata_deps_line = None;
         let mut body_start = lines[*start_index].end;
+        let mut body_end_override = None;
+        let mut body_frame_end_line = None;
         let mut consumed_metadata = Vec::new();
-        if let Some(metadata) = metadata_block(&lines, *start_index + 1, end_index, &source_name)? {
-            if let Some(metadata_title) = metadata.title {
-                title = metadata_title;
+        match metadata_block(
+            &lines,
+            *start_index + 1,
+            end_index,
+            &source_name,
+            &canonical_frames,
+        ) {
+            Ok(Some(metadata)) => {
+                if let Some(metadata_title) = metadata.title {
+                    title = metadata_title;
+                }
+                if let Some(metadata_status) = metadata.status {
+                    status = metadata_status;
+                }
+                labels = metadata.labels;
+                priority = metadata.priority;
+                deps = metadata.deps;
+                metadata_deps_line = metadata.deps_line;
+                body_start = metadata.body_start;
+                body_end_override = metadata.body_end;
+                body_frame_end_line = metadata.body_frame_end_line;
+                consumed_metadata = metadata.consumed;
             }
-            if let Some(metadata_status) = metadata.status {
-                status = metadata_status;
+            Ok(None) => {}
+            Err(error) => {
+                parse_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{source_name}:{}: task T-{id:03} has invalid metadata: {error}",
+                        *start_index + 1
+                    ),
+                    file: Some(source_name.clone()),
+                    line: Some(*start_index + 1),
+                    task_id: Some(id),
+                    value: None,
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some("fix the task metadata and preview the import again".to_string()),
+                });
             }
-            labels = metadata.labels;
-            priority = metadata.priority;
-            deps = metadata.deps;
-            metadata_deps_line = metadata.deps_line;
-            body_start = metadata.body_start;
-            consumed_metadata = metadata.consumed;
         }
         if schema == SourceSchema::CreateTask {
             let found = collect_deps_lines(&lines, &fence_lines, *start_index + 1, end_index);
@@ -1120,22 +1422,64 @@ pub(crate) fn parse_with_map(
                 });
             }
         }
-        let body_end = lines
-            .get(end_index.saturating_sub(1))
-            .map(|line| line.end)
-            .unwrap_or(body_start);
+        let body_end = body_end_override.unwrap_or_else(|| {
+            lines
+                .get(end_index.saturating_sub(1))
+                .map(|line| line.end)
+                .unwrap_or(body_start)
+        });
         let body = if body_start <= body_end && body_end <= text.len() {
-            text[body_start..body_end]
-                .trim_matches(['\r', '\n'])
-                .to_string()
+            let value = &text[body_start..body_end];
+            if body_end_override.is_some() {
+                value.to_string()
+            } else {
+                value.trim_matches(['\r', '\n']).to_string()
+            }
         } else {
             String::new()
         };
+        if let Some(frame_end_line) = body_frame_end_line {
+            let trailing = lines
+                .iter()
+                .enumerate()
+                .skip(frame_end_line + 1)
+                .take(end_index.saturating_sub(frame_end_line + 1))
+                .find(|(_, line)| !line.text.trim().is_empty());
+            if let Some((line_index, line)) = trailing {
+                parse_problems.push(ImportProblem {
+                    kind: PROBLEM_OTHER.to_string(),
+                    message: format!(
+                        "{source_name}:{}: canonical body frame for T-{id:03} is followed by unframed content before the next task or section",
+                        line_index + 1
+                    ),
+                    file: Some(source_name.clone()),
+                    line: Some(line_index + 1),
+                    task_id: Some(id),
+                    value: Some(line.text.to_string()),
+                    keepable_ids: Vec::new(),
+                    group: Vec::new(),
+                    fix: Some(
+                        "keep all task body bytes inside the canonical body frame or re-export the project"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
         if title.is_empty() {
-            return Err(AppError::Validation(format!(
-                "{source_name}:{}: task T-{id:03} has no title; write the heading as '### T-{id:03} <title>'",
-                *start_index + 1
-            )));
+            parse_problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{source_name}:{}: task T-{id:03} has no title; write the heading as '### T-{id:03} <title>'",
+                    *start_index + 1
+                ),
+                file: Some(source_name.clone()),
+                line: Some(*start_index + 1),
+                task_id: Some(id),
+                value: None,
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some(format!("write a non-empty title for T-{id:03}")),
+            });
         }
         task_previews.push(ImportTaskPreview {
             priority,
@@ -1206,6 +1550,11 @@ pub(crate) fn parse_with_map(
             *assignment = Assignment::Task(task_index);
         }
     }
+    for (index, marker) in canonical_marker_lines.iter().enumerate() {
+        if *marker {
+            assignments[index] = Assignment::Structural;
+        }
+    }
     for (index, line) in lines.iter().enumerate() {
         if assignments[index] != Assignment::Unknown {
             continue;
@@ -1218,20 +1567,67 @@ pub(crate) fn parse_with_map(
             || structural.starts_with("Next task ID:")
             || structural.starts_with("> Snapshot export")
             || structural.starts_with("Archived from TASKS.md.")
-            || structural.starts_with("Task schema: 1")
+            || structural == SCHEMA_MARKER
         {
             assignments[index] = Assignment::Structural;
         }
     }
 
-    let mut rules = String::new();
-    let mut previous_rule_line = None;
-    for (index, assignment) in assignments.iter().enumerate() {
-        if *assignment == Assignment::Rules {
-            append_rule_line(&mut rules, &mut previous_rule_line, index, &lines[index]);
+    let mut rule_frames = canonical_frames
+        .values()
+        .filter(|frame| frame.kind == CanonicalFrameKind::Rules)
+        .collect::<Vec<_>>();
+    rule_frames.sort_by_key(|frame| frame.content_start);
+    let has_canonical_rules_frame = !rule_frames.is_empty();
+    if has_canonical_rules_frame {
+        let mixed_rule_line = assignments
+            .iter()
+            .enumerate()
+            .filter(|(_, assignment)| **assignment == Assignment::Rules)
+            .filter(|(index, _)| !lines[*index].text.trim().is_empty())
+            .map(|(index, _)| index)
+            .find(|index| {
+                !rule_frames
+                    .iter()
+                    .any(|frame| line_is_inside_frame(&lines[*index], frame))
+            });
+        if let Some(line_index) = mixed_rule_line {
+            let line = &lines[line_index];
+            parse_problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{source_name}:{}: canonical Rules content is mixed with unframed text; keep the complete shared rules body inside a rules frame",
+                    line_index + 1
+                ),
+                file: Some(source_name.clone()),
+                line: Some(line_index + 1),
+                task_id: None,
+                value: Some(line.text.to_string()),
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some("re-export the project or frame all shared rules content".to_string()),
+            });
         }
     }
-    rules = rules.trim_matches(['\r', '\n']).to_string();
+    let rules = if has_canonical_rules_frame {
+        let mut exact = String::new();
+        for frame in rule_frames {
+            if !exact.is_empty() && !exact.ends_with('\n') {
+                exact.push('\n');
+            }
+            exact.push_str(&text[frame.content_start..frame.content_end]);
+        }
+        exact
+    } else {
+        let mut legacy = String::new();
+        let mut previous_rule_line = None;
+        for (index, assignment) in assignments.iter().enumerate() {
+            if *assignment == Assignment::Rules {
+                append_rule_line(&mut legacy, &mut previous_rule_line, index, &lines[index]);
+            }
+        }
+        legacy.trim_matches(['\r', '\n']).to_string()
+    };
     let unassigned_ranges = source_ranges(&lines, &assignments);
     let has_unknown_content = !unassigned_ranges.is_empty();
 
@@ -1289,10 +1685,6 @@ pub(crate) fn parse_with_map(
         });
     }
 
-    let has_schema_marker = lines.iter().any(|line| {
-        structural_text(line.text)
-            .is_some_and(|structural| structural.starts_with("Task schema: 1"))
-    });
     let tasks_without_section = task_starts
         .iter()
         .any(|start| section_for_line(&sections, *start).is_none());
@@ -1330,8 +1722,10 @@ pub(crate) fn parse_with_map(
         deps_lines,
         deps_edges: Vec::new(),
         deps_problems: Vec::new(),
+        parse_problems,
         section_warnings,
         has_schema_marker,
+        has_canonical_rules_frame,
         schema_class,
     };
     let known: HashSet<u64> = parsed.tasks.iter().map(|task| task.id).collect();

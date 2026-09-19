@@ -17,6 +17,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub fn analyze(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
     let mut problems = Vec::new();
     for parsed in sources {
+        problems.extend(parsed.parse_problems.iter().cloned());
+    }
+    for parsed in sources {
         problems.extend(
             parsed
                 .deps_problems
@@ -58,6 +61,7 @@ pub fn analyze(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
     problems.extend(rules_size_problems(sources));
     problems.extend(unresolved_dependency_problems(sources));
     problems.extend(cross_file_duplicate_problems(sources));
+    problems.extend(duplicate_source_hash_problems(sources));
     problems.extend(cycle_problems(sources));
     problems
 }
@@ -180,11 +184,19 @@ fn size_problems(parsed: &ParsedImport) -> Vec<ImportProblem> {
 }
 
 /// The shared rules of one import set, combined exactly as import apply stores
-/// them. Both the size check and the store write use this function.
+/// them. Canonical framed rules preserve their byte-exact body; legacy rules
+/// retain the historical boundary trimming. Multiple sources are joined with
+/// two LF separators in source order.
 pub fn combined_rules(sources: &[&ParsedImport]) -> String {
     sources
         .iter()
-        .map(|parsed| parsed.rules.trim_matches(['\r', '\n']))
+        .map(|parsed| {
+            if parsed.has_canonical_rules_frame {
+                parsed.rules.as_str()
+            } else {
+                parsed.rules.trim_matches(['\r', '\n'])
+            }
+        })
         .filter(|rules| !rules.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -334,6 +346,23 @@ fn cross_file_duplicate_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem
                     owner.insert(task.id, parsed.source_name.as_str());
                 }
             }
+        }
+    }
+    problems
+}
+
+fn duplicate_source_hash_problems(sources: &[&ParsedImport]) -> Vec<ImportProblem> {
+    let mut owner: HashMap<&str, &str> = HashMap::new();
+    let mut problems = Vec::new();
+    for parsed in sources {
+        let hash = parsed.source_hash.as_str();
+        if let Some(first) = owner.get(hash) {
+            problems.push(ImportProblem::other(format!(
+                "{}: source SHA-256 {} is also supplied as {}; importing the same bytes more than once would collide in import provenance",
+                parsed.source_name, hash, first
+            )));
+        } else {
+            owner.insert(hash, parsed.source_name.as_str());
         }
     }
     problems

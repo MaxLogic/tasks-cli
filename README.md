@@ -290,10 +290,28 @@ assigns them somewhere on purpose.
 Import preserves content and original-source provenance; boundary whitespace
 and structural separators may be normalized.
 
+Canonical exports include the exact standalone `Task schema: 1` marker. Rules
+and each task body are wrapped in readable `tasks-cli:canonical-v1` comments
+carrying a UTF-8 byte length and SHA-256, so headings, fences and
+metadata-looking lines inside either value stay content. A frame is accepted
+only in its documented `Body:` or Rules-section position; its byte count, hash,
+end marker and LF/CRLF separator must match. A damaged, truncated, misplaced,
+mixed framed/unframed, or trailing unframed body block is a blocking problem,
+and the importer does not rediscover headings inside a damaged frame. Legacy
+ledgers without the exact marker keep the legacy heading and metadata
+compatibility rules. Multiple rules frames are combined in source order with a
+single LF separator when needed, while one framed rules body remains byte exact.
+
+An import set must not contain the same source SHA-256 more than once, even
+when the files have different names. The preview names the colliding files and
+the apply is refused before any task, rules or provenance row is written.
+
 For bulk migration, stop all workers and Markdown writers through apply,
 verification and quarantine. A failed candidate cleans up only its newly created
-artifacts. Successful candidates remain imported; there is no transaction across
-all projects. Existing databases and their sidecars are preserved.
+artifacts. If an import committed into a pre-existing database and verification
+then failed, the database rows remain and the report says `rolled_back: false`.
+Successful candidates remain imported; there is no transaction across all
+projects. Existing databases and their sidecars are preserved.
 
 Export is deterministic and pleasant to read, and it carries a snapshot warning,
 the project UUID, rules, versions, dependency IDs, and complete bodies. It is
@@ -309,11 +327,23 @@ tasks --project UUID doctor
 Backup uses SQLite's online backup API, writes an exclusively created temporary
 file beside the destination, then validates it: `quick_check`, foreign-key
 integrity, schema version, and project UUID. It refuses to overwrite an existing
-destination.
+destination or existing destination `-wal`/`-shm` sidecar, rechecking those
+sidecars immediately before publication while removing only temporary sidecars.
 
-There is no in-place restore command, on purpose. To recover, validate the
-backup in a new isolated data root, then recreate the registry entry with `init`
-and `bind`. Nothing destructive reaches a live backlog by accident.
+There is no in-place restore command, on purpose. To recover, stop task
+clients, create an isolated data root, and restore the UUID layout yourself:
+
+```text
+mkdir D:\Recovery\projects\UUID
+copy D:\Backups\project.sqlite D:\Recovery\projects\UUID\TASKS.sqlite
+tasks --data-root D:\Recovery --project UUID doctor
+tasks --data-root D:\Recovery bind --root D:\RecoveredWorktree --project UUID
+```
+
+Replace `UUID` with the database's project UUID and use an absolute root on the
+same OS. `doctor` validates the restored file before `bind` recreates only the
+registry association; do not run `init` for this layout because it creates a
+new project identity. Nothing destructive reaches a live backlog by accident.
 
 Every real schema migration takes a fresh pre-upgrade backup first, validates it,
 and prints its path. The name carries the source version, a millisecond

@@ -564,7 +564,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         .iter()
                         .map(|item| (item.source_name.clone(), item.source_hash.clone()))
                         .collect::<Vec<_>>();
-                    let (state_problems, _) = store.import_state_problems(&sources)?;
+                    let (state_problems, already_imported) =
+                        store.import_state_problems(&sources)?;
                     problems.extend(state_problems);
                     let problem_counts = ProblemCounts::of(&problems);
                     if apply {
@@ -630,7 +631,14 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     let reports = store.import_preview_many(parsed);
                     envelope(
                         Some(project_id),
-                        import_payload(&files, reports, problems, problem_counts, false, false),
+                        import_payload(
+                            &files,
+                            reports,
+                            problems,
+                            problem_counts,
+                            already_imported,
+                            false,
+                        ),
                         cli.format,
                     );
                 }

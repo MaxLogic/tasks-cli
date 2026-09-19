@@ -248,6 +248,102 @@ fn cyclic_legacy_dependencies_fail_without_partial_migration() {
 }
 
 #[test]
+fn valid_unconstrained_legacy_dependencies_are_rebuilt_with_constraints() {
+    let (root, project_id, db_path) = legacy_fixture("backlog");
+    let conn = Connection::open(&db_path).expect("legacy database");
+    conn.execute_batch(
+        "CREATE TABLE dependencies(task_id INTEGER NOT NULL, depends_on_id INTEGER NOT NULL);
+         INSERT INTO tasks(id, title, body, status) VALUES (8, 'second', 'body', 'backlog');
+         INSERT INTO dependencies(task_id, depends_on_id) VALUES (8, 7);
+         PRAGMA user_version = 0;",
+    )
+    .expect("legacy dependencies");
+    drop(conn);
+
+    let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
+    store.migrate().expect("migrate");
+    drop(store);
+    let conn = Connection::open(&db_path).expect("migrated database");
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_list('dependencies')",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("foreign keys"),
+        2
+    );
+    assert!(conn
+        .execute(
+            "INSERT INTO dependencies(task_id, depends_on_id) VALUES (8, 7)",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO dependencies(task_id, depends_on_id) VALUES (8, 99)",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn invalid_legacy_dependency_endpoints_and_duplicates_roll_back_the_original_table() {
+    for (label, rows, expected, expected_rows) in [
+        (
+            "duplicate",
+            "INSERT INTO dependencies(task_id, depends_on_id) VALUES (8, 7), (8, 7);",
+            "duplicate edge",
+            2,
+        ),
+        (
+            "source",
+            "INSERT INTO dependencies(task_id, depends_on_id) VALUES (99, 7);",
+            "source T-099",
+            1,
+        ),
+        (
+            "destination",
+            "INSERT INTO dependencies(task_id, depends_on_id) VALUES (7, 99);",
+            "references T-099",
+            1,
+        ),
+    ] {
+        let (root, project_id, db_path) = legacy_fixture("backlog");
+        let conn = Connection::open(&db_path).expect("legacy database");
+        conn.execute_batch(&format!(
+            "CREATE TABLE dependencies(task_id INTEGER NOT NULL, depends_on_id INTEGER NOT NULL);
+             INSERT INTO tasks(id, title, body, status) VALUES (8, 'second', 'body', 'backlog');
+             {rows}
+             PRAGMA user_version = 0;"
+        ))
+        .expect("invalid legacy dependencies");
+        drop(conn);
+
+        let mut store =
+            Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
+        let error = store.migrate().expect_err(label);
+        assert!(error.to_string().contains(expected), "{label}: {error}");
+        drop(store);
+        let conn = Connection::open(&db_path).expect("reopen legacy database");
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("version"),
+            0,
+            "{label} migration changed schema version"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM dependencies", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("dependency rows"),
+            expected_rows,
+            "{label} migration changed original dependency rows"
+        );
+    }
+}
+
+#[test]
 fn doctor_reports_old_schema_without_migrating_it() {
     let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store =
