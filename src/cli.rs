@@ -1,4 +1,4 @@
-use crate::model::{SourceSchema, TaskStatus};
+use crate::model::{ListCursor, Priority, SourceSchema, TaskStatus};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -39,12 +39,25 @@ pub enum Command {
         project: String,
     },
     List {
+        /// Include every nonterminal task, regardless of readiness.
+        #[arg(long, conflicts_with = "needs_human")]
+        open: bool,
+        /// Include nonterminal tasks labelled needs-human.
+        #[arg(long)]
+        needs_human: bool,
         #[arg(long)]
         label: Option<String>,
         #[arg(long)]
         status: Option<TaskStatus>,
         #[arg(long)]
-        after: Option<u64>,
+        after: Option<ListCursor>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Rank open prerequisites by the work completing them would unlock.
+    Unlocks {
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -63,10 +76,19 @@ pub enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Insert task titles after references in UTF-8 input; default input is stdin.
+    Enrich {
+        #[arg(long, default_value = "-")]
+        file: PathBuf,
+    },
+    /// Enrich clipboard text and put the result back on the clipboard.
+    EnrichClipboard,
     Show {
         id: String,
     },
     Create {
+        #[arg(long, value_enum, default_value = "P2")]
+        priority: Priority,
         #[arg(long)]
         labels: Option<String>,
         #[arg(long)]
@@ -81,6 +103,8 @@ pub enum Command {
         clear_deps: bool,
     },
     Update {
+        #[arg(long, value_enum)]
+        priority: Option<Priority>,
         #[arg(long, conflicts_with = "clear_labels")]
         labels: Option<String>,
         #[arg(long)]

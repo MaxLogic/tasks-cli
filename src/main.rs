@@ -145,6 +145,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             );
         }
         Command::List {
+            open,
+            needs_human,
             label,
             status,
             after,
@@ -152,11 +154,13 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         } => {
             let project_id = resolved_project(&cli, &data_root)?;
             let status_text = status.as_ref().map(ToString::to_string);
-            let page = Store::open_readonly(&data_root, &project_id)?.list_tasks_with_label(
+            let page = Store::open_readonly(&data_root, &project_id)?.select_tasks(
                 status_text.as_deref(),
                 *after,
                 limit.unwrap_or(20),
                 label.as_deref(),
+                *open,
+                *needs_human,
             )?;
             envelope(
                 Some(project_id),
@@ -164,6 +168,20 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     items: page.items,
                     has_more: page.has_more,
                     next_after: page.next_after,
+                },
+                cli.format,
+            );
+        }
+        Command::Unlocks { offset, limit } => {
+            let project_id = resolved_project(&cli, &data_root)?;
+            let page = Store::open_readonly(&data_root, &project_id)?
+                .unlocks(*offset, limit.unwrap_or(20))?;
+            envelope(
+                Some(project_id),
+                CommandPayload::Unlocks {
+                    items: page.items,
+                    has_more: page.has_more,
+                    next_offset: page.next_after,
                 },
                 cli.format,
             );
@@ -206,6 +224,65 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 }
             };
             envelope(Some(project_id), payload, cli.format);
+        }
+        Command::Enrich { .. } | Command::EnrichClipboard => {
+            let project_id = resolved_project(&cli, &data_root)?;
+            let store = Store::open_readonly(&data_root, &project_id)?;
+            let clipboard = matches!(cli.command, Command::EnrichClipboard);
+            let input = if let Command::Enrich { file } = &cli.command {
+                let reader: Box<dyn Read> = if file == Path::new("-") {
+                    Box::new(std::io::stdin())
+                } else {
+                    Box::new(
+                        std::fs::File::open(file)
+                            .map_err(|e| AppError::io_path("read", file, e))?,
+                    )
+                };
+                let mut bytes = Vec::new();
+                reader
+                    .take(tasks_cli::enrich::MAX_INPUT_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                String::from_utf8(bytes).map_err(|_| {
+                    AppError::Validation("enrichment input is not valid UTF-8".into())
+                })?
+            } else {
+                tasks_cli::clipboard::read_text()?
+            };
+            let result = tasks_cli::enrich::enrich(&store.conn, &input)?;
+            if clipboard {
+                tasks_cli::clipboard::replace_text(&input, &result.text)?;
+            }
+            if !result.unknown_ids.is_empty() {
+                eprintln!(
+                    "Unknown task IDs left unchanged: {}",
+                    result
+                        .unknown_ids
+                        .iter()
+                        .map(|id| format!("T-{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if cli.format == OutputFormat::Json {
+                envelope(
+                    Some(project_id),
+                    CommandPayload::Enrich {
+                        text: result.text,
+                        replacements: result.replacements,
+                        unknown_ids: result.unknown_ids,
+                        clipboard,
+                    },
+                    cli.format,
+                );
+            } else if clipboard {
+                println!(
+                    "Enriched {} task references in the clipboard.",
+                    result.replacements
+                );
+            } else {
+                use std::io::Write;
+                std::io::stdout().write_all(result.text.as_bytes())?;
+            }
         }
         Command::Show { id } => {
             let project_id = resolved_project(&cli, &data_root)?;
@@ -327,6 +404,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             };
             match cli.command.clone() {
                 Command::Create {
+                    priority,
                     labels,
                     title,
                     body_file,
@@ -345,7 +423,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         .unwrap_or_default();
                     let deps = if clear_deps { Vec::new() } else { deps };
                     let status = status.unwrap_or(TaskStatus::Backlog);
-                    let (id, version, event_id) = store.create_task_with_labels(
+                    let (id, version, event_id) = store.create_task_with_priority_labels(
                         &title,
                         &body,
                         status.clone(),
@@ -355,6 +433,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             .map(tasks_cli::labels::parse)
                             .transpose()?
                             .unwrap_or_default(),
+                        priority,
                     )?;
                     envelope(
                         Some(project_id),
@@ -368,6 +447,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     );
                 }
                 Command::Update {
+                    priority,
                     labels,
                     clear_labels,
                     id,
@@ -391,6 +471,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         id,
                         expect_version,
                         TaskUpdate {
+                            priority,
                             labels: if clear_labels {
                                 Some(Vec::new())
                             } else {
@@ -588,7 +669,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         cli.format,
                     );
                 }
-                Command::List { .. }
+                Command::Enrich { .. }
+                | Command::EnrichClipboard
+                | Command::List { .. }
+                | Command::Unlocks { .. }
                 | Command::Search { .. }
                 | Command::Show { .. }
                 | Command::History { .. }

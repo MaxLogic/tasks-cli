@@ -69,7 +69,7 @@ fn labels_are_normalized_filterable_and_versioned_with_full_history() {
         json!(["needs-human", "security"])
     );
     assert_eq!(
-        f.ok(&["list", "--label", "SECURITY"])["items"]
+        f.ok(&["list", "--open", "--label", "SECURITY"])["items"]
             .as_array()
             .unwrap()
             .len(),
@@ -94,7 +94,7 @@ fn labels_are_normalized_filterable_and_versioned_with_full_history() {
         serde_json::from_str(old["items"][0]["snapshot_json"].as_str().unwrap()).unwrap();
     assert_eq!(snapshot["labels"], json!(["needs-human", "security"]));
     assert_eq!(snapshot["body"], "initial content");
-    assert!(f.ok(&["list", "--label", "security"])["items"]
+    assert!(f.ok(&["list", "--open", "--label", "security"])["items"]
         .as_array()
         .unwrap()
         .is_empty());

@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::model::{
-    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, SchemaClass,
+    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, Priority, SchemaClass,
     SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_OTHER,
     PROBLEM_SELF_DEPENDENCY, PROBLEM_UNKNOWN_DEPENDENCY,
 };
@@ -13,6 +13,7 @@ const NO_SECTION: &str = "<no section>";
 
 #[derive(Debug, Clone)]
 pub struct ParsedTask {
+    pub priority: Priority,
     pub id: u64,
     /// 1-based line of the task heading in the source file.
     pub heading_line: usize,
@@ -731,6 +732,7 @@ pub fn resolve_create_task_deps_across(sources: &mut [ParsedImport]) -> HashSet<
 }
 
 struct MetadataBlock {
+    priority: Priority,
     labels: Vec<String>,
     title: Option<String>,
     status: Option<TaskStatus>,
@@ -768,6 +770,7 @@ fn metadata_block(
 
     if title.is_none() && lines[cursor].text.trim() == "Body:" {
         return Ok(Some(MetadataBlock {
+            priority: Priority::default(),
             labels: Vec::new(),
             title: None,
             status: None,
@@ -818,9 +821,20 @@ fn metadata_block(
         .get(body_index)
         .and_then(|line| metadata_value(line, "Labels:"));
     let body_index = body_index + usize::from(labels_value.is_some());
+    let priority_value = lines
+        .get(body_index)
+        .and_then(|line| metadata_value(line, "Priority:"));
+    let body_index = body_index + usize::from(priority_value.is_some());
     if body_index >= end || lines[body_index].text.trim() != "Body:" {
         return Ok(None);
     }
+    let priority = priority_value
+        .map(str::parse::<Priority>)
+        .transpose()
+        .map_err(|error| {
+            AppError::Validation(format!("{source_name}: invalid Priority metadata: {error}"))
+        })?
+        .unwrap_or_default();
     let labels = labels_value
         .map(crate::labels::parse)
         .transpose()?
@@ -863,8 +877,12 @@ fn metadata_block(
     if labels_value.is_some() {
         consumed.push("Labels".to_string());
     }
+    if priority_value.is_some() {
+        consumed.push("Priority".to_string());
+    }
     consumed.push("Body".to_string());
     Ok(Some(MetadataBlock {
+        priority,
         labels,
         title,
         status: Some(status),
@@ -1071,6 +1089,7 @@ pub(crate) fn parse_with_map(
         let mut status = map.status_for(&section).unwrap_or(TaskStatus::Backlog);
         let mut deps = Vec::new();
         let mut labels = Vec::new();
+        let mut priority = Priority::default();
         let mut metadata_deps_line = None;
         let mut body_start = lines[*start_index].end;
         let mut consumed_metadata = Vec::new();
@@ -1082,6 +1101,7 @@ pub(crate) fn parse_with_map(
                 status = metadata_status;
             }
             labels = metadata.labels;
+            priority = metadata.priority;
             deps = metadata.deps;
             metadata_deps_line = metadata.deps_line;
             body_start = metadata.body_start;
@@ -1118,6 +1138,7 @@ pub(crate) fn parse_with_map(
             )));
         }
         task_previews.push(ImportTaskPreview {
+            priority,
             labels: labels.clone(),
             id,
             title: title.clone(),
@@ -1127,6 +1148,7 @@ pub(crate) fn parse_with_map(
             consumed_metadata,
         });
         tasks.push(ParsedTask {
+            priority,
             labels,
             id,
             heading_line: *start_index + 1,

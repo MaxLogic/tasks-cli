@@ -15,3 +15,6 @@ pub use error::AppError;
 
 pub mod full_text;
 pub mod labels;
+
+pub mod clipboard;
+pub mod enrich;

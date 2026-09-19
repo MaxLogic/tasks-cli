@@ -125,7 +125,7 @@ fn schema_errors_name_the_database_the_found_version_and_the_required_one() {
     );
     assert!(message.contains("schema version 7"), "{message}");
     assert!(
-        message.contains("newer than this build supports (3)"),
+        message.contains("newer than this build supports (4)"),
         "{message}"
     );
     assert!(message.contains("upgrade tasks-cli"), "{message}");
@@ -153,7 +153,7 @@ fn schema_errors_name_the_database_the_found_version_and_the_required_one() {
         "{message}"
     );
     assert!(message.contains("schema version 0"), "{message}");
-    assert!(message.contains("requires 3"), "{message}");
+    assert!(message.contains("requires 4"), "{message}");
     assert!(message.contains("tasks migrate --project"), "{message}");
 }
 
