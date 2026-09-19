@@ -8,6 +8,83 @@ pub const RULES_MAX_BYTES: usize = 262_144;
 pub const MAX_DEPENDENCIES: usize = 1000;
 pub const ID_PREFIX: &str = "T-";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[value(rename_all = "UPPER")]
+pub enum Priority {
+    P0,
+    P1,
+    #[default]
+    P2,
+    P3,
+}
+
+impl Display for Priority {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::P0 => "P0",
+            Self::P1 => "P1",
+            Self::P2 => "P2",
+            Self::P3 => "P3",
+        })
+    }
+}
+impl FromStr for Priority {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "P0" => Ok(Self::P0),
+            "P1" => Ok(Self::P1),
+            "P2" => Ok(Self::P2),
+            "P3" => Ok(Self::P3),
+            _ => Err(format!(
+                "invalid priority '{value}'; expected P0, P1, P2 or P3"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ListCursor {
+    pub priority: Priority,
+    pub id: u64,
+}
+impl Display for ListCursor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.priority, render_task_id(self.id))
+    }
+}
+impl FromStr for ListCursor {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (priority, id) = value.split_once(':').ok_or_else(|| {
+            "list --after expects a priority and task ID, e.g. P2:T-123".to_string()
+        })?;
+        let id = parse_task_id(id)?;
+        if id > i64::MAX as u64 {
+            return Err("list cursor task ID exceeds SQLite's integer range".into());
+        }
+        Ok(Self {
+            priority: priority.parse()?,
+            id,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SelectionPage {
+    pub items: Vec<TaskSummary>,
+    pub has_more: bool,
+    pub next_after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UnlockSummary {
+    #[serde(flatten)]
+    pub task: TaskSummary,
+    pub direct_open_dependents: u64,
+    pub immediately_runnable: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -192,6 +269,8 @@ impl ProblemCounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
+    #[serde(default)]
+    pub priority: Priority,
     pub id: u64,
     pub status: TaskStatus,
     pub version: u64,
@@ -203,6 +282,8 @@ pub struct TaskSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDetail {
+    #[serde(default)]
+    pub priority: Priority,
     pub id: u64,
     pub status: TaskStatus,
     pub version: u64,
@@ -226,6 +307,7 @@ pub struct DependencySummary {
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskUpdate {
+    pub priority: Option<Priority>,
     pub title: Option<String>,
     pub body: Option<String>,
     pub status: Option<TaskStatus>,
@@ -283,6 +365,8 @@ pub struct ImportReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportTaskPreview {
+    #[serde(default)]
+    pub priority: Priority,
     pub id: u64,
     pub title: String,
     pub section: String,

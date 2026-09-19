@@ -24,7 +24,12 @@ pub enum CommandPayload {
     List {
         items: Vec<TaskSummary>,
         has_more: bool,
-        next_after: Option<u64>,
+        next_after: Option<String>,
+    },
+    Unlocks {
+        items: Vec<crate::model::UnlockSummary>,
+        has_more: bool,
+        next_offset: Option<u64>,
     },
     Search {
         items: Vec<TaskSummary>,
@@ -35,6 +40,12 @@ pub enum CommandPayload {
         items: Vec<TaskSummary>,
         has_more: bool,
         next_offset: Option<u64>,
+    },
+    Enrich {
+        text: String,
+        replacements: usize,
+        unknown_ids: Vec<u64>,
+        clipboard: bool,
     },
     Show(TaskDetail),
     Create {
@@ -104,6 +115,24 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    fn summary_line(item: &TaskSummary) -> String {
+        let deps = item
+            .deps
+            .iter()
+            .map(|d| format!("T-{d:03}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "T-{:03}\t{}\t{}\tv{}\t{}\t[{}]\tlabels=[{}]\n",
+            item.id,
+            item.priority,
+            item.status,
+            item.version,
+            Self::bound_title(&item.title),
+            deps,
+            item.labels.join(",")
+        )
+    }
     pub fn json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
     }
@@ -228,8 +257,22 @@ impl Envelope {
                 items,
                 has_more,
                 next_after,
+            } => {
+                let mut out = items.iter().map(Self::summary_line).collect::<String>();
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_after { out.push_str(&format!("next_after: {next}\n")); }
+                out
             }
-            | CommandPayload::Search {
+            CommandPayload::Unlocks { items, has_more, next_offset } => {
+                let mut out = String::new();
+                for item in items {
+                    out.push_str(&format!("{}\tdirect_open_dependents={}\timmediately_runnable={}\n", Self::summary_line(&item.task).trim_end(), item.direct_open_dependents, item.immediately_runnable));
+                }
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_offset { out.push_str(&format!("next_offset: {next}\n")); }
+                out
+            }
+            CommandPayload::Search {
                 items,
                 has_more,
                 next_after,
@@ -241,21 +284,7 @@ impl Envelope {
             } => {
                 let mut out = String::new();
                 for item in items {
-                    let deps = item
-                        .deps
-                        .iter()
-                        .map(|d| format!("T-{d:03}"))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    out.push_str(&format!(
-                        "T-{0:03}\t{1}\tv{2}\t{3}\t[{4}]\tlabels=[{5}]\n",
-                        item.id,
-                        item.status,
-                        item.version,
-                        Self::bound_title(&item.title),
-                        deps,
-                        item.labels.join(",")
-                    ));
+                    out.push_str(&Self::summary_line(item));
                 }
                 out.push_str(&format!("has_more: {has_more}\n"));
                 if let Some(next) = next_after {
@@ -268,10 +297,12 @@ impl Envelope {
                 }
                 out
             }
+            CommandPayload::Enrich {text,..} => text.clone(),
             CommandPayload::Show(task) => {
                 let mut out = String::new();
                 out.push_str(&format!("id: T-{0:03}\n", task.id));
                 out.push_str(&format!("status: {}\n", task.status));
+                out.push_str(&format!("priority: {}\n", task.priority));
                 out.push_str(&format!("version: {}\n", task.version));
                 out.push_str(&format!("labels: {}\n", task.labels.join(", ")));
                 out.push_str(&format!("dependencies: {}\n", task.deps.len()));
@@ -433,6 +464,7 @@ mod tests {
             project_id: None,
             data: CommandPayload::List {
                 items: vec![TaskSummary {
+                    priority: Default::default(),
                     labels: vec![],
                     id: 1,
                     status: crate::model::TaskStatus::Backlog,
@@ -476,6 +508,7 @@ mod tests {
                     has_bom: true,
                     task_count: 1,
                     tasks: vec![crate::model::ImportTaskPreview {
+                        priority: Default::default(),
                         labels: vec![],
                         id: 1,
                         title: "Title".to_string(),

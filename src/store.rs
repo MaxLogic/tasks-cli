@@ -2,8 +2,9 @@ use crate::error::AppError;
 use crate::markdown::{ParsedImport, ParsedTask};
 use crate::model::{
     parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportProblem, ImportReport,
-    Pagination, RuleRecord, TaskDetail, TaskStatus, TaskSummary, TaskUpdate, BODY_MAX_BYTES,
-    ID_PREFIX, MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
+    ListCursor, Pagination, Priority, RuleRecord, SelectionPage, TaskDetail, TaskStatus,
+    TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES, ID_PREFIX, MAX_DEPENDENCIES,
+    RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
 use crate::storage::{acquire_exclusive_lock, validate_storage_root, ExclusiveLock};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -17,7 +18,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+
+fn create_selection_schema(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'));
+        CREATE INDEX idx_tasks_priority_id ON tasks(priority,id);
+        CREATE INDEX idx_tasks_status_priority_id ON tasks(status,priority,id);")?;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Store {
@@ -168,6 +176,7 @@ fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     create_schema_objects(&tx)?;
     crate::labels::create_schema(&tx)?;
+    create_selection_schema(&tx)?;
     tx.execute(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
         [project_id.to_string()],
@@ -226,6 +235,7 @@ fn validate_current_schema(
         "version",
         "created_ms",
         "updated_ms",
+        "priority",
     ] {
         if !column_exists(conn, "tasks", column)? {
             return Err(missing(&format!("the tasks.{column} column")));
@@ -1090,6 +1100,8 @@ impl Store {
         })
     }
 
+    /// Compatibility library view: all open tasks, paged by numeric ID.
+    /// The CLI uses `select_tasks` for priority ordering and default readiness.
     pub fn list_tasks(
         &mut self,
         status: Option<&str>,
@@ -1113,14 +1125,14 @@ impl Store {
         let mut summaries = Vec::new();
         let mut stmt = if status.is_some() {
             self.conn.prepare(
-                "SELECT id, status, version, title
+                "SELECT id, status, version, title, priority
                  FROM tasks
                  WHERE status = ?1 AND id > ?2 AND (?4 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?4))
                  ORDER BY id ASC LIMIT ?3",
             )?
         } else {
             self.conn.prepare(
-                "SELECT id, status, version, title
+                "SELECT id, status, version, title, priority
                  FROM tasks
                  WHERE status NOT IN ('done','cancelled') AND id > ?1 AND (?3 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?3))
                  ORDER BY id ASC LIMIT ?2",
@@ -1145,6 +1157,10 @@ impl Store {
                 status: task_status,
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
+                priority: row
+                    .get::<_, String>(4)?
+                    .parse()
+                    .map_err(AppError::Validation)?,
                 deps: Vec::new(),
                 labels: Vec::new(),
             });
@@ -1172,6 +1188,154 @@ impl Store {
             items: summaries,
             has_more,
             next_after,
+        })
+    }
+
+    /// Priority-ordered work selection. An explicit status bypasses readiness;
+    /// the human view additionally requires an open task with that label.
+    pub fn select_tasks(
+        &mut self,
+        status: Option<&str>,
+        after: Option<ListCursor>,
+        limit: usize,
+        label: Option<&str>,
+        open: bool,
+        needs_human: bool,
+    ) -> Result<SelectionPage, AppError> {
+        let label = crate::labels::filter(label)?;
+        let status = status
+            .map(validate_status)
+            .transpose()?
+            .map(|v| v.to_string());
+        let size = validate_limit(limit)?;
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut statement = snapshot.prepare(
+            "SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks t
+             WHERE (?1 IS NULL OR t.status=?1)
+               AND (?1 IS NOT NULL OR t.status NOT IN ('done','cancelled'))
+               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label=?2))
+               AND (NOT ?3 OR (t.status NOT IN ('done','cancelled') AND EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')))
+               AND (?1 IS NOT NULL OR ?3 OR ?4 OR (
+                   t.status IN ('todo','in-progress')
+                   AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
+                   AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status!='done')))
+               AND (?5 IS NULL OR (t.priority,t.id) > (?5,?6))
+             ORDER BY t.priority,t.id LIMIT ?7"
+        )?;
+        let mut rows = statement.query(params![
+            status,
+            label,
+            needs_human,
+            open,
+            after.map(|v| v.priority.to_string()),
+            after.map(|v| v.id),
+            (size + 1) as i64
+        ])?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next()? {
+            items.push(Self::selection_summary(row)?);
+        }
+        drop(rows);
+        drop(statement);
+        let has_more = items.len() > size;
+        items.truncate(size);
+        Self::populate_summaries(&snapshot, &mut items)?;
+        let next_after = if has_more {
+            items.last().map(|t| {
+                ListCursor {
+                    priority: t.priority,
+                    id: t.id,
+                }
+                .to_string()
+            })
+        } else {
+            None
+        };
+        snapshot.commit()?;
+        Ok(SelectionPage {
+            items,
+            has_more,
+            next_after,
+        })
+    }
+
+    fn selection_summary(row: &rusqlite::Row<'_>) -> Result<TaskSummary, AppError> {
+        Ok(TaskSummary {
+            id: row.get(0)?,
+            status: validate_status(&row.get::<_, String>(1)?)?,
+            version: row.get(2)?,
+            title: row.get(3)?,
+            priority: row
+                .get::<_, String>(4)?
+                .parse()
+                .map_err(AppError::Validation)?,
+            deps: Vec::new(),
+            labels: Vec::new(),
+        })
+    }
+
+    fn populate_summaries(conn: &Connection, items: &mut [TaskSummary]) -> Result<(), AppError> {
+        let ids = items.iter().map(|t| t.id).collect::<Vec<_>>();
+        let mut deps = Self::task_dependencies_for_ids(conn, &ids)?;
+        let mut labels = crate::labels::read_many(conn, &ids)?;
+        for task in items {
+            task.deps = deps.remove(&task.id).unwrap_or_default();
+            task.labels = labels.remove(&task.id).unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    pub fn unlocks(
+        &mut self,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Pagination<UnlockSummary>, AppError> {
+        let size = validate_limit(limit)?;
+        let offset_sql = i64::try_from(offset).map_err(|_| {
+            AppError::Validation("unlocks --offset exceeds SQLite's integer range".into())
+        })?;
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut statement = snapshot.prepare(
+            "SELECT p.id,p.status,p.version,p.title,p.priority,COUNT(*) AS direct_count,
+                    SUM(CASE WHEN t.status IN ('todo','in-progress')
+                      AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
+                      AND NOT EXISTS(SELECT 1 FROM dependencies other JOIN tasks prerequisite ON prerequisite.id=other.depends_on_id
+                          WHERE other.task_id=t.id AND other.depends_on_id!=p.id AND prerequisite.status!='done')
+                      THEN 1 ELSE 0 END) AS runnable_count
+             FROM tasks p JOIN dependencies d ON d.depends_on_id=p.id JOIN tasks t ON t.id=d.task_id
+             WHERE p.status NOT IN ('done','cancelled') AND t.status NOT IN ('done','cancelled')
+             GROUP BY p.id ORDER BY runnable_count DESC,direct_count DESC,p.priority,p.id
+             LIMIT ?1 OFFSET ?2"
+        )?;
+        let mut rows = statement.query(params![(size + 1) as i64, offset_sql])?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next()? {
+            items.push(UnlockSummary {
+                task: Self::selection_summary(row)?,
+                direct_open_dependents: row.get(5)?,
+                immediately_runnable: row.get(6)?,
+            });
+        }
+        drop(rows);
+        drop(statement);
+        let has_more = items.len() > size;
+        items.truncate(size);
+        let ids = items.iter().map(|t| t.task.id).collect::<Vec<_>>();
+        let mut deps = Self::task_dependencies_for_ids(&snapshot, &ids)?;
+        let mut labels = crate::labels::read_many(&snapshot, &ids)?;
+        for item in &mut items {
+            item.task.deps = deps.remove(&item.task.id).unwrap_or_default();
+            item.task.labels = labels.remove(&item.task.id).unwrap_or_default();
+        }
+        snapshot.commit()?;
+        Ok(Pagination {
+            items,
+            has_more,
+            next_after: if has_more {
+                Some(offset + size as u64)
+            } else {
+                None
+            },
         })
     }
 
@@ -1203,7 +1367,7 @@ impl Store {
         let fetch = page_size + 1;
         let mut rows = self.conn.prepare(
             "
-            SELECT id, status, version, title
+            SELECT id, status, version, title, priority
             FROM tasks
              WHERE id > ?1 AND (?4 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=tasks.id AND l.label=?4)) AND (LOWER(title) LIKE ?2 ESCAPE '\\' OR LOWER(body) LIKE ?2 ESCAPE '\\')
             ORDER BY id ASC LIMIT ?3
@@ -1226,6 +1390,10 @@ impl Store {
                 status: task_status,
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
+                priority: row
+                    .get::<_, String>(4)?
+                    .parse()
+                    .map_err(AppError::Validation)?,
                 deps: Vec::new(),
                 labels: Vec::new(),
             });
@@ -1279,6 +1447,7 @@ impl Store {
                 status: validate_status(&row.status)?,
                 version: row.version,
                 title: row.title,
+                priority: row.priority.parse().map_err(AppError::Validation)?,
                 deps: deps.remove(&row.id).unwrap_or_default(),
                 labels: labels.remove(&row.id).unwrap_or_default(),
             });
@@ -1402,6 +1571,13 @@ impl Store {
         })?;
         let rule = self.project_rules()?;
         let detail = TaskDetail {
+            priority: self
+                .conn
+                .query_row("SELECT priority FROM tasks WHERE id=?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .parse()
+                .map_err(AppError::Validation)?,
             labels: crate::labels::read(&self.conn, id)?,
             id,
             status: validate_status(&status_text)?,
@@ -1656,6 +1832,25 @@ impl Store {
         deps: Vec<u64>,
         labels: Vec<String>,
     ) -> Result<(u64, u64, Option<u64>), AppError> {
+        self.create_task_with_priority_labels(
+            title,
+            body,
+            status,
+            deps,
+            labels,
+            Priority::default(),
+        )
+    }
+
+    pub fn create_task_with_priority_labels(
+        &mut self,
+        title: &str,
+        body: &str,
+        status: TaskStatus,
+        deps: Vec<u64>,
+        labels: Vec<String>,
+        priority: Priority,
+    ) -> Result<(u64, u64, Option<u64>), AppError> {
         let labels = crate::labels::normalize(labels)?;
         let who = format!("create in project {}", self.project_id);
         validate_title_body(&who, title, body)?;
@@ -1685,12 +1880,12 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
+            "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms,priority)
              VALUES(
                 (SELECT next_task_number FROM project),
-                ?1, ?2, ?3, 1, ?4, ?4
+                ?1, ?2, ?3, 1, ?4, ?4, ?5
              )",
-            params![title, body, status.to_string(), now],
+            params![title, body, status.to_string(), now, priority.to_string()],
         )?;
         let id: u64 = tx.query_row("SELECT id FROM tasks ORDER BY id DESC LIMIT 1", [], |r| {
             r.get::<_, i64>(0)
@@ -1711,6 +1906,7 @@ impl Store {
             "version": 1,
             "deps": deps,
             "labels": labels,
+            "priority": priority,
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
@@ -1737,12 +1933,13 @@ impl Store {
         if changes.title.is_none()
             && changes.body.is_none()
             && changes.status.is_none()
+            && changes.priority.is_none()
             && changes.deps.is_none()
             && !changes.clear_deps
             && changes.labels.is_none()
         {
             return Err(AppError::Usage(format!(
-                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels or --clear-labels (project {project_id})",
+                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels, --clear-labels or --priority (project {project_id})",
                 render_task_id(id)
             )));
         }
@@ -1831,6 +2028,12 @@ impl Store {
         );
         validate_title_body(&who, &next_title, &next_body)?;
 
+        let cur_priority: String =
+            tx.query_row("SELECT priority FROM tasks WHERE id=?1", [id], |r| r.get(0))?;
+        let next_priority = changes
+            .priority
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| cur_priority.clone());
         let current_labels = crate::labels::read(&tx, id)?;
         let next_labels = changes
             .labels
@@ -1838,7 +2041,8 @@ impl Store {
             .transpose()?
             .unwrap_or_else(|| current_labels.clone());
         let current_deps = Self::task_dependencies_from(&tx, id)?;
-        let no_change = next_labels == current_labels
+        let no_change = next_priority == cur_priority
+            && next_labels == current_labels
             && next_title == cur_title
             && next_body == cur_body
             && next_status == cur_status
@@ -1856,7 +2060,7 @@ impl Store {
         }
         tx.execute(
             "UPDATE tasks
-             SET title = ?1, body = ?2, status = ?3, version = version + 1, updated_ms = ?4
+             SET title = ?1, body = ?2, status = ?3, version = version + 1, updated_ms = ?4, priority = ?7
              WHERE id = ?5 AND version = ?6",
             params![
                 next_title,
@@ -1864,7 +2068,8 @@ impl Store {
                 next_status,
                 sqlite_now_ms(),
                 id as i64,
-                expect_version as i64
+                expect_version as i64,
+                next_priority
             ],
         )?;
         if tx.changes() != 1 {
@@ -1892,6 +2097,7 @@ impl Store {
             "version": new_version,
             "deps": Self::task_dependencies_from(&tx, id)?,
             "labels": next_labels,
+            "priority": next_priority,
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
@@ -2110,14 +2316,15 @@ impl Store {
                 );
                 validate_title_body(&who, &task.title, &task.body)?;
                 tx.execute(
-                    "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms)
-                     VALUES (?1,?2,?3,?4,1,?5,?5)",
+                    "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms,priority)
+                     VALUES (?1,?2,?3,?4,1,?5,?5,?6)",
                     params![
                         task.id,
                         task.title,
                         task.body,
                         task.status.to_string(),
-                        sqlite_now_ms()
+                        sqlite_now_ms(),
+                        task.priority.to_string()
                     ],
                 )?;
             }
@@ -2149,6 +2356,7 @@ impl Store {
                             "status": task.status.to_string(),
                             "version": 1,
                             "labels": task.labels,
+                            "priority": task.priority,
                             "deps": task.deps
                         })
                         .to_string()
@@ -2227,11 +2435,19 @@ impl Store {
         }
         drop(stmt);
         let mut export_labels = HashMap::new();
+        let mut export_priorities = HashMap::new();
         let mut count = 0usize;
         let mut sections = HashMap::<String, Vec<(u64, String, String, Vec<u64>, i64)>>::new();
         for (id, title, body, status, version) in all {
             count += 1;
             export_labels.insert(id as u64, crate::labels::read(&self.conn, id as u64)?);
+            export_priorities.insert(
+                id as u64,
+                self.conn
+                    .query_row("SELECT priority FROM tasks WHERE id=?1", [id], |r| {
+                        r.get::<_, String>(0)
+                    })?,
+            );
             let deps = Self::task_dependencies_from(&self.conn, id as u64)?;
             sections
                 .entry(status)
@@ -2269,6 +2485,9 @@ impl Store {
                     ));
                     if let Some(labels) = export_labels.get(&id).filter(|v| !v.is_empty()) {
                         out_text.push_str(&format!("Labels: {}\n", labels.join(", ")));
+                    }
+                    if let Some(priority) = export_priorities.get(&id) {
+                        out_text.push_str(&format!("Priority: {priority}\n"));
                     }
                     out_text.push_str("Body:\n");
                     out_text.push_str(&body);
@@ -2348,7 +2567,10 @@ impl Store {
             if current < 2 {
                 migrate_v1_to_v2(&tx)?;
             }
-            crate::labels::create_schema(&tx)?;
+            if current < 3 {
+                crate::labels::create_schema(&tx)?;
+            }
+            create_selection_schema(&tx)?;
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;
             let mut foreign_rows = tx.prepare("PRAGMA foreign_key_check")?;

@@ -7,6 +7,7 @@ pub struct RankedMatch {
     pub status: String,
     pub version: u64,
     pub title: String,
+    pub priority: String,
 }
 
 pub fn create_index(conn: &Connection) -> Result<(), AppError> {
@@ -53,7 +54,7 @@ pub fn search(
         })
         .collect::<Vec<_>>()
         .join(" AND ");
-    let mut stmt = conn.prepare("SELECT t.id,t.status,t.version,t.title FROM tasks_fts JOIN tasks t ON t.id=tasks_fts.rowid
+    let mut stmt = conn.prepare("SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks_fts JOIN tasks t ON t.id=tasks_fts.rowid
         WHERE tasks_fts MATCH ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label=?2))
         ORDER BY bm25(tasks_fts,10.0,1.0),t.id LIMIT ?3 OFFSET ?4")?;
     let rows = stmt.query_map(params![query, label, limit as i64, offset as i64], |r| {
@@ -62,6 +63,7 @@ pub fn search(
             status: r.get(1)?,
             version: r.get(2)?,
             title: r.get(3)?,
+            priority: r.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

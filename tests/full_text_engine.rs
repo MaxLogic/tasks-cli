@@ -16,7 +16,7 @@ impl Fixture {
             .tempdir()
             .unwrap();
         let conn = Connection::open(root.path().join("tasks.sqlite")).unwrap();
-        conn.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',version INTEGER NOT NULL DEFAULT 1); CREATE TABLE task_labels(task_id INTEGER NOT NULL,label TEXT NOT NULL,PRIMARY KEY(task_id,label));").unwrap();
+        conn.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',version INTEGER NOT NULL DEFAULT 1,priority TEXT NOT NULL DEFAULT 'P2'); CREATE TABLE task_labels(task_id INTEGER NOT NULL,label TEXT NOT NULL,PRIMARY KEY(task_id,label));").unwrap();
         if index {
             create_index(&conn).unwrap();
         }

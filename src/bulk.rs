@@ -1639,9 +1639,10 @@ fn verify_project(
                     }
                     if sorted_deps(&other.deps) != sorted_deps(&task.deps)
                         || other.labels != task.labels
+                        || other.priority != task.priority
                     {
                         mismatches.push(format!(
-                            "{name}: {id} dependencies or labels differ from the re-export"
+                            "{name}: {id} dependencies, labels or priority differ from the re-export"
                         ));
                     }
                 }
@@ -1666,9 +1667,10 @@ fn verify_project(
                     }
                     if sorted_deps(&detail.deps) != sorted_deps(&task.deps)
                         || detail.labels != task.labels
+                        || detail.priority != task.priority
                     {
                         mismatches.push(format!(
-                            "{name}: {id} dependencies or labels differ in the store"
+                            "{name}: {id} dependencies, labels or priority differ in the store"
                         ));
                     }
                 }

@@ -300,6 +300,7 @@ fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
         "--project",
         &project,
         "list",
+        "--open",
     ]);
     let list_text = String::from_utf8_lossy(&list.stdout).to_string();
     assert!(list_text.contains("T-001"));
