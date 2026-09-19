@@ -150,11 +150,14 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | --- | --- |
 | `init --root PATH` | Create project and return UUID/database path; existing binding is a no-op |
 | `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
-| `list [--status STATUS] [--label LABEL] [--after N] [--limit N]` | Default nonterminal tasks; numeric ID order; default 20, max 100 |
+| `list [--open | --needs-human] [--status STATUS] [--label LABEL] [--after CURSOR] [--limit N]` | Default runnable todo/in-progress; priority then ID; default 20, max 100 |
+| `unlocks [--offset N] [--limit N]` | Open prerequisites ranked by immediately runnable then direct open dependents |
+| `enrich [--file PATH]` | Enrich UTF-8 text task references; stdin by default, exact text to stdout |
+| `enrich-clipboard` | Enrich clipboard text and replace it after checking the original still matches |
 | `show T-N` | Full task, version, project rules and direct dependency summaries |
-| `search TEXT [--label LABEL] [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; same paging as list |
-| `create --title TEXT --body-file PATH` | Optional `--status`, default draft; allocate next ID atomically |
-| `update T-N --expect-version N ...` | At least one of title, body-file, status, labels or full dependency replacement |
+| `search TEXT [--label LABEL] [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; numeric ID cursor, same page limits |
+| `create --title TEXT --body-file PATH` | Optional `--status`, default draft; `--priority P0..P3`, default P2; allocate next ID atomically |
+| `update T-N --expect-version N ...` | At least one of title, body-file, status, priority, labels or full dependency replacement |
 | `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
@@ -168,7 +171,7 @@ Define `update --deps T-1,T-2` as complete replacement; `--clear-deps` means emp
 and omission preserves dependencies. They are mutually exclusive. The same
 optional dependency flags apply to create. Status values: draft, todo,
 in-progress, blocked, done, cancelled. All explicit status transitions are allowed;
-done/cancelled are terminal for default lists. No hard-delete command in v1.
+done/cancelled are terminal. Default lists additionally require readiness. No hard-delete command in v1.
 
 Schema 2 stores and emits canonical `draft` and `todo` names. Explicit migration
 from schema 1 changes `backlog` to `draft` and `ready` to `todo` atomically after
@@ -206,9 +209,61 @@ read limit+1 in SQL. `--after` conflicts with `--ranked`; `--prefix` and
 Search includes terminal states. Pages may shift after concurrent edits;
 no cross-command snapshot is promised.
 
+Schema 4 adds task `priority`, constrained to P0, P1, P2 or P3 (default P2),
+with priority/ID and status/priority/ID indexes. It participates in the same
+optimistic version check, no-op detection, event snapshot, import and export as
+other task fields. Old snapshots are unchanged. Explicit backed-up migration
+from schemas 0–3 supplies P2 without changing task versions or other records.
+
+Default list selects only todo/in-progress tasks without `needs-human`, and all
+prerequisites must be done. Cancelled prerequisites remain unsatisfied. `--open`
+selects every nonterminal task. `--needs-human` selects nonterminal tasks with
+that label. These flags conflict; explicit `--status` bypasses default readiness,
+while `--needs-human` still restricts to its nonterminal decision queue. Optional
+`--label` intersects the selected scope. No query changes task state.
+
+List order is priority then numeric ID. JSON `next_after` is a string such as
+`P2:T-123`; pass it unchanged to `--after`. Numeric list cursors are no longer
+accepted. Search/history keep their original cursor types. Priority changes
+between requests may move tasks; only a single request is snapshot-consistent.
+The older library `list_tasks` wrappers retain ID-paged open semantics; CLI
+selection uses `select_tasks`.
+
+`unlocks` returns bounded summary rows with `direct_open_dependents` and
+`immediately_runnable`. Include only nonterminal prerequisites and nonterminal
+dependents. A dependent is immediately runnable when todo/in-progress, without
+needs-human, and every other prerequisite is done. Count distinct dependency
+edges enforced by the composite key. Order by immediately runnable descending,
+direct count descending, priority then ID. Use `next_offset`/`--offset`, limits
+20/default and 100/max. This is direct impact, not transitive scoring or an
+authorization to close the prerequisite.
+
+Enrichment recognizes standalone uppercase T001 and T-001 spellings, preserving
+the original ID text. Append ` (current task title)` after every known reference,
+including terminal tasks, without inserting task bodies. Unknown IDs are left
+unchanged and reported on stderr (and `unknown_ids` in JSON). Invalid/out-of-range
+numbers remain untouched. Exact existing annotations are skipped, including IDs
+inside that annotation; arbitrary pre-existing prose is not deduplicated. Obvious
+URL/path components are skipped, but this is a plain-text transform, not a
+Markdown/code parser. Code blocks and link labels may therefore be enriched.
+Read requested ID/title pairs in batches under one read snapshot; release it
+before rendering. Limit input to 16 MiB, distinct valid IDs to 10,000 and output
+to 64 MiB; fail instead of truncating. Preserve Unicode, line endings and trailing
+newlines; `--file` never overwrites the input. Text output adds no banner. JSON
+uses command `enrich` with text, replacements, unknown_ids and clipboard.
+
+Clipboard support uses Windows PowerShell STA/System.Windows.Forms on Windows
+and WSL; native Linux uses wl-clipboard for Wayland or xclip for X11. Missing
+helpers/display/non-text input fail clearly. Use static command scripts and
+stdin data, never interpolate task text into shell code. Before replacing, check
+that clipboard text still equals the input; this is best-effort conflict detection,
+not atomic compare-and-swap. No-op enrichment does not rewrite the clipboard.
+Successful replacement publishes plain text, replacing other clipboard formats.
+WSL delegation runs this command wholly through tasks.exe for Windows-owned stores.
+
 List/search rows contain only ID, status, version, title (display bounded to 120
-Unicode characters), dependency IDs and normalized labels. Include `has_more` and `next_after`; read
-limit+1 rows, do not COUNT(*) on each request. `--after` is the numeric ID from the
+Unicode characters), priority, dependency IDs and normalized labels. Include `has_more` and `next_after`; read
+limit+1 rows, do not COUNT(*) on each request. For plain search, `--after` is the numeric ID from the
 last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
 concurrent edits can change later pages. Each list, search, show and export call
 reads its task rows, dependencies and rules within one deferred read transaction.
@@ -338,7 +393,7 @@ sections in import provenance, and expose the proposed rules in the preview.
 Do not infer dependencies from arbitrary T-N mentions; keep prose references.
 
 The canonical export metadata block is ordered `Status:`, `Version:`,
-`Depends on:`, optional `Labels:`, `Body:`; an optional `Title:` may precede it for compatible
+`Depends on:`, optional `Labels:`, optional `Priority:`, `Body:`; an optional `Title:` may precede it for compatible
 inputs. The importer consumes metadata only when that ordered block is present.
 For compatibility it also accepts the older ordered `Status:`, `Depends on:`,
 `Body:` form and an exact standalone `Body:` marker. `Body:` is a hard

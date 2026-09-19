@@ -1,6 +1,66 @@
 # tasks-cli verification report
 
-## Current verification: states, labels and ranked search — 2026-09-18
+## Current verification: selection, enrichment and development skills — 2026-09-19
+
+Schema 4 adds P0–P3 priority (default P2), runnable default listings, explicit
+open/human queues, priority cursors and direct unlock impact. Enrichment annotates
+every known reference, preserves unknown references and original whitespace,
+and supports stdin, files and the desktop clipboard. Development skill copies
+use tracked project identity across worktrees; installed skills remain unchanged.
+No live backlog was migrated and no executable was deployed.
+
+### Proof and limits
+
+- Windows and native Ubuntu/WSL passed `cargo fmt --check`,
+  `cargo clippy --locked --all-targets`, `cargo test --locked` and
+  `cargo build --release --locked`: **167 Windows / 169 Linux tests**, no
+  failures or ignored tests. The feature-enabled bulk rollback test passed
+  separately on both platforms. Six identity-wrapper tests passed on each OS.
+- Final logs are under `target/evidence/final-20260919/`: platform-prefixed
+  `*-fmt.log`, `*-clippy.log`, `*-test.log`, `*-build.log`, `*-bulk.log`
+  and `*-identity.log`. Linux used a separate target directory and Linux-owned
+  temporary stores. Initial failures from stale schema/default-list assertions
+  and a missing fixture priority column were corrected; `windows-initial.log`
+  preserves those failures.
+- Selection RED/GREEN is retained under `target/evidence/selection-20260919/`.
+  Enrichment core, CLI and output-limit RED/GREEN logs are under
+  `target/evidence/enrich-20260919/`. Additional migration and clipboard tests
+  were added after implementation; no independent RED is claimed for them.
+  `identity-red.log` and `identity-green.log` reproduce and fix literal option
+  text being mistaken for a routing override by the development helper.
+- The exact release Windows clipboard round trip passed, including Unicode,
+  repeated references and an unchanged second pass. The original clipboard
+  formats were restored (`clipboard-release.log`). Replacement produces plain
+  text and its changed-input check is best effort, not atomic compare-and-swap.
+  Native Wayland/X11 desktop clipboard behavior remains unverified.
+- PSScriptAnalyzer recorded one `PSAvoidUsingWriteHost` warning for deliberate
+  exact-byte `Console.Write` output; see `powershell-analysis.json`.
+- Real native and delegated release probes verified readiness, priority paging,
+  human selection, unlock counts, historical snapshots, optimistic conflict
+  refusal, and stdin/file enrichment. Delegation used the actual Linux and
+  Windows binaries, with only Windows opening the Windows-owned store.
+- Development skills passed static validation and executable helper checks.
+  Autonomous baseline/candidate skill evaluation remains uncompleted because
+  workers hit workspace-credit/thread limits. These checks do not establish
+  model-quality improvement or justify live skill deployment; see
+  [development evaluation](integration/evaluation.md).
+
+### Release smoke measurements
+
+The fixture contains only **three tasks**; these are startup/workflow smoke
+measurements, not large-backlog performance claims. Each operation used six
+warmups and twenty fresh-process samples, with nearest-rank p95 and no concurrent
+build. Large enrichment contained 20,000 references. Harness, samples and release
+hashes are in `workflow-proof.py` and `perf-{windows,linux,delegated}.json` in the
+final evidence directory.
+
+| Operation | Windows p95 ms | Linux p95 ms | Delegated p95 ms |
+| --- | ---: | ---: | ---: |
+| list | 26.3 | 71.6 | 131.4 |
+| unlocks | 35.4 | 62.9 | 130.8 |
+| enrich-large | 53.5 | 79.2 | 131.8 |
+
+## Previous checkpoint: states, labels and ranked search — 2026-09-18
 
 The approved states are `draft`, `todo`, `in-progress`, `blocked`, `done`, and
 `cancelled`. State migration was committed as `3e71089`. The subsequent labels

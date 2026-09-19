@@ -1,7 +1,8 @@
 # Proposed AI task workflow
 
-Status: states, labels and ranked word/prefix search are implemented. Other
-sections remain recommendations. No live skills or task ledgers have been switched. `spec.md` remains the current implementation contract.
+Status: states, labels, priority, selection, unlock queries and ranked search are
+implemented. Worktree identity and shared skills have development candidates in
+`integration/`; installed skills and live ledgers have not been switched. `spec.md` remains the current implementation contract.
 
 ## Keep the SQLite CLI
 
@@ -51,7 +52,7 @@ Include labels and priority in version checks, history, import/export and JSON.
 
 ## Queries
 
-Proposed examples, not currently supported commands:
+Implemented query examples:
 
 ```text
 tasks list
@@ -63,7 +64,7 @@ tasks list --status done
 tasks unlocks
 ```
 
-Default `list` should return `todo` and `in-progress` tasks whose prerequisites
+Default `list` returns `todo` and `in-progress` tasks whose prerequisites
 are all done, excluding `needs-human`. Order by priority and then stable task ID.
 Keep bounded results and pagination in SQL. `--open` explicitly includes every
 nonterminal state; `--needs-human` explicitly includes nonterminal drafts and
@@ -74,7 +75,7 @@ must remove the dependency with an explanation or explicitly decide that its
 requirement has been met. Dependency blockage is calculated from the graph;
 avoid requiring agents to maintain a second, manually synchronized blocked flag.
 
-`unlocks` should report open prerequisites, their direct open dependent count,
+`unlocks` reports open prerequisites, their direct open dependent count,
 and how many tasks would actually become runnable if each prerequisite finished.
 Sort by that immediately runnable count, then direct dependent count and priority.
 Count each dependent once. A task with another unmet prerequisite, a manual
@@ -127,7 +128,7 @@ version-checked update and event, preserving later history.
 
 Labels and SQLite FTS5 ranked word/prefix search are now implemented, with an
 index updated transactionally. Plain `search` preserves literal substring
-matching for identifiers and exact fragments. Priority queries remain proposed. FTS5 supports
+matching for identifiers and exact fragments. Priority queries are implemented. FTS5 supports
 ranking and tokenization, but is not semantic similarity or general typo
 correction. See the [SQLite FTS5 documentation](https://www.sqlite.org/fts5.html).
 
