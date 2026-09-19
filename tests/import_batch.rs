@@ -117,6 +117,26 @@ fn cross_source_duplicates_fail_and_the_empty_store_check_runs_once() {
 }
 
 #[test]
+fn duplicate_source_hashes_are_rejected_before_multi_import_mutation() {
+    let bytes = b"## Rules\nsame rules\n";
+    let first = markdown::parse("TASKS.md", bytes.to_vec(), None).expect("first parse");
+    let second = markdown::parse("TASKS.ARCHIVE.md", bytes.to_vec(), None).expect("second parse");
+    let hash = first.source_hash.clone();
+    assert_eq!(hash, second.source_hash);
+    let (_root, mut store) = store();
+    let error = store
+        .import_apply_many(vec![first, second], &[hash.clone(), hash])
+        .expect_err("duplicate incoming source hashes");
+    assert!(error.to_string().contains("TASKS.md"), "{error}");
+    assert!(error.to_string().contains("TASKS.ARCHIVE.md"), "{error}");
+    assert!(store
+        .list_tasks(None, None, 20)
+        .expect("list")
+        .items
+        .is_empty());
+}
+
+#[test]
 fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
     let work = tempfile::tempdir().expect("work");
     let data_root = work.path().join("data");
@@ -274,6 +294,26 @@ fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
         String::from_utf8_lossy(&repeat.stderr)
     );
     assert!(String::from_utf8_lossy(&repeat.stdout).contains("already_imported: true"));
+
+    let repeat_preview = run(&[
+        "--data-root",
+        data_root.to_str().unwrap(),
+        "--project",
+        &project,
+        "import",
+        "--file",
+        a_path.to_str().unwrap(),
+        "--file",
+        b_path.to_str().unwrap(),
+    ]);
+    assert!(
+        repeat_preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeat_preview.stderr)
+    );
+    let repeat_preview_text = String::from_utf8_lossy(&repeat_preview.stdout);
+    assert!(repeat_preview_text.contains("already_imported: true"));
+    assert!(!repeat_preview_text.contains("applied: true"));
 
     let mixed = run(&[
         "--data-root",

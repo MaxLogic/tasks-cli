@@ -1,6 +1,7 @@
 //! One test per error class: every message must name what failed, what was
 //! found, and what to do next.
 
+use serde_json::Value;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -280,7 +281,7 @@ fn validation_errors_name_the_file_the_line_and_the_task() {
     let ledger = temp.path().join("TASKS.md");
     fs::write(&ledger, "## backlog\n### T-001\nbody\n").expect("ledger");
     let project_text = project.to_string();
-    let output = run(
+    let preview = run(
         &[
             "--format=json",
             "--data-root",
@@ -293,16 +294,74 @@ fn validation_errors_name_the_file_the_line_and_the_task() {
         ],
         None,
     );
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(error_code(&output), "validation");
-    let message = error_message(&output);
-    assert!(
-        message.contains(ledger.to_str().expect("UTF-8 ledger")),
-        "{message}"
+    assert_eq!(
+        preview.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
     );
-    assert!(message.contains(":2:"), "{message}");
-    assert!(message.contains("T-001"), "{message}");
-    assert!(message.contains("has no title"), "{message}");
+    let preview_json: Value = serde_json::from_slice(&preview.stdout).expect("preview JSON");
+    let problems = preview_json["data"]["problems"]
+        .as_array()
+        .expect("structured preview problems");
+    assert!(!problems.is_empty(), "{preview_json}");
+    let title_problem = problems
+        .iter()
+        .find(|problem| {
+            problem["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("has no title")
+        })
+        .expect("empty-title diagnostic");
+    assert_eq!(title_problem["file"].as_str(), ledger.to_str());
+    assert_eq!(title_problem["line"].as_u64(), Some(2));
+    assert_eq!(title_problem["task_id"].as_u64(), Some(1));
+    assert_eq!(
+        title_problem["fix"].as_str(),
+        Some("write a non-empty title for T-001")
+    );
+    let preview_messages = problems
+        .iter()
+        .map(|problem| problem["message"].as_str().expect("problem message"))
+        .collect::<Vec<_>>();
+
+    let source_hash = tasks_cli::markdown::sha256(&fs::read(&ledger).expect("ledger bytes"));
+    let apply = run(
+        &[
+            "--format=json",
+            "--data-root",
+            temp.path().to_str().expect("UTF-8 root"),
+            "--project",
+            &project_text,
+            "import",
+            "--file",
+            ledger.to_str().expect("UTF-8 ledger"),
+            "--apply",
+            "--expect-sha256",
+            &source_hash,
+        ],
+        None,
+    );
+    assert_eq!(apply.status.code(), Some(2));
+    assert_eq!(error_code(&apply), "validation");
+    let apply_message = error_message(&apply);
+    for message in preview_messages {
+        assert!(apply_message.contains(message), "{apply_message}");
+    }
+
+    let mut store = tasks_cli::store::Store::open_readonly(temp.path(), &project_text)
+        .expect("database remains readable");
+    assert!(store
+        .list_tasks(None, None, 20)
+        .expect("list tasks")
+        .items
+        .is_empty());
+    let provenance_count: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM imports", [], |row| row.get(0))
+        .expect("provenance count");
+    assert_eq!(provenance_count, 0);
 }
 
 #[test]

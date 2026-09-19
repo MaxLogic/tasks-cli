@@ -85,6 +85,24 @@ fn absolute_path(path: &Path) -> Result<PathBuf, AppError> {
     }
 }
 
+fn nearest_existing_path(path: &Path) -> Result<PathBuf, AppError> {
+    let mut existing = path.to_path_buf();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => return Ok(existing),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !existing.pop() {
+                    return Err(AppError::InvalidPath(format!(
+                        "storage path {} has no existing ancestor; pass an absolute path below an accessible local disk",
+                        path.display()
+                    )));
+                }
+            }
+            Err(error) => return Err(AppError::io_path("inspect storage path", &existing, error)),
+        }
+    }
+}
+
 fn has_linux_windows_mount(path: &Path) -> bool {
     let text = path.to_string_lossy().replace('\\', "/");
     let components = text
@@ -149,6 +167,20 @@ pub fn validate_storage_root_for(
     root: &Path,
     platform: StoragePlatform,
 ) -> Result<PathBuf, AppError> {
+    let absolute = validate_storage_location_for(root, platform)?;
+    if absolute.exists() && !absolute.is_dir() {
+        return Err(AppError::InvalidPath(format!(
+            "storage root {} exists but is not a directory; choose a directory path",
+            absolute.display()
+        )));
+    }
+    Ok(absolute)
+}
+
+fn validate_storage_location_for(
+    root: &Path,
+    platform: StoragePlatform,
+) -> Result<PathBuf, AppError> {
     let root_text = root.to_string_lossy();
     let absolute = match platform {
         StoragePlatform::Windows => {
@@ -181,12 +213,6 @@ pub fn validate_storage_root_for(
             },
         )));
     }
-    if absolute.exists() && !absolute.is_dir() {
-        return Err(AppError::InvalidPath(format!(
-            "storage root {} exists but is not a directory; choose a directory path",
-            absolute.display()
-        )));
-    }
     Ok(absolute)
 }
 
@@ -198,32 +224,53 @@ pub fn validate_storage_root(root: &Path) -> Result<PathBuf, AppError> {
         StoragePlatform::Linux
     };
     let validated = validate_storage_root_for(&absolute, platform)?;
-    let mut existing = validated.clone();
-    while !existing.exists() {
-        if !existing.pop() {
-            break;
-        }
-    }
-    if let Ok(canonical) = existing.canonicalize() {
-        validate_storage_root_for(&canonical, platform)?;
-        #[cfg(target_os = "linux")]
-        {
-            let mounts = std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
-                AppError::io_path(
-                    "read filesystem ownership",
-                    Path::new("/proc/self/mountinfo"),
-                    error,
-                )
-            })?;
-            if windows_or_remote_mount(&canonical, &mounts) {
-                return Err(AppError::InvalidPath(format!(
-                    "storage root {} is on a Windows or remote filesystem; use Linux-owned storage or delegate to tasks.exe",
-                    validated.display()
-                )));
-            }
-        }
-    }
+    validate_storage_path_for(&validated, platform)?;
     Ok(validated)
+}
+
+fn validate_storage_path_for(path: &Path, platform: StoragePlatform) -> Result<(), AppError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        absolute_path(path)?
+    };
+    validate_storage_location_for(&absolute, platform)?;
+    let existing = nearest_existing_path(&absolute)?;
+    let canonical = existing
+        .canonicalize()
+        .map_err(|error| AppError::io_path("resolve filesystem ownership", &existing, error))?;
+    validate_storage_location_for(&canonical, platform)?;
+    #[cfg(target_os = "linux")]
+    if platform == StoragePlatform::Linux {
+        let mounts = std::fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+            AppError::io_path(
+                "read filesystem ownership",
+                Path::new("/proc/self/mountinfo"),
+                error,
+            )
+        })?;
+        if windows_or_remote_mount(&canonical, &mounts) {
+            return Err(AppError::InvalidPath(format!(
+                "storage path {} is on a Windows or remote filesystem; use Linux-owned storage or delegate to tasks.exe",
+                absolute.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the actual target path before opening or creating a database.
+/// Existing files and directories are canonicalized so local same-OS links
+/// work while links into a Windows, UNC, or remote mount fail closed.  For a
+/// new path, the nearest existing ancestor is checked because that is where
+/// the operating system will create the descendant.
+pub fn validate_storage_path(path: &Path) -> Result<(), AppError> {
+    let platform = if cfg!(windows) {
+        StoragePlatform::Windows
+    } else {
+        StoragePlatform::Linux
+    };
+    validate_storage_path_for(path, platform)
 }
 
 #[cfg(test)]

@@ -6,7 +6,9 @@ use crate::model::{
     TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES, ID_PREFIX, MAX_DEPENDENCIES,
     RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
-use crate::storage::{acquire_exclusive_lock, validate_storage_root, ExclusiveLock};
+use crate::storage::{
+    acquire_exclusive_lock, validate_storage_path, validate_storage_root, ExclusiveLock,
+};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -50,6 +52,10 @@ pub fn data_root_project_path(data_root: &Path, project_id: &str) -> PathBuf {
 pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInfo, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
+    // Check the actual database target before creating any descendant.  The
+    // project directory may be a local symlink or a mount below an otherwise
+    // valid data root.
+    validate_storage_path(&db_path)?;
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| AppError::io_path("create the project directory", parent, error))?;
@@ -403,7 +409,8 @@ fn migrate_v0_to_v1(
         ensure_column(tx, "tasks", "created_ms", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_column(tx, "tasks", "updated_ms", "INTEGER NOT NULL DEFAULT 0")?;
     }
-    if !table_exists(tx, "dependencies")? {
+    let had_legacy_dependencies = table_exists(tx, "dependencies")?;
+    if !had_legacy_dependencies {
         tx.execute_batch(
             "CREATE TABLE dependencies(
                 task_id INTEGER NOT NULL,
@@ -491,10 +498,39 @@ fn migrate_v0_to_v1(
         dependency_edges.push(row?);
     }
     drop(dependency_rows);
-    for (task_id, depends_on_id) in dependency_edges {
-        if task_id <= 0 || depends_on_id <= 0 {
+    let mut seen_dependencies = HashSet::new();
+    let mut dependency_counts = HashMap::<i64, usize>::new();
+    for (task_id, depends_on_id) in &dependency_edges {
+        if !seen_dependencies.insert((*task_id, *depends_on_id)) {
+            return Err(AppError::Database(format!(
+                "{}: legacy dependencies contains duplicate edge (T-{task_id:03}, T-{depends_on_id:03}); restore the database from a backup",
+                db_path.display()
+            )));
+        }
+        let count = dependency_counts.entry(*task_id).or_default();
+        *count += 1;
+        if *count > MAX_DEPENDENCIES {
+            return Err(AppError::Database(format!(
+                "{}: legacy task T-{task_id:03} has more than {MAX_DEPENDENCIES} dependencies; restore the database from a backup",
+                db_path.display()
+            )));
+        }
+    }
+    for (task_id, depends_on_id) in &dependency_edges {
+        if *task_id <= 0 || *depends_on_id <= 0 {
             return Err(AppError::Database(format!(
                 "{}: legacy dependencies row ({task_id}, {depends_on_id}) contains a non-positive task id; restore the database from a backup",
+                db_path.display()
+            )));
+        }
+        let source_exists: i64 = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        if source_exists == 0 {
+            return Err(AppError::Database(format!(
+                "{}: legacy dependency source T-{task_id:03} does not exist; restore the database from a backup",
                 db_path.display()
             )));
         }
@@ -506,6 +542,12 @@ fn migrate_v0_to_v1(
         if exists == 0 {
             return Err(AppError::Database(format!(
                 "{}: legacy dependency T-{task_id:03} references T-{depends_on_id:03}, which does not exist; restore the database from a backup",
+                db_path.display()
+            )));
+        }
+        if task_id == depends_on_id {
+            return Err(AppError::Database(format!(
+                "{}: legacy dependency T-{task_id:03} depends on itself; restore the database from a backup",
                 db_path.display()
             )));
         }
@@ -537,6 +579,30 @@ fn migrate_v0_to_v1(
             db_path.display()
         )));
     }
+
+    // A v0 database may have created `dependencies` without the composite
+    // primary key or foreign keys.  Rebuild it even when the columns look
+    // compatible so the accepted legacy data has the same invariants as a
+    // fresh store.  The caller owns the surrounding transaction, therefore a
+    // failed rebuild or validation rolls back the original table unchanged.
+    if had_legacy_dependencies {
+        tx.execute_batch(
+            "CREATE TABLE dependencies_v1(
+                task_id INTEGER NOT NULL,
+                depends_on_id INTEGER NOT NULL,
+                PRIMARY KEY(task_id, depends_on_id),
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                FOREIGN KEY(depends_on_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            INSERT INTO dependencies_v1(task_id, depends_on_id)
+                SELECT task_id, depends_on_id FROM dependencies;
+            DROP TABLE dependencies;
+            ALTER TABLE dependencies_v1 RENAME TO dependencies;",
+        )?;
+    }
+    tx.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_id ON dependencies(depends_on_id);",
+    )?;
 
     let project_count: i64 = tx.query_row("SELECT COUNT(*) FROM project", [], |row| row.get(0))?;
     if project_count > 1 {
@@ -826,13 +892,7 @@ fn validate_backup(
 }
 
 fn remove_backup_sidecars(path: &Path) -> Result<(), AppError> {
-    let Some(file_name) = path.file_name() else {
-        return Ok(());
-    };
-    for suffix in ["-wal", "-shm"] {
-        let mut sidecar_name = OsString::from(file_name);
-        sidecar_name.push(suffix);
-        let sidecar = path.with_file_name(sidecar_name);
+    for sidecar in backup_sidecars(path) {
         match fs::remove_file(&sidecar) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -843,6 +903,40 @@ fn remove_backup_sidecars(path: &Path) -> Result<(), AppError> {
                     error,
                 ))
             }
+        }
+    }
+    Ok(())
+}
+
+fn backup_sidecars(path: &Path) -> [PathBuf; 2] {
+    let Some(file_name) = path.file_name() else {
+        return [PathBuf::new(), PathBuf::new()];
+    };
+    ["-wal", "-shm"].map(|suffix| {
+        let mut sidecar_name = OsString::from(file_name);
+        sidecar_name.push(suffix);
+        path.with_file_name(sidecar_name)
+    })
+}
+
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn refuse_existing_backup_destination(out: &Path) -> Result<(), AppError> {
+    if path_entry_exists(out) {
+        return Err(AppError::Usage(format!(
+            "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
+            out.display()
+        )));
+    }
+    for sidecar in backup_sidecars(out) {
+        if !sidecar.as_os_str().is_empty() && path_entry_exists(&sidecar) {
+            return Err(AppError::Usage(format!(
+                "refusing to publish {}: its SQLite sidecar {} already exists; choose a different --out path or move the existing sidecar",
+                out.display(),
+                sidecar.display()
+            )));
         }
     }
     Ok(())
@@ -866,12 +960,7 @@ fn publish_backup(
     let out = out.to_path_buf();
     let parent = out.parent().unwrap_or_else(|| Path::new("."));
     validate_storage_root(parent)?;
-    if out.exists() {
-        return Err(AppError::Usage(format!(
-            "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
-            out.display()
-        )));
-    }
+    refuse_existing_backup_destination(&out)?;
     let name = out
         .file_name()
         .and_then(|name| name.to_str())
@@ -900,6 +989,10 @@ fn publish_backup(
         )?;
         validate_backup(&temp, expected_project, expected_schema)?;
         remove_backup_sidecars(&temp)?;
+        // A destination sidecar may have appeared while SQLite produced and
+        // validated the temporary backup.  Refuse publication while keeping
+        // that unrelated sidecar untouched.
+        refuse_existing_backup_destination(&out)?;
         match std::fs::hard_link(&temp, &out) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -910,7 +1003,6 @@ fn publish_backup(
             }
             Err(error) => return Err(AppError::io_path("publish the backup", &out, error)),
         }
-        remove_backup_sidecars(&out)?;
         Ok(std::fs::metadata(&out)
             .map_err(|error| AppError::io_path("read the backup size", &out, error))?
             .len())
@@ -961,6 +1053,7 @@ fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid), A
         ))
     })?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
+    validate_storage_path(&db_path)?;
     if !db_path.is_file() {
         return Err(AppError::NotFoundCode(format!(
             "project {project} has no database at {}; run tasks init --root <dir> to create and bind a project, or pass an existing --project <UUID>",
@@ -2458,9 +2551,10 @@ impl Store {
         let mut out_text = String::new();
         out_text.push_str("# Task Backlog\n\n");
         out_text.push_str("> Snapshot export; the SQLite database is the recovery authority.\n\n");
+        out_text.push_str("Task schema: 1\n\n");
         out_text.push_str(&format!("Project: {}\n\n", self.project_id));
         out_text.push_str("## Rules\n\n");
-        out_text.push_str(&rules.body);
+        append_canonical_frame(&mut out_text, "rules", &rules.body);
         out_text.push_str("\n\n");
         for status in [
             "draft",
@@ -2490,10 +2584,7 @@ impl Store {
                         out_text.push_str(&format!("Priority: {priority}\n"));
                     }
                     out_text.push_str("Body:\n");
-                    out_text.push_str(&body);
-                    if !body.ends_with('\n') {
-                        out_text.push('\n');
-                    }
+                    append_canonical_frame(&mut out_text, "body", &body);
                     out_text.push('\n');
                 }
             }
@@ -2652,6 +2743,21 @@ impl Store {
             sqlite_version,
         ))
     }
+}
+
+fn append_canonical_frame(output: &mut String, kind: &str, content: &str) {
+    let digest = crate::markdown::sha256(content.as_bytes());
+    output.push_str(&format!(
+        "<!-- tasks-cli:canonical-v1:{kind} bytes={} sha256={digest} -->\n",
+        content.len()
+    ));
+    output.push_str(content);
+    if !content.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "<!-- tasks-cli:canonical-v1:end-{kind} sha256={digest} -->\n"
+    ));
 }
 
 #[cfg(test)]

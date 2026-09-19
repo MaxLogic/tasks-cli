@@ -696,6 +696,80 @@ fn apply_quarantines_sources_and_the_manifest_hashes_match() {
 }
 
 #[test]
+fn report_directory_collisions_are_rejected_before_bulk_apply() {
+    let temp = tempfile::tempdir().expect("temp");
+    let corpus = temp.path().join("corpus");
+    let source = corpus.join("alpha").join("TASKS.md");
+    write(&source, "## ready\n### T-1 Alpha\nbody\n");
+    let map = temp.path().join("map.json");
+    write(&map, "{}");
+    let report_dir = temp.path().join("reports");
+    fs::create_dir_all(report_dir.join("summary.md")).expect("summary collision");
+    let data_root = temp.path().join("data");
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--apply",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("summary.md"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(source.exists(), "report collision moved the source");
+    assert!(
+        !data_root.exists(),
+        "report collision created the data root"
+    );
+}
+
+#[test]
+fn existing_quarantine_manifest_is_preserved_and_blocks_apply() {
+    let temp = tempfile::tempdir().expect("temp");
+    let corpus = temp.path().join("corpus");
+    let source = corpus.join("alpha").join("TASKS.md");
+    write(&source, "## ready\n### T-1 Alpha\nbody\n");
+    let map = temp.path().join("map.json");
+    write(&map, "{}");
+    let report_dir = temp.path().join("reports");
+    fs::create_dir_all(&report_dir).expect("report dir");
+    let manifest = report_dir.join("quarantine-manifest.json");
+    let original = br#"{"audit":"keep me"}"#;
+    fs::write(&manifest, original).expect("existing manifest");
+    let data_root = temp.path().join("data");
+    let quarantine = temp.path().join("quarantine");
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--apply",
+        "--quarantine-dir",
+        &string_arg(&quarantine),
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(source.exists(), "manifest collision moved the source");
+    assert!(
+        !data_root.exists(),
+        "manifest collision created the data root"
+    );
+    assert_eq!(fs::read(&manifest).expect("manifest bytes"), original);
+}
+
+#[test]
 fn delete_quarantined_requires_apply_and_removes_the_copies() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
@@ -1648,4 +1722,35 @@ fn allow_partial_applies_only_the_clean_candidates() {
 
     let mut store = tasks_cli::store::Store::open_readonly(&data_root, good_id).expect("store");
     assert_eq!(store.show_task("T-1").expect("T-1").title, "Alpha");
+}
+
+#[test]
+fn strict_bulk_apply_rejects_duplicate_source_hashes_before_creating_a_project() {
+    let temp = tempfile::tempdir().expect("temp");
+    let corpus = temp.path().join("corpus");
+    let bytes = "## Rules\nsame rules\n";
+    write(&corpus.join("dupe").join("TASKS.md"), bytes);
+    write(&corpus.join("dupe").join("TASKS.ARCHIVE.md"), bytes);
+    let map = temp.path().join("map.json");
+    write(&map, r#"{"sections":{"ready":"ready"}}"#);
+    let report_dir = temp.path().join("reports");
+    let data_root = temp.path().join("data");
+    let output = run(&[
+        "--data-root",
+        &string_arg(&data_root),
+        "bulk-import",
+        "--scan-root",
+        &string_arg(&corpus),
+        "--map-file",
+        &string_arg(&map),
+        "--report-dir",
+        &string_arg(&report_dir),
+        "--apply",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("source SHA-256"), "{text}");
+    assert!(!data_root.exists(), "strict duplicate refusal created data");
+    assert!(corpus.join("dupe").join("TASKS.md").exists());
+    assert!(corpus.join("dupe").join("TASKS.ARCHIVE.md").exists());
 }

@@ -209,6 +209,138 @@ fn exported_tasks_round_trip_metadata_like_body_prefixes() {
 }
 
 #[test]
+fn canonical_export_frames_headings_in_bodies_and_rules() {
+    let (root, mut store) = store();
+    let body = "before\r\n## Notes\r\n### T-999 invented\r\nStatus: bogus\r\nafter Ω";
+    let rules = "shared\r\n## Rules example\r\n### T-998 prose\r\nend";
+    store.rules_set(rules, 1).expect("set shared rules");
+    store
+        .create_task("framed", body, TaskStatus::Ready, Vec::new())
+        .expect("create task");
+
+    let first = root.path().join("canonical-1.md");
+    let second = root.path().join("canonical-2.md");
+    store.export_markdown(&first).expect("first export");
+    store.export_markdown(&second).expect("second export");
+    assert_eq!(
+        fs::read(&first).expect("first bytes"),
+        fs::read(&second).expect("second bytes")
+    );
+
+    let parsed = markdown::parse(
+        "canonical.md",
+        fs::read(&first).expect("export bytes"),
+        None,
+    )
+    .expect("reparse canonical export");
+    assert!(parsed.has_schema_marker);
+    assert_eq!(parsed.tasks.len(), 1);
+    assert_eq!(parsed.tasks[0].body, body);
+    assert_eq!(parsed.rules, rules);
+    assert!(!parsed.has_unknown_content);
+}
+
+#[test]
+fn canonical_frames_preserve_raw_rules_through_apply_and_export() {
+    let (root, mut source_store) = store();
+    let rules = "\r\n  leading\r\n## Rules example\r\n### T-998 prose\r\n\r\n   \r\ntrailing\r\n";
+    source_store.rules_set(rules, 1).expect("set rules");
+    source_store
+        .create_task(
+            "framed whitespace",
+            "body\r\n\r\n   \r\n",
+            TaskStatus::Ready,
+            Vec::new(),
+        )
+        .expect("create task");
+    let export = root.path().join("raw-rules.md");
+    source_store.export_markdown(&export).expect("export");
+    let bytes = fs::read(&export).expect("read export");
+    let parsed = markdown::parse("raw-rules.md", bytes, None).expect("parse export");
+    assert!(parsed.has_canonical_rules_frame);
+    assert_eq!(parsed.rules, rules);
+
+    let (_target_root, mut target_store) = store();
+    let hash = parsed.source_hash.clone();
+    target_store
+        .import_apply(parsed, Some(&hash))
+        .expect("apply export");
+    assert_eq!(target_store.rules_show().expect("show rules").body, rules);
+}
+
+#[test]
+fn canonical_body_rejects_content_after_the_end_frame() {
+    let (root, mut store) = store();
+    store
+        .create_task("framed", "body", TaskStatus::Ready, Vec::new())
+        .expect("create task");
+    let export = root.path().join("trailing.md");
+    store.export_markdown(&export).expect("export");
+    let mut bytes = fs::read(&export).expect("read export");
+    bytes.extend_from_slice(b"unframed trailing text\n");
+    let parsed = markdown::parse("trailing.md", bytes, None).expect("parse");
+    let refs = [&parsed];
+    let problems = tasks_cli::problems::analyze(&refs);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.message.contains("followed by unframed content")),
+        "{problems:#?}"
+    );
+    assert_eq!(parsed.tasks.len(), 1);
+}
+
+#[test]
+fn malformed_canonical_frame_is_a_blocking_problem() {
+    let source = b"# Task Backlog\nTask schema: 1\n## ready\n### T-1 One\nStatus: todo\nVersion: 1\nDepends on: -\nBody:\n<!-- tasks-cli:canonical-v1:body bytes=4 sha256=0000000000000000000000000000000000000000000000000000000000000000 -->\nbody\n<!-- tasks-cli:canonical-v1:end-body sha256=0000000000000000000000000000000000000000000000000000000000000000 -->\n";
+    let parsed = markdown::parse("broken.md", source.to_vec(), None).expect("parse");
+    assert_eq!(
+        parsed.tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![1]
+    );
+    let refs = [&parsed];
+    let problems = tasks_cli::problems::analyze(&refs);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.message.contains("malformed canonical body frame")),
+        "{problems:#?}"
+    );
+}
+
+#[test]
+fn schema_marker_requires_exact_supported_value() {
+    for marker in [
+        "Task schema: 1 suffix",
+        "Task schema: 10",
+        "Task schema: 100",
+    ] {
+        let source = format!("# Task Backlog\n{marker}\n## ready\n### T-1 One\nbody\n");
+        let parsed = markdown::parse("schema.md", source.into_bytes(), None).expect("parse");
+        assert!(!parsed.has_schema_marker, "{marker}");
+        assert!(parsed.has_unknown_content, "{marker}");
+    }
+}
+
+#[test]
+fn metadata_problems_accumulate_across_tasks() {
+    let source = b"## ready\n### T-1 First\nStatus: bogus\nVersion: 1\nDepends on: -\nBody:\nfirst\n### T-2 Second\nStatus: todo\nVersion: 1\nDepends on: T-999\nBody:\nsecond\n";
+    let parsed = markdown::parse("diagnostics.md", source.to_vec(), None).expect("parse");
+    assert_eq!(parsed.tasks.len(), 2);
+    let refs = [&parsed];
+    let problems = tasks_cli::problems::analyze(&refs);
+    assert!(
+        problems.iter().any(|problem| problem.task_id == Some(1)),
+        "{problems:#?}"
+    );
+    assert!(
+        problems.iter().any(|problem| problem.task_id == Some(2)
+            && problem.kind == tasks_cli::model::PROBLEM_UNKNOWN_DEPENDENCY),
+        "{problems:#?}"
+    );
+}
+
+#[test]
 fn tasks_without_a_section_are_unmapped_and_cannot_apply() {
     let source = b"# Tasks\n### T-1 No section\nbody\n".to_vec();
     let parsed = markdown::parse("sectionless.md", source, None).expect("parse");
@@ -222,6 +354,34 @@ fn tasks_without_a_section_are_unmapped_and_cannot_apply() {
         .expect("list")
         .items
         .is_empty());
+}
+
+#[test]
+fn sectionless_tasks_require_a_literal_mapping() {
+    let root = tempfile::tempdir().expect("mapping directory");
+    let default_map = root.path().join("default.json");
+    fs::write(&default_map, r#"{"default_status":"done"}"#).expect("default map");
+    let pattern_map = root.path().join("pattern.json");
+    fs::write(
+        &pattern_map,
+        r#"{"section_patterns":[{"pattern":".*","status":"done"}]}"#,
+    )
+    .expect("pattern map");
+    let source = b"# Tasks\n### T-1 No section\nbody\n".to_vec();
+    for map in [&default_map, &pattern_map] {
+        let parsed = markdown::parse("sectionless.md", source.clone(), Some(map)).expect("parse");
+        assert_eq!(parsed.unmapped_sections, vec!["<no section>"], "{map:?}");
+        assert_eq!(parsed.task_previews[0].status, TaskStatus::Backlog);
+    }
+    let literal_map = root.path().join("literal.json");
+    fs::write(
+        &literal_map,
+        r#"{"sections":{"<no section>":"ready"},"default_status":"done"}"#,
+    )
+    .expect("literal map");
+    let parsed = markdown::parse("sectionless.md", source, Some(&literal_map)).expect("parse");
+    assert!(parsed.unmapped_sections.is_empty());
+    assert_eq!(parsed.task_previews[0].status, TaskStatus::Ready);
 }
 
 #[test]

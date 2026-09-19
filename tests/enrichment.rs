@@ -77,6 +77,24 @@ fn does_not_rewrite_obvious_urls_or_read_titles_from_inserted_text() {
 }
 
 #[test]
+fn unknown_ids_inside_existing_annotations_do_not_hide_outside_unknowns() {
+    let (_root, store) = fixture();
+    store
+        .conn
+        .execute("UPDATE tasks SET title='See T999' WHERE id=1", [])
+        .unwrap();
+    let protected = enrich::enrich(&store.conn, "T1 (See T999)").unwrap();
+    assert_eq!(protected.text, "T1 (See T999)");
+    assert_eq!(protected.replacements, 0);
+    assert!(protected.unknown_ids.is_empty(), "{protected:?}");
+    let input = "T1 (See T999) and T999";
+    let result = enrich::enrich(&store.conn, input).unwrap();
+    assert_eq!(result.text, input);
+    assert_eq!(result.replacements, 0);
+    assert_eq!(result.unknown_ids, vec![999]);
+}
+
+#[test]
 fn refuses_excessive_title_expansion_without_partial_output() {
     let (_root, store) = fixture();
     store

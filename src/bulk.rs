@@ -5,7 +5,7 @@ use crate::problems;
 use crate::registry;
 use crate::store::Store;
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -154,17 +154,18 @@ pub struct BulkCandidate {
     pub ledger_references: Vec<LedgerReferenceRecord>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestEntry {
     pub project_id: String,
     pub original_path: String,
     pub size: u64,
     pub sha256: String,
     pub destination: String,
+    pub status: String,
     pub deleted: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct QuarantineManifest {
     pub format_version: u32,
     pub scan_root: String,
@@ -267,6 +268,7 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
     let report_dir = options.report_dir.clone();
     fs::create_dir_all(&report_dir)
         .map_err(|error| AppError::io_path("create --report-dir", &report_dir, error))?;
+    preflight_report_destinations(&report_dir, &options)?;
     let probe = report_dir.join(format!(".tasks-cli-write-probe-{}", std::process::id()));
     fs::write(&probe, b"tasks-cli bulk-import write probe")
         .map_err(|error| AppError::io_path("write the report-dir probe file", &probe, error))?;
@@ -319,13 +321,50 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         if any_unrecognized && !options.allow_partial {
             strict_refusal = Some(strict_refusal_message(&staged, &report_dir));
         } else {
+            let export_dir = report_dir.join(EXPORT_DIR);
+            for (index, ((dir, _), (_, outcome))) in inputs.iter().zip(staged.iter()).enumerate() {
+                if outcome.bucket != BUCKET_RECOGNIZED
+                    && outcome.bucket != BUCKET_RECOGNIZED_WITH_WARNINGS
+                {
+                    continue;
+                }
+                let export_path = export_dir.join(format!(
+                    "{:03}-{}.md",
+                    index + 1,
+                    export_slug(&display_relative(&scan_root, dir))
+                ));
+                if path_entry_exists(&export_path) {
+                    return Err(AppError::Usage(format!(
+                        "bulk-import refuses to overwrite verification export {}; choose a new --report-dir or move the existing export",
+                        export_path.display()
+                    )));
+                }
+            }
+            if let Some(quarantine_dir) = options.quarantine_dir.as_ref() {
+                preflight_quarantine_destinations(&scan_root, quarantine_dir, &staged)?;
+                write_quarantine_manifest(
+                    &report_dir.join(MANIFEST_JSON),
+                    &scan_root,
+                    &options,
+                    &manifest,
+                )?;
+            }
             for (index, (dir, _input)) in inputs.iter().enumerate() {
                 let (project_id, outcome) = &mut staged[index];
                 if outcome.bucket == BUCKET_RECOGNIZED
                     || outcome.bucket == BUCKET_RECOGNIZED_WITH_WARNINGS
                 {
                     let project_id = project_id.clone();
-                    apply_candidate(index, dir, &scan_root, &project_id, outcome, &options, &map)?;
+                    apply_candidate(
+                        index,
+                        dir,
+                        &scan_root,
+                        &project_id,
+                        outcome,
+                        &options,
+                        &map,
+                        &mut manifest,
+                    )?;
                 }
             }
         }
@@ -338,7 +377,6 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         {
             failed += 1;
         }
-        manifest.extend(outcome.manifest);
         candidates.push(BulkCandidate {
             directory: dir.display().to_string(),
             relative_directory: display_relative(&scan_root, dir),
@@ -515,21 +553,7 @@ fn write_reports(
 
     let manifest_path = if options.apply && options.quarantine_dir.is_some() {
         let path = report_dir.join(MANIFEST_JSON);
-        let document = QuarantineManifest {
-            format_version: 1,
-            scan_root: scan_root.display().to_string(),
-            data_root: options.data_root.display().to_string(),
-            quarantine_dir: options
-                .quarantine_dir
-                .as_ref()
-                .map(|dir| absolute_path(dir).display().to_string())
-                .unwrap_or_default(),
-            apply: options.apply,
-            delete_quarantined: options.delete_quarantined,
-            entries: manifest.to_vec(),
-        };
-        fs::write(&path, serde_json::to_string_pretty(&document)?)
-            .map_err(|error| AppError::io_path("write the quarantine manifest", &path, error))?;
+        write_quarantine_manifest(&path, scan_root, options, manifest)?;
         Some(path.display().to_string())
     } else {
         None
@@ -1029,6 +1053,223 @@ fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
+fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn preflight_report_destinations(report_dir: &Path, options: &BulkOptions) -> Result<(), AppError> {
+    let mut destinations = vec![
+        report_dir.join(RUN_JSONL),
+        report_dir.join(SUMMARY_MD),
+        report_dir.join(UNRECOGNIZED_MD),
+    ];
+    if options.apply && options.quarantine_dir.is_some() {
+        destinations.push(report_dir.join(MANIFEST_JSON));
+    }
+    for destination in destinations {
+        if !path_entry_exists(&destination) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+            AppError::io_path(
+                "inspect the bulk-import report destination",
+                &destination,
+                error,
+            )
+        })?;
+        let reserved =
+            destination.file_name().and_then(|name| name.to_str()) == Some(MANIFEST_JSON);
+        if reserved
+            || metadata.file_type().is_symlink()
+            || !metadata.file_type().is_file()
+            || metadata.permissions().readonly()
+        {
+            return Err(AppError::Usage(format!(
+                "bulk-import report destination {} is reserved or not a writable file target; choose a new --report-dir or move the existing entry",
+                destination.display()
+            )));
+        }
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&destination)
+            .map(drop)
+            .map_err(|error| {
+                AppError::Usage(format!(
+                    "bulk-import report destination {} is not writable: {error}; choose a new --report-dir or fix the existing file",
+                    destination.display()
+                ))
+            })?;
+    }
+    let export_dir = report_dir.join(EXPORT_DIR);
+    if path_entry_exists(&export_dir) {
+        let metadata = fs::symlink_metadata(&export_dir).map_err(|error| {
+            AppError::io_path(
+                "inspect the bulk-import export directory",
+                &export_dir,
+                error,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(AppError::Usage(format!(
+                "bulk-import export directory {} is not a writable directory; choose a new --report-dir or move the existing entry",
+                export_dir.display()
+            )));
+        }
+    }
+    fs::create_dir_all(&export_dir).map_err(|error| {
+        AppError::io_path(
+            "create the bulk-import export directory",
+            &export_dir,
+            error,
+        )
+    })?;
+    let probe = export_dir.join(format!(
+        ".tasks-cli-export-write-probe-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    fs::write(&probe, b"tasks-cli export write probe")
+        .map_err(|error| AppError::io_path("write the bulk-import export probe", &probe, error))?;
+    let _ = fs::remove_file(&probe);
+    Ok(())
+}
+
+fn preflight_quarantine_destinations(
+    scan_root: &Path,
+    quarantine_dir: &Path,
+    staged: &[(String, CandidateOutcome)],
+) -> Result<(), AppError> {
+    let base = absolute_path(quarantine_dir);
+    if path_entry_exists(&base) {
+        let metadata = fs::symlink_metadata(&base)
+            .map_err(|error| AppError::io_path("inspect the quarantine directory", &base, error))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_dir()
+            || metadata.permissions().readonly()
+        {
+            return Err(AppError::Usage(format!(
+                "bulk-import quarantine directory {} is not a writable local directory; choose a new --quarantine-dir",
+                base.display()
+            )));
+        }
+    }
+    for (_, outcome) in staged {
+        if outcome.bucket != BUCKET_RECOGNIZED && outcome.bucket != BUCKET_RECOGNIZED_WITH_WARNINGS
+        {
+            continue;
+        }
+        for source in &outcome.ledger_files {
+            let destination = base.join(native_relative(scan_root, &source.path));
+            if path_entry_exists(&destination) {
+                return Err(AppError::Usage(format!(
+                    "bulk-import refuses to overwrite quarantine destination {}; choose a new --quarantine-dir or move the existing entry",
+                    destination.display()
+                )));
+            }
+            let mut ancestor = destination.parent().map(Path::to_path_buf);
+            while let Some(path) = ancestor.as_ref() {
+                if path_entry_exists(path) {
+                    let metadata = fs::symlink_metadata(path).map_err(|error| {
+                        AppError::io_path("inspect a quarantine destination parent", path, error)
+                    })?;
+                    if metadata.file_type().is_symlink()
+                        || !metadata.file_type().is_dir()
+                        || metadata.permissions().readonly()
+                    {
+                        return Err(AppError::Usage(format!(
+                            "bulk-import quarantine destination parent {} is not a writable directory; choose a new --quarantine-dir",
+                            path.display()
+                        )));
+                    }
+                    break;
+                }
+                ancestor = path.parent().map(Path::to_path_buf);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_quarantine_manifest(
+    path: &Path,
+    scan_root: &Path,
+    options: &BulkOptions,
+    entries: &[ManifestEntry],
+) -> Result<(), AppError> {
+    use std::io::Write;
+    let document = QuarantineManifest {
+        format_version: 1,
+        scan_root: scan_root.display().to_string(),
+        data_root: options.data_root.display().to_string(),
+        quarantine_dir: options
+            .quarantine_dir
+            .as_ref()
+            .map(|dir| absolute_path(dir).display().to_string())
+            .unwrap_or_default(),
+        apply: options.apply,
+        delete_quarantined: options.delete_quarantined,
+        entries: entries.to_vec(),
+    };
+    let bytes = serde_json::to_vec_pretty(&document)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(MANIFEST_JSON);
+    let temp = path.with_file_name(format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|error| {
+            AppError::io_path(
+                "create the quarantine manifest temporary file",
+                &temp,
+                error,
+            )
+        })?;
+    let result = (|| {
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| AppError::io_path("write the quarantine manifest", &temp, error))?;
+        drop(file);
+        if path_entry_exists(path) {
+            // This path is reserved by the current run after the initial
+            // preflight.  Refuse an unexpected replacement rather than
+            // overwriting somebody else's audit history.
+            let existing = fs::read(path).map_err(|error| {
+                AppError::io_path("read the existing quarantine manifest", path, error)
+            })?;
+            let owned = serde_json::from_slice::<QuarantineManifest>(&existing)
+                .map(|manifest| {
+                    manifest.format_version == 1
+                        && manifest.scan_root == scan_root.display().to_string()
+                        && manifest.data_root == options.data_root.display().to_string()
+                })
+                .unwrap_or(false);
+            if !owned {
+                return Err(AppError::Usage(format!(
+                    "refusing to overwrite quarantine manifest {}; preserve the existing audit history and choose a new report directory",
+                    path.display()
+                )));
+            }
+            // The same-directory rename below is the atomic replacement.  If
+            // the filesystem cannot replace its own manifest, this returns an
+            // error while the previous audit file remains untouched.
+        }
+        fs::rename(&temp, path)
+            .map_err(|error| AppError::io_path("publish the quarantine manifest", path, error))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
 fn export_slug(relative_directory: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -1231,6 +1472,9 @@ fn process_candidate(
 /// Apply one candidate that passed validation, then quarantine its sources
 /// when verification succeeds. Called only from the apply phase, after every
 /// candidate has been previewed.
+// Keep the candidate's scan, parsed, reporting, and manifest state explicit at
+// this boundary; grouping them would obscure which state is mutated here.
+#[allow(clippy::too_many_arguments)]
 fn apply_candidate(
     index: usize,
     dir: &Path,
@@ -1239,6 +1483,7 @@ fn apply_candidate(
     outcome: &mut CandidateOutcome,
     options: &BulkOptions,
     map: &SectionMap,
+    manifest: &mut Vec<ManifestEntry>,
 ) -> Result<(), AppError> {
     match apply_and_verify(
         index,
@@ -1252,11 +1497,12 @@ fn apply_candidate(
         project_id,
     ) {
         Ok(result) => {
-            outcome.applied = true;
+            outcome.applied = result.applied;
             outcome.already_imported = result.already_imported;
             outcome.verified = result.verified;
             outcome.rolled_back = result.rolled_back;
             outcome.verification_error = result.verification_error;
+            outcome.apply_error = result.apply_error;
             outcome.export_path = Some(result.export_path);
         }
         Err(error) => {
@@ -1283,24 +1529,60 @@ fn apply_candidate(
                 });
                 continue;
             }
+            let manifest_index = manifest.len();
+            manifest.push(ManifestEntry {
+                project_id: project_id.to_string(),
+                original_path: source.path.display().to_string(),
+                size: record.bytes as u64,
+                sha256: record.sha256.clone(),
+                destination: destination.display().to_string(),
+                status: "planned".to_string(),
+                deleted: false,
+            });
+            write_quarantine_manifest(
+                &options.report_dir.join(MANIFEST_JSON),
+                scan_root,
+                options,
+                manifest,
+            )?;
             match move_file(&source.path, &destination) {
                 Ok(()) => {
                     let mut status = "moved".to_string();
+                    manifest[manifest_index].status = status.clone();
+                    write_quarantine_manifest(
+                        &options.report_dir.join(MANIFEST_JSON),
+                        scan_root,
+                        options,
+                        manifest,
+                    )?;
                     if options.delete_quarantined {
-                        fs::remove_file(&destination).map_err(|error| {
-                            AppError::io_path("delete the quarantined copy", &destination, error)
-                        })?;
-                        status = "deleted".to_string();
-                        outcome.deleted += 1;
+                        match fs::remove_file(&destination) {
+                            Ok(()) => {
+                                status = "deleted".to_string();
+                                manifest[manifest_index].status = status.clone();
+                                manifest[manifest_index].deleted = true;
+                                outcome.deleted += 1;
+                                write_quarantine_manifest(
+                                    &options.report_dir.join(MANIFEST_JSON),
+                                    scan_root,
+                                    options,
+                                    manifest,
+                                )?;
+                            }
+                            Err(error) => {
+                                failure = Some(format!(
+                                    "quarantine deletion failed for {}: {}",
+                                    destination.display(),
+                                    AppError::io_path(
+                                        "delete the quarantined copy",
+                                        &destination,
+                                        error
+                                    )
+                                ));
+                            }
+                        }
                     }
-                    outcome.manifest.push(ManifestEntry {
-                        project_id: project_id.to_string(),
-                        original_path: source.path.display().to_string(),
-                        size: record.bytes as u64,
-                        sha256: record.sha256.clone(),
-                        destination: destination.display().to_string(),
-                        deleted: status == "deleted",
-                    });
+                    outcome.manifest.push(manifest[manifest_index].clone());
                     records.push(QuarantineRecord {
                         source: source.path.display().to_string(),
                         destination: destination.display().to_string(),
@@ -1337,10 +1619,12 @@ fn apply_candidate(
 }
 
 struct ApplyOutcome {
+    applied: bool,
     already_imported: bool,
     verified: bool,
     rolled_back: bool,
     verification_error: Option<String>,
+    apply_error: Option<String>,
     export_path: String,
 }
 
@@ -1349,6 +1633,8 @@ struct ApplyOutcome {
 /// run or `tasks init` created.
 struct CreatedArtifacts {
     db: bool,
+    wal: bool,
+    shm: bool,
     lock: bool,
     directory: bool,
 }
@@ -1360,9 +1646,10 @@ fn sqlite_sidecar(db_path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Apply one candidate and roll back everything this run created for it when
-/// the import, the export or the verification fails. A failed verification
-/// still reports `applied: true` with `rolled_back: true`; the sources are
-/// never touched and never quarantined.
+/// the import, the export or the verification fails. `rolled_back` is true
+/// only when cleanup removed every artifact this run created; an import that
+/// committed into a pre-existing database is retained and reports false.
+/// Sources are never touched before verification succeeds.
 #[allow(clippy::too_many_arguments)]
 fn apply_and_verify(
     index: usize,
@@ -1397,6 +1684,8 @@ fn apply_and_verify(
         // excluded. Never treat a new sidecar on an existing DB as ours to delete.
         let created = CreatedArtifacts {
             db: !db_path.exists(),
+            wal: !sqlite_sidecar(&db_path, "-wal").exists(),
+            shm: !sqlite_sidecar(&db_path, "-shm").exists(),
             lock: !db_path.with_extension("create.lock").exists(),
             directory: !db_path.parent().map(Path::exists).unwrap_or(false),
         };
@@ -1420,9 +1709,11 @@ fn apply_and_verify(
                         });
                     }
                 } else {
-                    outcome.rolled_back = true;
-                    if let Some(problem) = roll_back_apply(&options.data_root, project_id, &created)
-                    {
+                    let cleanup = roll_back_apply(&options.data_root, project_id, &created);
+                    let mutation_retained =
+                        outcome.applied && !outcome.already_imported && !created.db;
+                    outcome.rolled_back = cleanup.is_none() && !mutation_retained;
+                    if let Some(problem) = cleanup {
                         let reason = outcome
                             .verification_error
                             .take()
@@ -1433,12 +1724,21 @@ fn apply_and_verify(
                 }
                 Ok(outcome)
             }
-            Err(error) => match roll_back_apply(&options.data_root, project_id, &created) {
-                None => Err(error),
-                Some(problem) => Err(AppError::Validation(format!(
-                    "{error}; rollback failed: {problem}"
-                ))),
-            },
+            Err(error) => {
+                let cleanup = roll_back_apply(&options.data_root, project_id, &created);
+                let rollback_error = cleanup
+                    .as_ref()
+                    .map(|problem| format!("; rollback failed: {problem}"));
+                Ok(ApplyOutcome {
+                    applied: false,
+                    already_imported: false,
+                    verified: false,
+                    rolled_back: cleanup.is_none(),
+                    verification_error: None,
+                    apply_error: Some(format!("{error}{}", rollback_error.unwrap_or_default())),
+                    export_path: String::new(),
+                })
+            }
         });
         Ok(())
     })?;
@@ -1489,7 +1789,12 @@ fn roll_back_apply(
     }
     for suffix in ["-wal", "-shm"] {
         let path = sqlite_sidecar(&db_path, suffix);
-        if created.db && path.exists() {
+        let owned = if suffix == "-wal" {
+            created.wal
+        } else {
+            created.shm
+        };
+        if created.db && owned && path.exists() {
             if let Err(error) = fs::remove_file(&path) {
                 problems.push(format!("delete {}: {error}", path.display()));
             }
@@ -1570,38 +1875,53 @@ fn apply_and_verify_inner(
     let mut store = Store::open_rw(&options.data_root, project_id)?;
     let (_, already_imported) = store.import_apply_many(reparsed, &hashes)?;
 
-    let export_dir = options.report_dir.join(EXPORT_DIR);
-    fs::create_dir_all(&export_dir).map_err(|error| {
-        AppError::io_path(
-            "create the verification export directory",
-            &export_dir,
-            error,
-        )
-    })?;
-    let export_path = export_dir.join(format!(
-        "{:03}-{}.md",
-        index + 1,
-        export_slug(relative_directory)
-    ));
-    if export_path.exists() {
-        fs::remove_file(&export_path).map_err(|error| {
-            AppError::io_path("remove the previous export", &export_path, error)
+    // Once import_apply_many has committed, preserve the mutation state even
+    // if rendering, reading or reparsing the verification export fails.  The
+    // caller can then report truthful rollback status for a pre-existing DB.
+    let post_commit = (|| -> Result<ApplyOutcome, AppError> {
+        let export_dir = options.report_dir.join(EXPORT_DIR);
+        fs::create_dir_all(&export_dir).map_err(|error| {
+            AppError::io_path(
+                "create the verification export directory",
+                &export_dir,
+                error,
+            )
         })?;
+        let export_path = export_dir.join(format!(
+            "{:03}-{}.md",
+            index + 1,
+            export_slug(relative_directory)
+        ));
+        let exported_count = store.export_markdown(&export_path)?;
+        let exported_bytes = fs::read(&export_path).map_err(|error| {
+            AppError::io_path("read the verification export", &export_path, error)
+        })?;
+        let exported = markdown::parse(export_path.display().to_string(), exported_bytes, None)?;
+        let verification = verify_project(&mut store, preview, &exported, exported_count);
+        #[cfg(feature = "test-hooks")]
+        let verification = maybe_force_verification_failure(verification);
+        Ok(ApplyOutcome {
+            applied: true,
+            already_imported,
+            verified: verification.is_ok(),
+            rolled_back: false,
+            verification_error: verification.err(),
+            apply_error: None,
+            export_path: export_path.display().to_string(),
+        })
+    })();
+    match post_commit {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => Ok(ApplyOutcome {
+            applied: true,
+            already_imported,
+            verified: false,
+            rolled_back: false,
+            verification_error: Some(error.to_string()),
+            apply_error: None,
+            export_path: String::new(),
+        }),
     }
-    let exported_count = store.export_markdown(&export_path)?;
-    let exported_bytes = fs::read(&export_path)
-        .map_err(|error| AppError::io_path("read the verification export", &export_path, error))?;
-    let exported = markdown::parse(export_path.display().to_string(), exported_bytes, None)?;
-    let verification = verify_project(&mut store, preview, &exported, exported_count);
-    #[cfg(feature = "test-hooks")]
-    let verification = maybe_force_verification_failure(verification);
-    Ok(ApplyOutcome {
-        already_imported,
-        verified: verification.is_ok(),
-        rolled_back: false,
-        verification_error: verification.err(),
-        export_path: export_path.display().to_string(),
-    })
 }
 
 fn verify_project(
@@ -1611,6 +1931,22 @@ fn verify_project(
     exported_count: usize,
 ) -> Result<(), String> {
     let mut mismatches: Vec<String> = Vec::new();
+    let preview_sources = preview.iter().map(|(_, parsed)| parsed).collect::<Vec<_>>();
+    let expected_rules = crate::problems::combined_rules(&preview_sources);
+    match store.project_rules() {
+        Ok(actual) if actual.body != expected_rules => mismatches.push(format!(
+            "shared rules differ in the store ({} vs {} bytes)",
+            expected_rules.len(),
+            actual.body.len()
+        )),
+        Ok(actual) if exported.rules != actual.body => mismatches.push(format!(
+            "shared rules differ from the re-export ({} vs {} bytes)",
+            actual.body.len(),
+            exported.rules.len()
+        )),
+        Ok(_) => {}
+        Err(error) => mismatches.push(format!("shared rules cannot be read back: {error}")),
+    }
     let mut exported_by_id: HashMap<u64, &markdown::ParsedTask> =
         exported.tasks.iter().map(|task| (task.id, task)).collect();
     let mut preview_count = 0usize;
