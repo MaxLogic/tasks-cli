@@ -22,7 +22,7 @@ in the current crate, not a claim to bundle the latest upstream SQLite patch.
 
 ```text
 tasks init --root "D:\Work\Project"
-tasks create --title "Write release notes" --body-file notes.md
+tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
 
@@ -30,7 +30,7 @@ That gives you a project, a task, and a backlog you can read at a glance:
 
 ```text
 project_id: 3a785d75-2e1c-4351-80e3-8ba9e7fab992
-T-001	draft	v1	Write release notes	[]	labels=[]
+T-001	P2	todo	v1	Write release notes	[]	labels=[]
 has_more: false
 ```
 
@@ -40,6 +40,7 @@ has_more: false
 $ tasks show T-2
 id: T-002
 status: draft
+priority: P2
 version: 1
 labels:
 dependencies: 1
@@ -80,7 +81,7 @@ isolated root, which is what the tests do.
 ## Everyday commands
 
 ```text
-tasks list [--status draft] [--after 20] [--limit 20]
+tasks list [--open] [--after P2:T-020] [--limit 20]
 tasks search "release notes"
 tasks show T-12
 tasks create --title "Write release notes" --body-file notes.md
@@ -140,14 +141,59 @@ without typo correction, synonyms or embeddings.
 
 Ranked results use `next_offset` and `--offset`, not the ID-based `--after` cursor.
 Both search modes return bounded summaries and may include done/cancelled tasks.
-Ordinary `list` excludes done/cancelled but still includes draft and blocked tasks.
+Ordinary `list` shows runnable todo/in-progress tasks, excluding unmet dependencies
+and needs-human. Use `--open` for every unfinished task, including drafts/blocked,
+or `--needs-human` for the decision queue. Explicit `--status` bypasses readiness.
 Every page is internally consistent; changes between requests can move ranked
 results, so restart pagination after relevant edits.
 
-Existing databases require explicit `tasks migrate`: schema 3 adds labels and
+Existing databases require explicit `tasks migrate`: schema 4 adds priority; schema 3 adds labels and
 builds the search index after a validated backup. Schema 1 states become
 `draft`/`todo`; existing history snapshots remain unchanged. New databases start
-at schema 3. No live project is migrated automatically.
+at schema 4. No live project is migrated automatically.
+
+## Priority and selecting work
+
+```text
+tasks create --title "Fix login" --body-file task.md --status todo --priority P1
+tasks update T-12 --expect-version 2 --priority P0
+tasks list
+tasks list --open --label performance
+tasks list --needs-human
+tasks unlocks --limit 20
+```
+
+P0 is most urgent, P3 least; P2 is the default. Default list requires every
+prerequisite to be done; cancelled prerequisites remain unresolved. Results are
+ordered by priority then ID. Pass the returned `next_after` string unchanged,
+for example `--after P1:T-012`. Search/history retain their existing pagination.
+`unlocks` shows direct open dependent counts and how many become runnable if a
+prerequisite finishes; it uses `--offset` pagination.
+
+## Enrich text with task titles
+
+```text
+tasks enrich --file response.txt
+tasks enrich < response.txt
+tasks enrich-clipboard
+```
+
+`T001` becomes `T001 (Task title)`, and `T-001` keeps its hyphen. Every reference
+is enriched. Unknown IDs are unchanged and reported on stderr. An exact existing
+annotation is not duplicated. The input file is never overwritten. UTF-8 text,
+line endings and trailing newlines are preserved; text output has no banner.
+Use `--format json` for text plus replacement counts and unknown IDs.
+
+This is a plain-text transform: it can enrich code blocks and Markdown link
+labels. Obvious URL/path components are skipped. If a title was already written
+in a different format, the command may add it again. Limits are 16 MiB input,
+10,000 distinct IDs and 64 MiB output; exceeding them fails without truncation.
+
+`enrich-clipboard` reads and replaces clipboard text. It checks that the original
+text still matches before writing and leaves no-op input alone. Replacement is
+plain text, so other clipboard formats are removed. Windows/WSL use Windows
+PowerShell; native Linux needs wl-clipboard (Wayland) or xclip (X11). With a shared
+Windows store, use the existing `--windows-exe` delegation setting.
 
 ## Every write says what it expects
 
@@ -196,6 +242,7 @@ under `data`, errors still go to stderr, and the exit codes above still hold.
     "command": "show",
     "id": 2,
     "status": "draft",
+    "priority": "P2",
     "version": 1,
     "title": "Tag the release",
     "body": "Ship it.\n",
@@ -319,7 +366,7 @@ is not Linux proof.
 
 ## Tests
 
-The 2026-09-18 verification ran 155 tests on Windows and 157 on Ubuntu/WSL
+The 2026-09-19 verification ran 167 tests on Windows and 169 on Ubuntu/WSL
 with `cargo test --locked`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
@@ -344,6 +391,7 @@ never modified by the suite.
 `spec.md` is the normative contract when you need the exact rule behind any of
 this.
 
-States, labels and ranked search are implemented. Priority, actionable-default
-listing, unlock queries and shared skill integration remain proposals in
-[workflow-proposal.md](workflow-proposal.md).
+States, labels, ranked search, priority, readiness selection and unlock queries are
+implemented. Development skill copies and worktree identity setup are in
+[integration/README.md](integration/README.md). Installed skills and live ledgers
+remain unchanged until the migration window.
