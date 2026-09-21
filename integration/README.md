@@ -13,11 +13,13 @@ state.
 
 Setup is a separate authorized operation. For an existing project, obtain and
 verify its UUID from the existing tasks registry/CLI output. For a genuinely new
-project, run authorized `tasks init --root <absolute-project-root>` and retain
-the returned project UUID. Do not generate a UUID independently.
+project, run authorized
+`tasks init --root <absolute-project-root> --write-identity` and retain the
+returned project UUID. Do not generate a UUID independently.
 
-Create root `.tasks.json` with only `{"project_id":"<returned-project-uuid>"}`,
-using lowercase canonical UUID text, and commit it as project configuration.
+The command creates root `.tasks.json` with only
+`{"project_id":"<returned-project-uuid>"}`, using lowercase canonical UUID
+text. Commit it as project configuration.
 The schema is [project-identity.schema.json](project-identity.schema.json).
 The file contains identity only, never machine-specific database paths.
 Review its changes like other project configuration. A copied UUID selects that

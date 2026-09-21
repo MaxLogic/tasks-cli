@@ -111,8 +111,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     }
     let data_root = resolved_root(&cli)?;
     match &cli.command {
-        Command::Init { root } => {
-            let explicit_project = cli
+        Command::Init {
+            root,
+            write_identity,
+        } => {
+            let mut explicit_project = cli
                 .project
                 .as_deref()
                 .map(|value| {
@@ -123,7 +126,25 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     })
                 })
                 .transpose()?;
+            if *write_identity {
+                if let Some(identity_project) = registry::project_identity_at_root(root)? {
+                    if let Some(requested) = explicit_project {
+                        if requested != identity_project {
+                            return Err(AppError::Validation(format!(
+                                "{} already selects project {}; refusing to initialize it as {requested}",
+                                root.join(".tasks.json").display(),
+                                identity_project
+                            )));
+                        }
+                    } else {
+                        explicit_project = Some(identity_project);
+                    }
+                }
+            }
             let info = registry::init_root(&data_root, root, explicit_project)?;
+            if *write_identity {
+                registry::write_project_identity(root, &info.project_id)?;
+            }
             envelope(
                 Some(info.project_id.to_string()),
                 CommandPayload::Init {

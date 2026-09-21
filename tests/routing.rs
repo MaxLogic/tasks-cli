@@ -218,6 +218,105 @@ fn version_flag_identifies_the_binary() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("UTF-8 version"),
-        format!("tasks {}\n", env!("CARGO_PKG_VERSION"))
+        format!(
+            "tasks {} (commit {})\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("TASKS_BUILD_COMMIT")
+        )
+    );
+}
+
+#[test]
+fn init_can_write_an_identity_and_route_with_it() {
+    let data = tempfile::tempdir().expect("data root");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let project = Uuid::new_v4();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .args([
+            "--format",
+            "json",
+            "--data-root",
+            data.path().to_str().expect("UTF-8 data root"),
+            "--project",
+            &project.to_string(),
+            "init",
+            "--root",
+            workspace.path().to_str().expect("UTF-8 workspace"),
+            "--write-identity",
+        ])
+        .output()
+        .expect("tasks executable");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).expect("JSON output");
+    assert_eq!(result["project_id"], project.to_string());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".tasks.json")).expect("identity"),
+        format!("{{\"project_id\":\"{project}\"}}\n")
+    );
+    assert_eq!(
+        routed_project(data.path(), workspace.path(), None, None),
+        project.to_string()
+    );
+
+    let second_data = tempfile::tempdir().expect("second data root");
+    let rerun = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .args([
+            "--format",
+            "json",
+            "--data-root",
+            second_data.path().to_str().expect("UTF-8 data root"),
+            "init",
+            "--root",
+            workspace.path().to_str().expect("UTF-8 workspace"),
+            "--write-identity",
+        ])
+        .output()
+        .expect("tasks executable");
+    assert!(
+        rerun.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    let reused: Value = serde_json::from_slice(&rerun.stdout).expect("JSON output");
+    assert_eq!(reused["project_id"], project.to_string());
+}
+
+#[test]
+fn init_write_identity_refuses_a_conflicting_file_before_initializing() {
+    let data = tempfile::tempdir().expect("data root");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let existing = Uuid::new_v4();
+    let requested = Uuid::new_v4();
+    write_identity(workspace.path(), existing);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        .args([
+            "--data-root",
+            data.path().to_str().expect("UTF-8 data root"),
+            "--project",
+            &requested.to_string(),
+            "init",
+            "--root",
+            workspace.path().to_str().expect("UTF-8 workspace"),
+            "--write-identity",
+        ])
+        .output()
+        .expect("tasks executable");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("already selects project"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!data.path().join("registry.json").exists());
+    assert!(!data.path().join("projects").exists());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(".tasks.json")).expect("identity"),
+        format!("{{\"project_id\":\"{existing}\"}}")
     );
 }
