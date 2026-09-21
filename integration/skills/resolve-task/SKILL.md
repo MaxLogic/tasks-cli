@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "5.2.0-sqlite-dev"
+  version: "6.0.0"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
@@ -13,7 +13,7 @@ Read [task-ledger](../task-ledger/SKILL.md) for identity, queries and mutations,
 and [create-task](../create-task/SKILL.md) when formulating or changing task
 intent. The coordinator owns every shared-ledger transition. SQLite owns durable
 intent/status; session notes own proof and current execution, never another
-editable backlog. This development copy does not use the Markdown-ledger Python
+editable backlog. This skill does not use the Markdown-ledger Python
 helpers or their coupled state-transition/close helpers.
 
 ## Start and selection

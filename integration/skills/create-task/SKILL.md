@@ -3,7 +3,7 @@ name: create-task
 description: "Add, split, reword, reprioritize, block, complete, or otherwise maintain durable tasks in a shared SQLite backlog. Use for requested task management and independent follow-up or prerequisite work. During resolve-task, own formulation while the coordinator applies ledger edits. Do not invoke merely because a backlog exists."
 metadata:
   author: Pawel Piotrowski
-  version: "3.5.0-sqlite-dev"
+  version: "4.0.0"
   adapted-from: "D:/Pawel/Prompts/skills/create-task (3.5.0)"
 ---
 

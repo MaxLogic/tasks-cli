@@ -1,17 +1,27 @@
-"""Disposable, real CLI and Git worktree proof. No default store access."""
+"""Disposable, real CLI and Git worktree identity proof. No default store access."""
 import json
 import hashlib
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 import uuid
 
 REPO = Path(__file__).resolve().parents[2]
-HELPER = REPO / "integration/skills/task-ledger/scripts/task_project.py"
-EXE = Path(os.environ.get("TASKS_TEST_EXE", REPO / "target/release/tasks.exe"))
+RELEASE_BINARY = "tasks.exe" if os.name == "nt" else "tasks"
+
+
+def default_executable():
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", REPO / "target"))
+    if not target_root.is_absolute():
+        target_root = REPO / target_root
+    return target_root / "release" / RELEASE_BINARY
+
+
+EXE = Path(
+    os.environ.get("TASKS_TEST_EXE", default_executable())
+)
 
 
 class IdentityTest(unittest.TestCase):
@@ -41,7 +51,15 @@ class IdentityTest(unittest.TestCase):
         return result
 
     def invoke(self, cwd, *args, expected=0):
-        return self.run_cmd([sys.executable, "-B", str(HELPER), "--cwd", str(cwd), "--tasks-exe", str(EXE), "--data-root", str(self.store), "--", *args], expected)
+        result = subprocess.run(
+            [str(EXE), "--data-root", str(self.store), "--format", "json", *args],
+            cwd=cwd,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
 
     def test_main_and_unbound_worktree_use_identical_project(self):
         worktree = self.base / "worktree"
@@ -53,32 +71,29 @@ class IdentityTest(unittest.TestCase):
             self.assertEqual(json.loads(result.stdout)["project_id"], self.project)
         self.run_cmd(["git", "-C", str(self.root), "worktree", "remove", str(worktree)])
 
-    def test_missing_and_malformed_identity_fail_closed(self):
+    def test_malformed_identity_fails_closed(self):
         identity = self.root / ".tasks.json"
-        identity.unlink()
-        self.assertIn("missing or invalid", self.invoke(self.root, "list", expected=2).stderr)
         for text in ['{}', '{"project_id":"oops"}', '{"project_id":4}', '{', '{"project_id":"' + self.project + '","extra":1}']:
             identity.write_text(text, encoding="utf-8")
-            self.assertIn("task-project:", self.invoke(self.root, "list", expected=2).stderr)
+            self.assertIn(".tasks.json", self.invoke(self.root, "list", expected=2).stderr)
 
-    def test_unknown_project_and_override_refused(self):
+    def test_unknown_project_fails_without_mutating_store(self):
         before = {str(p.relative_to(self.store)): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.store.rglob("*") if p.is_file()}
         (self.root / ".tasks.json").write_text(json.dumps({"project_id": str(uuid.uuid4())}), encoding="utf-8")
-        result = self.invoke(self.root, "list", expected=2)
-        self.assertIn("identity validation failed", result.stderr)
-        self.invoke(self.root, "init", "--root", str(self.root), expected=2)
-        self.invoke(self.root, "list", "--project", self.project, expected=2)
+        result = self.invoke(self.root, "list", expected=3)
+        self.assertIn("not found", result.stderr)
         after = {str(p.relative_to(self.store)): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.store.rglob("*") if p.is_file()}
         self.assertEqual(before, after)
 
-    def test_relative_body_file_and_untracked_identity(self):
+    def test_relative_body_file_and_explicit_override(self):
         nested = self.root / "nested"
         nested.mkdir()
         (nested / "body.md").write_text("Outcome: preserve caller-relative paths", encoding="utf-8")
         result = self.invoke(nested, "create", "--title", "relative path fixture", "--body-file", "body.md")
         self.assertEqual(json.loads(result.stdout)["project_id"], self.project)
-        self.run_cmd(["git", "-C", str(self.root), "rm", "--cached", ".tasks.json"])
-        self.assertIn("not tracked", self.invoke(nested, "list", expected=2).stderr)
+        (self.root / ".tasks.json").write_text('{"project_id":"invalid"}', encoding="utf-8")
+        result = self.invoke(nested, "--project", self.project, "list")
+        self.assertEqual(json.loads(result.stdout)["project_id"], self.project)
 
     def test_non_git_uses_nearest_identity_and_does_not_skip_invalid_one(self):
         project = self.base / "svn-project"
@@ -87,7 +102,7 @@ class IdentityTest(unittest.TestCase):
         (project / ".tasks.json").write_text(json.dumps({"project_id": self.project}), encoding="utf-8")
         self.assertEqual(json.loads(self.invoke(nested, "rules", "show").stdout)["project_id"], self.project)
         (nested.parent / ".tasks.json").write_text('{"project_id":"invalid"}', encoding="utf-8")
-        self.assertIn("must be a UUID", self.invoke(nested, "list", expected=2).stderr)
+        self.assertIn("is not a UUID", self.invoke(nested, "list", expected=2).stderr)
 
     def test_unicode_rules_and_literal_routing_words_are_not_overrides(self):
         body = self.root / "body.md"

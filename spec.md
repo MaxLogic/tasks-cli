@@ -55,16 +55,29 @@ when XDG_DATA_HOME is absolute, otherwise `$HOME/.local/share/MaxLogic/tasks-cli
 Store bindings in `<data-root>/registry.json` with a
 format version and an array of canonical workspace roots and project UUIDs.
 
+A project may contain `.tasks.json` with exactly one field,
+`{"project_id":"<canonical-lowercase-uuid>"}`. For routed commands, resolution
+precedence is explicit `--project`, `TASKS_PROJECT`, the nearest `.tasks.json`
+from the current or delegated route directory, then the longest registry
+ancestor binding. The identity file is portable project configuration and never
+contains a database path. Reject an invalid nearer identity instead of skipping
+it. A valid identity selects only an existing database; it never initializes a
+project implicitly. `init`, `bind`, and `bulk-import` do not consume directory
+identity as an implicit creation argument. Require an ordinary, non-link file no
+larger than 4 KiB so identity lookup stays bounded and cannot redirect to an
+unrelated configuration file.
+
 `tasks init --root <absolute-path>` creates a project and binding. `tasks bind
 --root <absolute-path> --project <uuid>` associates another worktree with an
 existing project. Neither requires Git nor modifies the project directory.
 Initialization of an already bound root reports its existing identity, without
 creating another database. Bind refuses to reassign an existing binding.
 
-Commands accept global `--project <uuid>`; otherwise canonicalize the current
-directory and choose the longest ancestor binding by path components, never
-string prefix. Windows matching is case-insensitive and resolves existing links;
-Linux matching is case-sensitive and resolves existing links.
+Commands accept global `--project <uuid>`; otherwise inspect directory identity,
+then canonicalize the current directory and choose the longest ancestor binding
+by path components, never string prefix. Windows matching is case-insensitive
+and resolves existing links; Linux matching is case-sensitive and resolves
+existing links.
 Unknown roots fail with guidance, never create a database implicitly. Project
 renames/moves require a new explicit binding. Print the selected project UUID in
 results so incorrect routing is visible. Do not infer identity from Git remotes.
@@ -92,16 +105,16 @@ For convenient shared-backlog access, the Linux CLI supports explicit WSL
 delegation: `tasks --windows-exe /mnt/c/path/tasks.exe --project UUID show T-323`.
 The `--windows-exe` option, or its persistent environment equivalent
 `TASKS_WINDOWS_EXE`, selects the Windows backend before local registry/database
-access. Require an explicit project UUID for delegated project commands; support
-`TASKS_PROJECT` as its default so routine WSL commands can remain short. When
-neither is present, the Linux delegating CLI translates its current directory
-with `wslpath -w` and passes that Windows path as hidden `--route-root` context
-to `tasks.exe`; the Windows registry resolves the closest registered ancestor
-using the normal longest-ancestor rule. If `TASKS_PROJECT` is present, the
+access. Support `TASKS_PROJECT` as an explicit default so routine WSL commands
+can remain short. When neither it nor `--project` is present, the Linux
+delegating CLI translates its current directory with `wslpath -w` and passes
+that Windows path as hidden `--route-root` context to `tasks.exe`; the Windows
+child resolves the nearest `.tasks.json`, then the closest registered ancestor.
+If `TASKS_PROJECT` is present, the
 delegating CLI forwards it as an explicit project argument so the Windows child
 does not depend on cross-OS environment propagation. An explicit `--project`
 takes precedence over `TASKS_PROJECT`, and both take precedence over directory
-routing. An unknown translated directory fails without creating a database or
+identity and registry routing. An unknown translated directory fails without creating a database or
 backlog. Explicit flags override environment values. These `TASKS_PROJECT` and
 hidden `--route-root` routing defaults apply only to routed project commands.
 Native and delegated `init`/`bind` never consume them and follow their own

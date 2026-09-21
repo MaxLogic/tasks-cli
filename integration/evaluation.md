@@ -1,7 +1,7 @@
-# Development evaluation
+# Skill evaluation and deployment readiness
 
-Scope: approved development copies and skill-side project identity. No deployment
-or live backlog conversion. The shared working name is `task-ledger`.
+Scope: product-owned SQLite task skills and direct CLI project identity. The
+shared access skill is `task-ledger`.
 
 ## Provenance and retained behavior
 
@@ -12,7 +12,7 @@ Sources read through installed junctions on 2026-09-19:
 - `C:/Users/pawel/.codex/skills/resolve-task` resolves to
   `D:/Pawel/Prompts/skills/resolve-task`, source version 5.2.0.
 
-Source metadata remains in the development frontmatter. Copies preserve task
+Source provenance remains in the product skill frontmatter. The adaptations preserve task
 intent deduplication, vertical slices, expand/migrate/contract, observable
 Outcome/Proof, proof-only prerequisites, dependency integrity, discovered-work
 selection boundaries, focused/full execution, meaningful RED/GREEN, risk-based
@@ -41,17 +41,15 @@ their actual model/configuration and preserve outputs and per-assertion evidence
 
 ## Local evidence
 
-`python -B -m unittest discover -s integration/tests -v` exercises the wrapper
-against a real tasks binary and real temporary Git repository/worktree, with
-an explicit unique temporary store. The initial pre-implementation run failed
-the successful identity/worktree path and unknown-identity diagnostic assertion
-because the wrapper was absent. The first three-case implemented run passed.
-The final five-case Windows run passed (5 tests, 8.028 seconds), including
-caller-relative body paths, untracked identity, non-Git nearest-ancestor identity,
-invalid nearer identity refusal, and byte-for-byte unchanged store files after
-unknown-identity/override/setup refusals. It used the existing
-`target/release/tasks.exe`; selection-contract changes are verified separately
-by the Rust implementation work, not by this identity-only test.
+`python -B -m unittest discover -s integration/tests -v` exercises the tasks
+binary directly against a real temporary Git repository/worktree, with an
+explicit unique temporary store. The current six-case suite covers
+caller-relative body paths, direct nearest-ancestor identity, invalid nearer
+identity refusal, explicit override, and byte-for-byte unchanged store files
+after an unknown identity. It passed against the native Windows release binary
+and the native Ubuntu/WSL release binary selected through `CARGO_TARGET_DIR`;
+`TASKS_TEST_EXE` remains available for an exact candidate path. Selection
+details are also covered by the Rust implementation tests.
 
 The skill creator's `quick_validate.py` passed for all three skill directories.
 A relative Markdown link check found no unresolved links. Entrypoints contain
@@ -63,16 +61,26 @@ They do not measure skill discovery, autonomous execution quality, or model
 improvement. Workflow agent grading and human review remain separate evidence;
 no model-quality gain is claimed from static validation or helper tests.
 
-Coordinator follow-up: a sixth helper regression reproduced rejection of a literal
-`--project` search term after `--`. The wrapper now distinguishes values and the
-end-of-options marker from actual routing overrides; text subprocess decoding is
-explicit UTF-8. Six Windows helper tests pass. Model-run baseline/candidate grading
-could not be completed: both workers ended with a workspace-credit error and further
-worker creation was rejected by the thread limit. The development copies are not
-presented as evaluated for model quality or ready for live deployment on that basis.
+The sixth identity regression also preserves a literal `--project` search term
+after `--`; direct CLI parsing keeps the end-of-options marker separate from
+routing overrides, and subprocess decoding is explicit UTF-8. Six Windows and
+six Ubuntu/WSL identity tests pass.
+
+Three bounded model exercises covered worktree identity and conflicts,
+exhaustive open-task selection, and unknown-identity refusal. The candidate
+answer satisfied all 14 rubric assertions. The comparison baseline lacked
+direct identity discovery, paginated open selection, and SQLite versioned-write
+semantics, but its run accidentally exposed expected outputs while loading the
+fixture. Treat that baseline as contaminated: it supports a qualitative gap
+assessment, not a blind score or a measured model-quality gain. Both exercises
+used independent workers; no production backlog was mutated.
 
 Final candidate: all six identity tests passed on Windows and native Ubuntu/WSL
 against the new release binaries, using separate OS-owned temporary stores.
 The executable workflow probe additionally checked priority/readiness, decision
 queue, paginated open selection, unlock counts, history, version-conflict refusal
 and enrichment. This is CLI workflow proof, not an autonomous-agent comparison.
+
+On 2026-09-21 the three skills were deployed as direct product-repository links
+for Codex, Claude and Copilot on Windows and Ubuntu/WSL. The previous
+`create-task` and `resolve-task` links were retained under dated rollback names.

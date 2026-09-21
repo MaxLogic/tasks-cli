@@ -4,10 +4,10 @@
     {
       "id": 1,
       "prompt": "You are working from a nested directory in a newly created Git worktree. The root has a tracked .tasks.json with a valid project UUID, but the worktree path has never been bound. Describe the exact next actions to read and resolve T-012, delegate code work, and complete it. Do not execute commands. Include conflict recovery if another coordinator updates T-012 during proof.",
-      "expected_output": "Uses shared UUID explicitly without init/bind, bounded show/rules, coordinator owns versioned updates, worker receives rules/version/scope, conflict reconciliation and exact-candidate proof.",
+      "expected_output": "Uses direct CLI identity discovery without init/bind, bounded show/rules, coordinator owns versioned updates, worker receives UUID/version/rules/scope, conflict reconciliation and exact-candidate proof.",
       "files": [],
       "assertions": [
-        "Uses the tracked UUID explicitly rather than initializing a worktree backlog",
+        "Uses direct .tasks.json discovery rather than initializing or binding a worktree backlog",
         "Fetches selected task and applicable rules before execution",
         "Gives worker UUID, task ID, observed version, rules and owned scope",
         "Keeps shared ledger mutations with coordinator",

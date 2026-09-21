@@ -1,14 +1,13 @@
-# SQLite skill development copies
+# SQLite task skills
 
-These files are development candidates, not installed skills. No live backlog
-has been migrated and no real repository `.tasks.json` is created by this work.
-The example UUID is illustrative and must not be used for setup.
+These three product-owned skills are deployed together so their sibling links
+resolve to one workflow. `task-ledger` owns access and identity; `create-task`
+owns task formulation; `resolve-task` owns implementation and proof. The example
+UUID is illustrative and must not be used for setup.
 
-Install/evaluate the three sibling skill directories together to preserve their
-relative links. `task-ledger` owns access and identity; `create-task` owns task
-formulation; `resolve-task` owns implementation and proof. Python here only
-resolves identity and invokes the Rust CLI. It never reads SQLite or maintains
-Markdown task state. Older Markdown skill copies remain unchanged.
+Install/evaluate the sibling directories together. The Rust CLI discovers the
+nearest `.tasks.json`; no skill reads SQLite directly or maintains Markdown task
+state.
 
 ## Explicit project setup
 
@@ -27,22 +26,17 @@ same backlog; forking a repository does not implicitly create a new project.
 Git worktrees inherit the tracked identity. From any nested directory run:
 
 ```text
-python -B <skill-root>/task-ledger/scripts/task_project.py --cwd <directory> -- list --limit 30
+tasks --format json list --limit 30
 ```
 
-The wrapper requires a tracked identity, rejects malformed/unknown projects,
-validates through `rules show`, and passes `--project` explicitly. It does not
-need a registry path binding for each worktree. Missing identity is a setup
-failure, not permission to initialize storage. Direct CLI CWD selection remains
-unchanged; this first integration deliberately resolves identity in the skill.
-Outside Git, including SVN projects, the nearest ancestor `.tasks.json` defines
-the task project boundary. Create/version that file through the project's own
-authorized setup workflow. The wrapper stops on an invalid nearer identity,
-and never searches past it for a usable outer project. Git projects require
-their root identity and cannot fall back to an ancestor outside the repository.
+The CLI validates the nearest identity and does not need a registry binding for
+each worktree. An invalid nearer identity stops routing instead of falling back
+to an outer project. Missing identity uses the existing registry binding only
+for backward compatibility; migrated projects keep `.tasks.json` as their
+portable identity.
 
-For WSL Windows-owned storage, pass `--windows-exe /mnt/c/.../tasks.exe` to the
-wrapper if required by the Linux CLI's delegation setup. Keep data ownership
+For WSL Windows-owned storage, pass `--windows-exe /mnt/c/.../tasks.exe` or set
+`TASKS_WINDOWS_EXE`. Keep data ownership
 and path conversion in the existing Rust CLI. A Linux-owned synthetic store is
 valid for native Linux tests; never point Linux SQLite directly at the shared
 Windows database.
@@ -54,11 +48,13 @@ python -B -m unittest discover -s integration/tests -v
 ```
 
 `TASKS_TEST_EXE` may select the real binary under test. The default is the
-repository's Windows release binary. Tests initialize only an explicit unique
-temporary data root, commit an identity fixture, create a real detached Git
-worktree, read the same project from nested paths, and reject unsafe identity.
-They clean only their unique temporary directory and remove the test worktree
-through Git. They do not use the user's default store.
+repository's native release binary (`tasks.exe` on Windows and `tasks` on
+Linux). Set `CARGO_TARGET_DIR` when the checkout uses a separate Cargo target
+tree, such as `target/linux` for WSL verification. Tests initialize only an
+explicit unique temporary data root, commit an identity fixture, create a real
+detached Git worktree, read the same project from nested paths, and reject
+unsafe identity. They clean only their unique temporary directory and remove
+the test worktree through Git. They do not use the user's default store.
 
 See [evaluation.md](evaluation.md) for provenance, strengths retained and the
 limits of the workflow evaluation.

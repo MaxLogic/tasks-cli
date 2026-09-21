@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "tasks", disable_help_subcommand = true)]
+#[command(name = "tasks", version, disable_help_subcommand = true)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub data_root: Option<PathBuf>,

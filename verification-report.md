@@ -1,5 +1,54 @@
 # tasks-cli verification report
 
+## Current verification and deployment — 2026-09-21
+
+Direct nearest-ancestor `.tasks.json` routing and `tasks --version` are
+implemented. Routing precedence is explicit `--project`, `TASKS_PROJECT`, the
+nearest identity file, then the longest registry binding. Invalid nearer
+identities fail closed. The task-ledger, create-task and resolve-task skills now
+use the CLI directly.
+
+### Product proof
+
+- Windows passed `cargo fmt --check`, Clippy with all targets/features and
+  warnings denied, `cargo test --locked --no-fail-fast` (**187 passed**), the
+  three feature-enabled bulk rollback tests, release build, and six direct CLI
+  identity integration tests.
+- Native Ubuntu/WSL passed the corresponding gates in a separate Linux target
+  directory: **191 passed**, zero failed or ignored, plus the three rollback
+  tests and six identity integration tests. Both release binaries report
+  `tasks 0.1.0`.
+- The final precedence regression exercises `--project > TASKS_PROJECT >
+  .tasks.json > registry` on both platforms. Full logs are under
+  `target/evidence/final-20260921/`.
+- The first Linux integration invocation accidentally selected the Windows
+  executable and failed on Linux `/tmp` paths. That log is retained; the test
+  default was corrected to select the native executable and the rerun passed.
+
+### Live migration and deployment
+
+- A strict rehearsal over `F:\projects` selected 51 reviewed project roots,
+  5,597 tasks, zero unrecognized candidates, and one preserved UTF-8 BOM
+  warning. The canonical manifest and exclusions are under `migration/`.
+- The matching strict apply imported and verified all 51 projects with zero
+  failures. No Markdown ledger was moved, deleted, or quarantined. Evidence is
+  under `target/evidence/migration-20260921-{final-dry,live-apply}/`.
+- Every project received a one-field `.tasks.json`. A post-apply `doctor` loop
+  resolved all 51 identities to the expected UUID and schema 4 database.
+- Live databases reside at `F:\projects\.tasks-cli-data`, inside the user's
+  existing iDrive-backed project tree. The normal Windows data-root path is a
+  junction to that directory. The previous empty default store remains at the
+  dated rollback path.
+- Windows `tasks.exe` is installed in `F:\CliTools`; the native Linux binary is
+  in `/home/pawel/.local/bin`. WSL login shells set `TASKS_WINDOWS_EXE` to the
+  Windows binary, and a real delegated `doctor` call from ActiveAppView resolved
+  the Windows-owned database successfully.
+- Product skill links for Codex, Claude and Copilot on Windows and WSL resolve
+  directly to `integration/skills`. Previous Markdown-skill links remain in
+  dated backup directories outside active skill discovery. The three skills pass `quick_validate.py`; the candidate
+  model exercise met all 14 rubric assertions, while the comparison baseline is
+  documented as contaminated and is not a blind score.
+
 ## Current verification: selection, enrichment and development skills — 2026-09-19
 
 Schema 4 adds P0–P3 priority (default P2), runnable default listings, explicit

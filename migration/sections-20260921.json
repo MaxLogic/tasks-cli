@@ -1,0 +1,37 @@
+{
+  "section_patterns": [
+    {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}",
+      "status": "done"
+    }
+  ],
+  "sections": {
+    "Archived completed and superseded active entries": "cancelled",
+    "Audiobook Scanner": "done",
+    "Blocked": "blocked",
+    "Cache & Scheduling": "done",
+    "CLI Tool": "done",
+    "Consolidated": "cancelled",
+    "Core Types & Utilities": "done",
+    "Documentation": "done",
+    "Done": "done",
+    "Error Handling": "done",
+    "Foundation & Setup": "done",
+    "In Progress": "in-progress",
+    "Metadata Pipeline": "done",
+    "Metadata Providers": "done",
+    "Next - Later": "draft",
+    "Next - This Week": "draft",
+    "Next - Today": "todo",
+    "Next – Later": "draft",
+    "Next – This Week": "draft",
+    "Next – Today": "todo",
+    "Ongoing": "in-progress",
+    "Rejected": "cancelled",
+    "Retired / Superseded": "cancelled",
+    "Security": "done",
+    "Test Data & Fixtures": "done",
+    "Threading & Rate Limiting": "done",
+    "VCL GUI": "done"
+  }
+}

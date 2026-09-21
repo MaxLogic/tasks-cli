@@ -1,8 +1,9 @@
 # Proposed AI task workflow
 
 Status: states, labels, priority, selection, unlock queries and ranked search are
-implemented. Worktree identity and shared skills have development candidates in
-`integration/`; installed skills and live ledgers have not been switched. `spec.md` remains the current implementation contract.
+implemented. Direct worktree identity discovery and the shared SQLite skills are
+implemented in `integration/`; live deployment is handled as one migration
+cutover. `spec.md` remains the current implementation contract.
 
 ## Keep the SQLite CLI
 
@@ -91,12 +92,11 @@ AGENTS.md should point to the shared task skill and identity file, rather than
 duplicate the UUID. A general `.env` is a poor fit because it is often untracked,
 may contain secrets, and requires separate loading rules.
 
-Initially the shared skill can read this file and pass `--project` explicitly;
-automatic CLI discovery is a separate feature. An unknown UUID must fail with
-setup instructions rather than create another backlog. On a new machine, restore
-or initialize that identity deliberately, then bind roots as needed. Current
-CLI users must continue using explicit `--project` or `bind`; it does not yet
-read `.tasks.json` or discover Git worktree membership.
+The CLI reads the nearest identity directly, so an unbound Git worktree reaches
+the same UUID without a wrapper or per-worktree binding. An unknown UUID fails
+with setup instructions rather than creating another backlog. On a new machine,
+restore or initialize that identity deliberately, then bind roots when legacy
+directory routing is still needed.
 
 The coordinator supplies project UUID, task ID/version, relevant rules, bounded
 scope and acceptance criteria in each subagent brief. Subagents return changes,

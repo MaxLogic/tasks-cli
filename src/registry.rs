@@ -6,6 +6,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+const PROJECT_IDENTITY_FILE: &str = ".tasks.json";
+const MAX_PROJECT_IDENTITY_BYTES: u64 = 4096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectIdentity {
+    project_id: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegistryBinding {
     pub root: String,
@@ -145,19 +154,80 @@ fn canonical_project_id(project: &str) -> Result<String, AppError> {
         })
 }
 
+fn identity_project(route_from: &Path) -> Result<Option<String>, AppError> {
+    for ancestor in route_from.ancestors() {
+        let path = ancestor.join(PROJECT_IDENTITY_FILE);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::io_path("inspect project identity", &path, error)),
+        };
+        if !metadata.is_file() {
+            return Err(AppError::Validation(format!(
+                "{} must be an ordinary file containing only a project_id",
+                path.display()
+            )));
+        }
+        if metadata.len() > MAX_PROJECT_IDENTITY_BYTES {
+            return Err(AppError::Validation(format!(
+                "{} is {} bytes; project identity files are limited to {} bytes",
+                path.display(),
+                metadata.len(),
+                MAX_PROJECT_IDENTITY_BYTES
+            )));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| AppError::io_path("read project identity", &path, error))?;
+        if bytes.len() as u64 > MAX_PROJECT_IDENTITY_BYTES {
+            return Err(AppError::Validation(format!(
+                "{} grew beyond the {} byte project identity limit while it was read",
+                path.display(),
+                MAX_PROJECT_IDENTITY_BYTES
+            )));
+        }
+        let identity: ProjectIdentity = serde_json::from_slice(&bytes).map_err(|error| {
+            AppError::Validation(format!(
+                "{} is not a valid project identity: {error}; it must contain only {{\"project_id\":\"<canonical-lowercase-UUID>\"}}",
+                path.display()
+            ))
+        })?;
+        let canonical = Uuid::parse_str(&identity.project_id)
+            .map(|id| id.to_string())
+            .map_err(|_| {
+                AppError::Validation(format!(
+                    "{} project_id '{}' is not a UUID",
+                    path.display(),
+                    identity.project_id
+                ))
+            })?;
+        if identity.project_id != canonical {
+            return Err(AppError::Validation(format!(
+                "{} project_id must be canonical lowercase UUID text; use '{}'",
+                path.display(),
+                canonical
+            )));
+        }
+        return Ok(Some(canonical));
+    }
+    Ok(None)
+}
+
 pub fn resolve_project(
     data_root: &Path,
     explicit_project: Option<&str>,
     fallback_root: Option<&Path>,
 ) -> Result<String, AppError> {
     let data_root = validate_storage_root(data_root)?;
-    let reg = Registry::load(&registry_path(&data_root))?;
     if let Some(project) = explicit_project {
         return canonical_project_id(project);
     }
     let current_dir = std::env::current_dir()
         .map_err(|error| AppError::io_op("resolve the current directory", error))?;
     let route_from = fallback_root.unwrap_or(&current_dir);
+    if let Some(project) = identity_project(route_from)? {
+        return Ok(project);
+    }
+    let reg = Registry::load(&registry_path(&data_root))?;
     let mut winner: Option<(usize, RegistryBinding)> = None;
     for b in reg.bindings.iter() {
         if is_descendant(Path::new(&b.root), route_from)? {
