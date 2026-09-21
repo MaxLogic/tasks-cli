@@ -2,14 +2,15 @@ use crate::error::AppError;
 use crate::storage::{acquire_exclusive_lock, validate_storage_root};
 use crate::store::{create_project_db, StoreInfo};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const PROJECT_IDENTITY_FILE: &str = ".tasks.json";
 const MAX_PROJECT_IDENTITY_BYTES: u64 = 4096;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectIdentity {
     project_id: String,
@@ -154,62 +155,128 @@ fn canonical_project_id(project: &str) -> Result<String, AppError> {
         })
 }
 
-fn identity_project(route_from: &Path) -> Result<Option<String>, AppError> {
-    for ancestor in route_from.ancestors() {
-        let path = ancestor.join(PROJECT_IDENTITY_FILE);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(AppError::io_path("inspect project identity", &path, error)),
-        };
-        if !metadata.is_file() {
-            return Err(AppError::Validation(format!(
-                "{} must be an ordinary file containing only a project_id",
-                path.display()
-            )));
-        }
-        if metadata.len() > MAX_PROJECT_IDENTITY_BYTES {
-            return Err(AppError::Validation(format!(
-                "{} is {} bytes; project identity files are limited to {} bytes",
-                path.display(),
-                metadata.len(),
-                MAX_PROJECT_IDENTITY_BYTES
-            )));
-        }
-        let bytes = fs::read(&path)
-            .map_err(|error| AppError::io_path("read project identity", &path, error))?;
-        if bytes.len() as u64 > MAX_PROJECT_IDENTITY_BYTES {
-            return Err(AppError::Validation(format!(
-                "{} grew beyond the {} byte project identity limit while it was read",
-                path.display(),
-                MAX_PROJECT_IDENTITY_BYTES
-            )));
-        }
-        let identity: ProjectIdentity = serde_json::from_slice(&bytes).map_err(|error| {
+fn read_identity(path: &Path) -> Result<Option<String>, AppError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(AppError::io_path("inspect project identity", path, error)),
+    };
+    if !metadata.is_file() {
+        return Err(AppError::Validation(format!(
+            "{} must be an ordinary file containing only a project_id",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_PROJECT_IDENTITY_BYTES {
+        return Err(AppError::Validation(format!(
+            "{} is {} bytes; project identity files are limited to {} bytes",
+            path.display(),
+            metadata.len(),
+            MAX_PROJECT_IDENTITY_BYTES
+        )));
+    }
+    let bytes =
+        fs::read(path).map_err(|error| AppError::io_path("read project identity", path, error))?;
+    if bytes.len() as u64 > MAX_PROJECT_IDENTITY_BYTES {
+        return Err(AppError::Validation(format!(
+            "{} grew beyond the {} byte project identity limit while it was read",
+            path.display(),
+            MAX_PROJECT_IDENTITY_BYTES
+        )));
+    }
+    let identity: ProjectIdentity = serde_json::from_slice(&bytes).map_err(|error| {
             AppError::Validation(format!(
                 "{} is not a valid project identity: {error}; it must contain only {{\"project_id\":\"<canonical-lowercase-UUID>\"}}",
                 path.display()
             ))
         })?;
-        let canonical = Uuid::parse_str(&identity.project_id)
-            .map(|id| id.to_string())
-            .map_err(|_| {
-                AppError::Validation(format!(
-                    "{} project_id '{}' is not a UUID",
-                    path.display(),
-                    identity.project_id
-                ))
-            })?;
-        if identity.project_id != canonical {
-            return Err(AppError::Validation(format!(
-                "{} project_id must be canonical lowercase UUID text; use '{}'",
+    let canonical = Uuid::parse_str(&identity.project_id)
+        .map(|id| id.to_string())
+        .map_err(|_| {
+            AppError::Validation(format!(
+                "{} project_id '{}' is not a UUID",
                 path.display(),
-                canonical
-            )));
+                identity.project_id
+            ))
+        })?;
+    if identity.project_id != canonical {
+        return Err(AppError::Validation(format!(
+            "{} project_id must be canonical lowercase UUID text; use '{}'",
+            path.display(),
+            canonical
+        )));
+    }
+    Ok(Some(canonical))
+}
+
+fn identity_project(route_from: &Path) -> Result<Option<String>, AppError> {
+    for ancestor in route_from.ancestors() {
+        if let Some(project) = read_identity(&ancestor.join(PROJECT_IDENTITY_FILE))? {
+            return Ok(Some(project));
         }
-        return Ok(Some(canonical));
     }
     Ok(None)
+}
+
+pub fn project_identity_at_root(root: &Path) -> Result<Option<Uuid>, AppError> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        AppError::Registry(format!(
+            "cannot resolve root {}: {error}; check that the directory exists",
+            root.display()
+        ))
+    })?;
+    read_identity(&canonical_root.join(PROJECT_IDENTITY_FILE))?
+        .map(|project| {
+            Uuid::parse_str(&project).map_err(|error| {
+                AppError::Validation(format!(
+                    "invalid project identity UUID '{project}': {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+pub fn write_project_identity(root: &Path, project_id: &Uuid) -> Result<PathBuf, AppError> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        AppError::Registry(format!(
+            "cannot resolve root {}: {error}; check that the directory exists",
+            root.display()
+        ))
+    })?;
+    let path = canonical_root.join(PROJECT_IDENTITY_FILE);
+    if let Some(existing) = read_identity(&path)? {
+        if existing == project_id.to_string() {
+            return Ok(path);
+        }
+        return Err(AppError::Validation(format!(
+            "{} already selects project {existing}; refusing to overwrite it with {project_id}",
+            path.display()
+        )));
+    }
+
+    let mut file = match OpenOptions::new().create_new(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read_identity(&path)?.as_deref() == Some(&project_id.to_string()) {
+                return Ok(path);
+            }
+            return Err(AppError::Validation(format!(
+                "{} appeared while the identity was being created and selects another project; refusing to overwrite it",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(AppError::io_path("create project identity", &path, error)),
+    };
+    let bytes = format!("{{\"project_id\":\"{project_id}\"}}\n");
+    if let Err(error) = file
+        .write_all(bytes.as_bytes())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(AppError::io_path("write project identity", &path, error));
+    }
+    Ok(path)
 }
 
 pub fn resolve_project(

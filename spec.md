@@ -62,12 +62,18 @@ from the current or delegated route directory, then the longest registry
 ancestor binding. The identity file is portable project configuration and never
 contains a database path. Reject an invalid nearer identity instead of skipping
 it. A valid identity selects only an existing database; it never initializes a
-project implicitly. `init`, `bind`, and `bulk-import` do not consume directory
-identity as an implicit creation argument. Require an ordinary, non-link file no
+project implicitly. `bind` and `bulk-import` do not consume directory identity
+as an implicit creation argument; `init` does so only when explicitly passed
+`--write-identity`. Require an ordinary, non-link file no
 larger than 4 KiB so identity lookup stays bounded and cannot redirect to an
-unrelated configuration file.
+unrelated configuration file. `init --write-identity` may create this file at
+the exact root after initializing the selected project. It accepts an existing
+matching identity and refuses malformed or conflicting content without
+overwriting it. When `--project` is omitted, a valid identity already at the
+exact root supplies the UUID for this explicit initialization operation.
 
-`tasks init --root <absolute-path>` creates a project and binding. `tasks bind
+`tasks init --root <absolute-path> [--write-identity]` creates a project and
+binding and may also create the portable identity. `tasks bind
 --root <absolute-path> --project <uuid>` associates another worktree with an
 existing project. Neither requires Git nor modifies the project directory.
 Initialization of an already bound root reports its existing identity, without
@@ -161,7 +167,7 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 
 | Command | Required behavior |
 | --- | --- |
-| `init --root PATH` | Create project and return UUID/database path; existing binding is a no-op |
+| `init --root PATH [--write-identity]` | Create project and return UUID/database path; existing binding is a no-op; optionally create or verify the exact root identity |
 | `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
 | `list [--open | --needs-human] [--status STATUS] [--label LABEL] [--after CURSOR] [--limit N]` | Default runnable todo/in-progress; priority then ID; default 20, max 100 |
 | `unlocks [--offset N] [--limit N]` | Open prerequisites ranked by immediately runnable then direct open dependents |

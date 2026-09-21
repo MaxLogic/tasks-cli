@@ -2,28 +2,35 @@
 
 ## Current verification and deployment — 2026-09-21
 
-Direct nearest-ancestor `.tasks.json` routing and `tasks --version` are
-implemented. Routing precedence is explicit `--project`, `TASKS_PROJECT`, the
-nearest identity file, then the longest registry binding. Invalid nearer
-identities fail closed. The task-ledger, create-task and resolve-task skills now
-use the CLI directly.
+Direct nearest-ancestor `.tasks.json` routing, `init --write-identity`, and
+build-identified `tasks --version` output are implemented. Routing precedence
+is explicit `--project`, `TASKS_PROJECT`, the nearest identity file, then the
+longest registry binding. Invalid nearer identities fail closed. The task-ledger,
+create-task and resolve-task skills use the CLI directly.
 
 ### Product proof
 
 - Windows passed `cargo fmt --check`, Clippy with all targets/features and
-  warnings denied, `cargo test --locked --no-fail-fast` (**187 passed**), the
+  warnings denied, `cargo test --locked --no-fail-fast` (**189 passed**), the
   three feature-enabled bulk rollback tests, release build, and six direct CLI
   identity integration tests.
 - Native Ubuntu/WSL passed the corresponding gates in a separate Linux target
-  directory: **191 passed**, zero failed or ignored, plus the three rollback
-  tests and six identity integration tests. Both release binaries report
-  `tasks 0.1.0`.
+  directory: **193 passed**, zero failed or ignored, plus the three rollback
+  tests and six identity integration tests. The release candidates report
+  `tasks 0.1.0 (commit <12-hex-source-commit>)`.
 - The final precedence regression exercises `--project > TASKS_PROJECT >
   .tasks.json > registry` on both platforms. Full logs are under
   `target/evidence/final-20260921/`.
 - The first Linux integration invocation accidentally selected the Windows
   executable and failed on Linux `/tmp` paths. That log is retained; the test
   default was corrected to select the native executable and the rerun passed.
+- During the identity/version feature verification, the first Linux full-suite
+  invocation again inherited the deployed `TASKS_WINDOWS_EXE`. Its safety
+  rejections are retained in
+  `target/evidence/linux-feature-first-failure-20260921.log`; the native rerun
+  explicitly unset delegation and passed in
+  `target/evidence/linux-feature-verification-20260921.log`. Windows evidence is
+  `target/evidence/windows-feature-verification-20260921.log`.
 
 ### Live migration and deployment
 

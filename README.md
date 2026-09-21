@@ -21,7 +21,7 @@ in the current crate, not a claim to bundle the latest upstream SQLite patch.
 ## Sixty-second tour
 
 ```text
-tasks init --root "D:\Work\Project"
+tasks init --root "D:\Work\Project" --write-identity
 tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
@@ -63,8 +63,7 @@ registry picks the longest registered ancestor. Unknown projects fail loudly
 instead of creating a second backlog.
 
 ```text
-tasks init --root "D:\Work\Project"
-echo {"project_id":"UUID"} > "D:\Work\Project\.tasks.json"
+tasks init --root "D:\Work\Project" --write-identity
 tasks bind --root "D:\Work\Project\subdir" --project UUID
 tasks --project UUID doctor
 ```
@@ -393,6 +392,11 @@ cargo build --release --locked
 tasks --version
 ```
 
+`tasks --version` reports the package version and the short Git commit embedded
+at build time, for example `tasks 0.1.0 (commit 0123456789ab)`. Release packaging
+may set `TASKS_BUILD_COMMIT`; builds without that override read the current Git
+commit and fall back to `unknown` only when Git metadata is unavailable.
+
 The executable lands at `target/release/tasks.exe` on Windows and
 `target/release/tasks` on Linux. Copy it to a directory on `PATH` or invoke it
 by absolute path, and do not replace an executable that is currently in use.
@@ -401,7 +405,7 @@ is not Linux proof.
 
 ## Tests
 
-The 2026-09-21 verification ran 187 tests on Windows and 191 on Ubuntu/WSL
+The 2026-09-21 verification ran 189 tests on Windows and 193 on Ubuntu/WSL
 with `cargo test --locked --no-fail-fast`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
@@ -427,7 +431,8 @@ never modified by the suite.
 this.
 
 States, labels, ranked search, priority, readiness selection, unlock queries,
-direct `.tasks.json` routing and `--version` are implemented. The product-owned
+direct `.tasks.json` routing, identity creation during `init`, and build-identified
+`--version` output are implemented. The product-owned
 skills and deployment contract are in [integration/README.md](integration/README.md).
 The reviewed 2026-09-21 migration imported and verified 51 project backlogs;
 the canonical set and exclusions are in [migration/README.md](migration/README.md).
