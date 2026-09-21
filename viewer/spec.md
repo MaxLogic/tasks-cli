@@ -25,7 +25,7 @@ The requested deliverables for this authoring task are these documents and [goal
 
 ## 2. Scope and decisions
 
-Required: discover registered projects; show project statistics; filter, search and sort both collections; virtualize both lists; select and read complete task details; edit existing tasks; inspect dependencies, history and project rules; enrich clipboard text in the selected project's context; remember navigation preferences; provide a portable Windows release and reproducible tests.
+Required: discover registered projects; show project statistics; filter, search and sort both collections; virtualize both lists; select and read complete task details; edit existing tasks; mark a task done with Ctrl+D; inspect dependencies, history and project rules; enrich clipboard text in the selected project's context with its button or Ctrl+E; remember navigation preferences; use the full ultrawide monitor with maximized startup; start with Windows by default with a Settings opt-out; bundle ElevenLabs Bella static announcement audio; provide a portable Windows release and reproducible tests.
 
 Excluded: creating/deleting tasks or projects, bulk edits, import/migration UI, rule editing, cloud services, accounts, synchronization, Linux/macOS viewer builds, automatic updates and automatic AI execution. The Rust CLI still requires native Windows and Linux verification when changed.
 
@@ -51,6 +51,9 @@ Proposed paths:
 | `viewer/lib/data/cli_client.dart` | Process lifecycle, protocol validation, typed errors |
 | `viewer/lib/data/models.dart` | DTO parsing, no widgets |
 | `viewer/lib/data/settings_store.dart` | Versioned atomic settings and draft persistence |
+| `viewer/lib/platform/` | Monitor/window state, per-user startup registration, single-instance activation and local audio playback |
+| `viewer/lib/controllers/announcement_controller.dart` | Static Bella clips versus dynamic NVDA announcements; cancellation and deduplication |
+| `viewer/assets/announcements/` | Generated Bella MP3 files and provenance manifest, bundled for offline use |
 | `viewer/lib/controllers/` | Project query, task query, detail editor and clipboard state |
 | `viewer/lib/ui/` | Screens, forms, dialogs, accessible virtual list |
 | `viewer/test/`, `viewer/integration_test/` | Unit/widget tests and real Windows integration |
@@ -59,7 +62,21 @@ Proposed paths:
 
 Resolve the CLI in this order: explicit viewer `--tasks-exe` absolute path, saved absolute path, bundled `tasks.exe` beside the viewer executable. Do not silently select an unrelated PATH version. Require the protocol probe below before querying. Settings provide Browse and Test connection actions. If the CLI is missing/incompatible, show a persistent setup error and disable data actions, while keeping Settings and Help usable.
 
-Support viewer launch arguments `--data-root <absolute path>`, `--tasks-exe <absolute path>` and `--settings-root <absolute path>`. These override saved settings. The test harness must always supply all three. Default settings live under `%LOCALAPPDATA%\MaxLogic\tasks-viewer`, separate from the task store. Never initialize a task store when it is missing. Show "No task store found" with its resolved path.
+Support viewer launch arguments `--data-root <absolute path>`, `--tasks-exe <absolute path>`, `--settings-root <absolute path>`, `--startup` and test-only `--test-mode`. Path arguments override saved settings. Automated test harnesses must supply all three paths and `--test-mode`. Default settings live under `%LOCALAPPDATA%\MaxLogic\tasks-viewer`, separate from the task store. Never initialize a task store when it is missing. Show "No task store found" with its resolved path.
+
+### 3.1 Full-monitor window and Windows startup
+
+Start maximized on every normal launch, including auto-start. Select the last-used monitor if connected, otherwise the primary monitor. Get its current working area and DPI; use the whole available client area without covering the taskbar. The user's display reported 3440x1440 physical pixels during authoring; never hard-code that as a logical size. Pane proportions and responsive behavior are defined in design.md. Preserve ordinary Restore/Minimize/Maximize controls, and clamp saved restored bounds to a connected monitor after resolution/topology changes.
+
+`start_with_windows` defaults true. On the first normal packaged-release launch, create one application-owned shortcut named `MaxLogic Tasks Viewer.lnk` in the current user's Windows Startup known folder. Target the absolute installed viewer executable with `--startup`, its explicit data/settings/CLI paths, and the executable directory as working directory. Use the Windows shortcut API through a maintained Windows-capable package or small platform bridge; paths/arguments are separate properties, never a shell-composed command. Startup-folder shortcuts are a supported [Windows sign-in startup mechanism](https://support.microsoft.com/en-us/windows/experience/startup-boot/configure-startup-applications-in-windows).
+
+The Settings checkbox "Start with Windows" is enabled initially and can be disabled. Apply only when Settings is saved. Disable removes only this app's owned shortcut; subsequent launches must not recreate it while false. Record registration success/failure independently of desired state and show errors with Retry. Detect an existing shortcut with an unrelated target and report a conflict instead of overwriting it. If Windows startup policy/Task Manager disables this app, show the effective disabled state and instructions; never re-enable it automatically or edit undocumented StartupApproved state. A moved portable bundle is re-registered only after the user launches it at the new location; never promise a deleted path will still launch.
+
+Use one normal instance per Windows user and settings root. A second launch activates the existing window rather than creating another editor. `--startup` must honor a saved false preference and exit before opening a window if stale registration invokes it. Debug/test builds and any launch with proposed `--test-mode` must never create/remove real startup registrations. The harness supplies that flag; startup tests use an injected temporary Startup directory and process-activation adapter. Real sign-in verification occurs in a disposable Windows test account and must not sign out the user's active session. Startup registration is implementation work, not a machine change performed while editing this specification.
+
+The manual packaged-release sign-in test is distinct from automated registration tests: run without `--test-mode` only inside the disposable Windows account, use explicit synthetic data/settings paths and allow its real application-owned Startup shortcut. After verification remove only that test account's run-owned shortcut and fixture artifacts. Do not run this manual procedure under the user's normal account. Injected-directory tests alone cannot pass the real sign-in gate.
+
+### 3.2 CLI process transport
 
 Use `Process.start` with `runInShell: false`. Close stdin after writing requests, drain stdout/stderr concurrently, and decode UTF-8 strictly. Never interpolate text into cmd.exe/PowerShell. All operations after project selection pass its UUID explicitly; never route by the viewer's working directory.
 
@@ -167,7 +184,15 @@ Provide separate Details, Dependencies, History and Project rules tabs. Rules ar
 
 ## 7. Editing and concurrency
 
-Edit button or F2 enters edit mode for the selected task. Editable fields are title, body, status, priority, labels and dependencies. ID, timestamps, version, history and rules are read-only. Use labelled SDK text fields and enum selectors. No autosave to the task store. Save/Ctrl+S applies all changed fields in one transaction; Cancel leaves the store unchanged. Save is disabled for a clean form or an in-flight write.
+Edit button or F4 enters edit mode for the selected task. F1 focuses Projects, F2 focuses Tasks, and F3 focuses the description/body directly, including its draft editor. Ctrl+F focuses the text filter of the focused list, or the last focused list when outside both. design.md section 9 is the authoritative complete shortcut/access-key map. Editable fields are title, body, status, priority, labels and dependencies. ID, timestamps, version, history and rules are read-only. Use labelled SDK text fields and enum selectors. No autosave to the task store. Save/Ctrl+S applies all changed fields in one transaction; Cancel leaves the store unchanged. Save is disabled for a clean form or an in-flight write.
+
+### Mark done
+
+Ctrl+D and the Mark done button set the selected task's status to `done` through one `viewer update` using the displayed version. Enable only when Tasks/Task details has focus, a task is selected and no write is in flight; suppress auto-repeated key-down events. Disable for an already-done task; a repeated invocation creates no event. A cancelled task can be explicitly changed to done subject to the existing store rules. Do not force completion past validation or a version conflict.
+
+In a dirty editor, Ctrl+D first opens "Mark task done with unsaved changes?" with Save changes and mark done (Alt+S), Discard changes and mark done (Alt+D), Cancel (Alt+C/Escape, default). Save includes the draft's other changed fields and `status: done` in one version-checked update. Discard sends only `status: done` but retains the draft until completion is confirmed, so a failed/conflicting update does not destroy it. An unconfirmed operation uses the same conflict/reconciliation rules as Save. On success clear the corresponding draft, update stats, play "Task marked done", and apply the existing saved-task-no-longer-matches behavior. In the list, retain focus at the same logical index, selecting the next surviving row or previous at the end; the done task's read view remains until another task is selected. No extra confirmation is required for a clean selected task.
+
+### Shared validation, updates and recovery
 
 Validate in both Dart and Rust. The store is authoritative:
 
@@ -195,9 +220,9 @@ Persist one recovery draft per open editor under the settings root, keyed by dat
 
 ## 8. Clipboard actions
 
-The selected project's toolbar has "Enrich clipboard" and "Preview enrichment" buttons. One selection scopes both actions to its UUID. Project selection is captured when the action starts; later selection changes do not retarget it. Disable buttons for no selection or unavailable store and expose the reason.
+The selected project's toolbar has "Enrich clipboard" and "Preview enrichment" buttons. Ctrl+E while the Projects list has focus invokes the exact same command handler as Enrich clipboard. Ignore key repeat and disable duplicate invocation while processing. One selection scopes both actions to its UUID. Project selection is captured when the action starts; later selection changes do not retarget it. Disable buttons for no selection or unavailable store and expose the reason.
 
-"Enrich clipboard" calls existing `enrich-clipboard` with explicit root/project and JSON output. Preserve its input limits, unknown-ID behavior, idempotence and best-effort text-equality check before replacement. That check is not atomic clipboard compare-and-swap; do not promise stronger race protection. Replacement publishes plain text and may replace other clipboard formats. Never duplicate the read-transform-write logic in Dart. On success announce replacement count and unknown-ID count. No replacements means "Clipboard unchanged". Do not display or log the entire clipboard on direct action.
+"Enrich clipboard" calls existing `enrich-clipboard` with explicit root/project and JSON output. Preserve its input limits, unknown-ID behavior, idempotence and best-effort text-equality check before replacement. That check is not atomic clipboard compare-and-swap; do not promise stronger race protection. Replacement publishes plain text and may replace other clipboard formats. Never duplicate the read-transform-write logic in Dart. On success expose replacement count and unknown-ID count in the persistent status; Bella mode plays "Clipboard enriched" while NVDA-only mode announces the counts. If unknown IDs need attention, use one dynamic NVDA announcement of that outcome instead of also playing the generic clip. No replacements means "Clipboard unchanged". Do not display or log the entire clipboard on direct action.
 
 "Preview enrichment" reads plain clipboard text once using the Flutter clipboard API, then sends it to existing `enrich --file -`. Show original and enriched selectable text in a dialog with replacement and unknown-ID counts. This action does not write the clipboard. Provide Close only; the direct action is the deliberate clipboard-writing route. Support the existing 16 MiB/10,000 distinct-reference limits, Unicode and line endings. A non-text clipboard shows "Clipboard contains no text" without changing it. A failed write never reports success. Announce processing after 500 ms, and final outcome once; no repeated speech for every ID.
 
@@ -208,6 +233,47 @@ NVDA is a release gate, not a future enhancement. Follow design.md's role, name,
 The early accessibility slice must prove a virtual list, labelled edit field, enum control, modal dialog and live status message with the actual Windows build and NVDA. If a framework control fails, fix or replace it within Flutter using a tested accessible implementation. A native Windows bridge is allowed only for a demonstrated missing platform capability, kept small and covered by tests. Do not defer core navigation until the end or silently drop virtual lists.
 
 Required engineering thresholds are product targets, not a legal conformance claim: ordinary text contrast at least 4.5:1; focus/control indicators at least 3:1 against adjacent colors; 2 logical-pixel visible focus outline; controls at least 32 logical pixels high. Follow Windows contrast themes and text scaling. Test 100%, 150%, 200% display scaling and 200% in-app text size. No clipping of controls or loss of operations at 800x600 logical pixels. Reduce to one pane when necessary. Never reserve NVDA's Insert/Caps Lock commands or require Menu/Right Ctrl remapping.
+
+### 9.1 ElevenLabs Bella static announcements
+
+Generate the application's fixed spoken feedback with ElevenLabs using the Bella voice, then bundle the resulting clips. This is development-time generation; runtime playback is local and works offline. NVDA continues to provide control names, focus, row text, editable content and dynamic errors. Do not synthesize private task bodies, titles, paths, IDs, versions or clipboard text through ElevenLabs. No ElevenLabs key goes into Dart, application settings, assets or release bundles.
+
+Create `viewer/tool/generate-announcements.ps1`, a fixed-text catalog and `viewer/assets/announcements/manifest.json`. The generator reads `ELEVENLABS_API_KEY` only from the authorized generation environment, resolves Bella through the account's [List voices API](https://elevenlabs.io/docs/api-reference/voices/search), and stores the selected voice ID/name/category in the manifest. Reuse a manifest-pinned ID on later generations and verify it still identifies the intended voice. Do not use a guessed historic ID or silently substitute a different voice. If Bella is missing or the account has multiple indistinguishable Bella candidates, generation remains pending until access/identity is resolved; unrelated implementation can continue.
+
+Call the official [Create speech API](https://elevenlabs.io/docs/api-reference/text-to-speech/convert) for each fixed phrase. Use `eleven_multilingual_v2` and `mp3_44100_128`, stability 0.5, similarity boost 0.75, style 0, speaker boost true. Verify account support before the batch; record the exact configuration. Generate only missing/changed entries, never during normal builds/tests. The initial phrase batch is in scope when the implementation goal is executed using available authorized credentials; do not automatically purchase credits or start repeated paid batches. Preserve successful clips and report the precise missing credential/voice/quota prerequisite.
+
+Required catalog (file ID -> exact spoken text):
+
+| ID | Text |
+| --- | --- |
+| `saving` | Saving |
+| `task_saved` | Task saved |
+| `task_done` | Task marked done |
+| `no_changes` | No changes needed |
+| `clipboard_enriched` | Clipboard enriched |
+| `clipboard_unchanged` | Clipboard unchanged |
+| `preview_ready` | Preview ready |
+| `reference_copied` | Task reference copied |
+| `project_id_copied` | Project ID copied |
+| `settings_saved` | Settings saved |
+| `loading` | Loading |
+| `refreshing` | Refreshing |
+| `refreshed` | Refreshed |
+| `no_matching_projects` | No projects match these filters |
+| `no_matching_tasks` | No tasks match these filters |
+| `no_tasks` | This project has no tasks |
+| `no_clipboard_text` | Clipboard contains no text |
+| `draft_restored` | Draft restored |
+| `draft_discarded` | Draft discarded |
+| `voice_test` | This is Bella. Spoken announcements are enabled. |
+
+Every additional fixed app feedback utterance must be catalogued and generated before release; control labels/body text read by NVDA are not app feedback clips. Manifest entries include ID, exact text, voice ID, model/settings, generation date, file name, duration and SHA-256. Listen to every generated file, reject incorrect/truncated speech, and record real generation provenance. Do not label another synthesizer's output Bella. Preserve the generator's text/config hash to avoid unnecessary regeneration. Ship committed reusable assets; packaging validates every referenced file/hash and contains no API key.
+
+Settings "Announcements" has Bella (default), NVDA only, and Off. Off disables only application-initiated clips/live messages; it never disables semantic controls or the user's screen reader. Bella volume defaults to 70%, adjustable 0..100 in 10% steps; Test voice plays the fixed preview. Store preferences locally. Missing/corrupt clip or playback failure falls back to an NVDA live announcement and a persistent audio warning without blocking the operation; release verification must still reject a missing required clip.
+
+Use one announcement controller and one audio player. The persistent Status control is focusable/readable on demand in every mode. For a static event in Bella mode its updated text is explicitly non-live: play one matching clip, with the full dynamic outcome remaining readable in Status. For dynamic error/validation/conflict details, audio fallback and NVDA-only outcomes, use exactly one live announcement channel and skip the equivalent clip. Never combine an explicit announcement call and a live-region update for the same event. Off keeps all status updates non-live. Never splice IDs/counts into prerecorded phrases. In NVDA-only mode announce the full status including its task ID/version/count. Coalesce obsolete progress: play loading/saving only after 500 ms and stop it when the final result arrives. Queue at most one pending final clip, replacing stale feedback with the latest relevant event. Never overlap two app clips.
+
+Do not delay a save, focus restoration or keyboard input to finish audio. Defer routine clips until focus changes settle for 300 ms; new input cancels pending clips and stops current app speech. Keep the full result text accessible after cancellation. The app must not stop/mute NVDA. Test with NVDA running to identify interference; no duplicate outcome announcements or unreadable focus feedback may be accepted. Allow immediate switch to NVDA-only or Off through Settings. Unsolicited startup clips are not required.
 
 ## 10. Performance and correctness evidence
 
@@ -241,6 +307,9 @@ All process, integration and performance tests receive unique `--data-root` and 
 | V08 | Windows end-to-end: launch packaged candidate, discover/filter/sort, cross virtual boundary, edit/reopen, conflict against a second real CLI writer, preview/enrich synthetic clipboard, restart with draft, unavailable store recovery |
 | V09 | Performance: section 10 fixtures, percentile/raw samples, frame/memory evidence, retained page/node bounds |
 | V10 | Manual NVDA: every walkthrough in design.md, speech evidence and actual text editing; automated semantics or UI Automation alone cannot pass this row |
+| V11 | Hotkeys/help: F1/F2/F3 exact focus targets, remembered-list Ctrl+F, all scoped access keys, AltGr/text-editing preservation, modal isolation, key-repeat suppression, Ctrl+D atomic/draft/conflict paths, Ctrl+E project-only routing, permanently visible Hotkey help button/F10, registry-generated searchable help and focus return |
+| V12 | Window/startup: full 3440x1440 monitor at actual DPI, maximized manual/sign-in launch, changed/missing monitor, default-on registration, disable persists, foreign shortcut preserved, moved bundle, second-instance activation, policy-disabled startup and registration failure; real sign-in proof in a disposable Windows account |
+| V13 | Bella: real ElevenLabs voice/config provenance and listening checks, manifest coverage/hash integrity, offline packaged playback, volume/modes, no secret or task content in generation, no duplicate app/NVDA outcome, rapid-event cancellation, playback failure fallback and missing-asset package rejection |
 
 ### Commands and evidence
 
@@ -268,7 +337,7 @@ pwsh -NoProfile -File viewer/tool/package.ps1
 
 For Rust changes, required commands are `cargo fmt --check`, `cargo clippy --locked --all-targets`, `cargo test --locked`, `cargo build --release --locked` on Windows and native Ubuntu/WSL. Use separate Cargo targets. Run Linux tests against Linux-owned temporary data roots; use actual Windows/Linux binaries for delegation checks against a synthetic Windows-owned root. Follow existing repository verification procedures for WSL path translation and evidence capture. Do not treat a cross-compile as Linux runtime proof.
 
-Create `viewer/verification-report.md` at implementation time with source commit, toolchains, commands, counts, failures/reruns, artifact SHA-256 hashes, V01..V10 results, manual NVDA observations, performance raw-log paths and limitations. Mark each item planned/passed/failed/unavailable truthfully. A skipped/manual-unavailable V10 means release acceptance is incomplete. Record no task bodies, clipboard contents or private live project data in shareable evidence.
+Create `viewer/verification-report.md` at implementation time with source commit, toolchains, commands, counts, failures/reruns, artifact SHA-256 hashes, V01..V13 results, manual NVDA observations, performance raw-log paths, real audio generation/listening evidence, startup verification and limitations. Mark each item planned/passed/failed/unavailable truthfully. An unavailable required manual test, startup proof or Bella asset-generation prerequisite means release acceptance is incomplete. Record no task bodies, clipboard contents or private live project data in shareable evidence.
 
 ## 12. Implementation slices
 
@@ -276,7 +345,7 @@ Create `viewer/verification-report.md` at implementation time with source commit
 
 Deps: none. Touches Flutter scaffold, reusable virtual list, controls and focus tests.
 
-Outcome: a synthetic 10,000-row prototype supports keyboard and NVDA selection beyond row 100, labelled text editing, an enum selector, modal restoration and a spoken status. Toolchain and test-root injection are established. This slice decides whether the chosen Flutter controls meet the actual Windows accessibility requirement before building the full UI.
+Outcome: a synthetic 10,000-row prototype supports keyboard and NVDA selection beyond row 100, labelled text editing, an enum selector, modal restoration and a spoken status. Establish F1/F2/F3, the scoped command registry and visible Hotkey help button, full-monitor maximization, test-root injection and a fakeable announcement interface. This slice decides whether the chosen Flutter controls meet the actual Windows accessibility requirement before building the full UI. Real Bella asset generation belongs to slice 7; prototype audio is explicitly a test double.
 
 Proof: from viewer run `flutter test test/accessibility_foundation_test.dart`; expect nonzero selected tests and all pass. Build and run Windows prototype with NVDA; execute design.md walkthrough A on synthetic data and record role/name/position, focus and speech evidence. A failed prototype must be corrected before collection UI implementation continues.
 
@@ -308,7 +377,7 @@ Proof: from viewer run `flutter test test/tasks test/details`; expect full-body 
 
 Deps: slice 4. Touches edit controller/form, conflict dialog and local draft storage.
 
-Outcome: all six fields save atomically with version checks; every leaving action preserves or deliberately discards the draft; V04/V05 pass.
+Outcome: all six fields and the Ctrl+D Mark done path save atomically with version checks; every leaving action preserves or deliberately discards the draft; V04/V05 and mutation cases in V11 pass.
 
 Proof: from viewer run `flutter test test/editor test/recovery`; expect validation, navigation and conflict tests pass. Run real CLI second-writer and acknowledgement-loss integration cases with persisted history assertions. Execute NVDA walkthrough C before proceeding.
 
@@ -316,17 +385,19 @@ Proof: from viewer run `flutter test test/editor test/recovery`; expect validati
 
 Deps: slice 3 and shared dialogs from slice 1. Touches clipboard controller/preview and project toolbar.
 
-Outcome: project-scoped direct enrichment and preview are usable and accurate; V06 passes with existing Rust semantics.
+Outcome: project-scoped direct enrichment by button/Ctrl+E and preview are usable and accurate; V06 and clipboard shortcut cases in V11 pass with existing Rust semantics.
 
 Proof: from viewer run `flutter test test/clipboard`; expect scope capture, no-write preview and errors pass. Execute synthetic-text NVDA walkthrough D and controlled-desktop clipboard integration. Confirm no task mutation/event is caused by enrichment.
 
 ### Slice 7: Complete release workflow
 
-Deps: slices 4, 5 and 6. Touches integration harness, packaging, performance fixes, README and verification report.
+Deps: slices 4, 5 and 6. Touches platform startup integration, real Bella asset generator/playback, integration harness, packaging, performance fixes, README and verification report.
 
-Outcome: packaged application works without Flutter installed, supports the complete design.md workflow and satisfies V01..V10 and section 10. README documents launch/configuration, keyboard help, draft location, statistics definitions and recovery. Performance fixes preserve all store and accessibility invariants.
+Outcome: packaged application works without Flutter installed, supports the complete design.md workflow and satisfies V01..V13 and section 10. Implement default Windows startup/opt-out, single-instance activation, real generated Bella assets and offline playback. README documents launch/configuration, Hotkey help, startup behavior, announcement settings, draft location, statistics definitions and recovery. Performance fixes preserve all store and accessibility invariants. Keep platform integration, asset generation and performance fixes in separate coherent commits within this delivery slice.
 
 Proof: use the final commands and evidence in section 11 once against the final source candidate. Exercise packaged-release startup, synthetic store edits and NVDA walkthroughs. Record every unmet target as failure; neither an executable file nor passing widget tests alone establishes completion.
+
+Focused proof for slice 7: run `flutter test test/platform test/announcements test/hotkeys` from viewer and expect positive test counts/all pass with injected startup/audio services. From root run proposed `pwsh -NoProfile -File viewer/tool/generate-announcements.ps1 -VerifyOnly` to validate the catalog and bundled assets without network calls, then its explicit `-Generate` mode only in the authorized generation environment for missing clips. VerifyOnly must fail until every required real clip/provenance exists. Actual startup and playback proof are walkthrough F; test doubles do not satisfy it.
 
 ## 13. Risks, prerequisites and handoff
 
@@ -334,6 +405,8 @@ Proof: use the final commands and evidence in section 11 once against the final 
 | --- | --- | --- |
 | Flutter Windows build tools and Windows SDK | Implementer records `flutter doctor -v` and successful x64 build; install missing tools only within existing machine authority | Slices 1, 3..7 |
 | Actual NVDA interactive session | Implementer/tester records NVDA version, speech and completed walkthroughs; inability to access it is a pending runtime gate | Slice 1 and final acceptance |
+| ElevenLabs generation access and Bella identity | Implementer uses authorized API credential/account with Bella available, resolves exact voice identity and records generated/listened-to clips; never substitute another voice or claim clips exist before generation | Slice 7 / V13 |
+| Disposable Windows startup test account | Implementer/tester verifies enable/disable across actual sign-in without signing out the user's account | Slice 7 / V12 |
 | Cross-platform Rust checks | Implementer uses Ubuntu/WSL, Linux-owned fixture root and two real binaries | Slice 2 certification/final gate |
 | Expensive project aggregation | Measure representative catalog; optimize aggregate SQL if targets fail, without adding a daemon or bypassing storage ownership | Slices 3, 7 |
 | Project start provenance | UI always labels first recorded task; historical project creation is unavailable and excluded | Project statistics |
