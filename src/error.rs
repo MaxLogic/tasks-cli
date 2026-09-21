@@ -14,6 +14,8 @@ pub enum AppError {
         "version conflict: expected {expected}, current {current}; re-read the task and retry with the current version"
     )]
     VersionConflict { expected: u64, current: u64 },
+    #[error("stale snapshot: {0}")]
+    StaleSnapshot(String),
     #[error("lock timeout: {0}")]
     LockTimeout(String),
     #[error("lock busy: {0}")]
@@ -73,6 +75,7 @@ impl AppError {
             Self::Usage(_) => "usage",
             Self::NotFound(_) | Self::NotFoundCode(_) => "not_found",
             Self::VersionConflict { .. } => "version_conflict",
+            Self::StaleSnapshot(_) => "stale_snapshot",
             Self::LockTimeout(_) | Self::Busy(_) => "lock_timeout",
             Self::Database(_) => "database",
             Self::Io(_) => "io",
@@ -90,6 +93,7 @@ impl AppError {
             Self::Usage(_) => 2,
             Self::NotFound(_) | Self::NotFoundCode(_) => 3,
             Self::VersionConflict { .. } => 4,
+            Self::StaleSnapshot(_) => 4,
             Self::LockTimeout(_) | Self::Busy(_) => 5,
             Self::InvalidPath(_) | Self::Validation(_) | Self::ShaMismatch { .. } => 2,
             Self::Database(_)

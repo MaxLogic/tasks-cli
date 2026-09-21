@@ -1,7 +1,7 @@
 use clap::{error::ErrorKind, Parser};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tasks_cli::cli::{Cli, Command, OutputFormat, ParsedDeps, RulesCommand};
+use tasks_cli::cli::{Cli, Command, OutputFormat, ParsedDeps, RulesCommand, ViewerCommand};
 use tasks_cli::error::AppError;
 use tasks_cli::interop;
 use tasks_cli::markdown;
@@ -98,7 +98,62 @@ fn import_payload(
     }
 }
 
+/// Dispatch the additive `tasks viewer` group. Every command below requires
+/// `--format json`, which `execute` enforces before reaching this function.
+fn execute_viewer(cli: &Cli, command: &ViewerCommand) -> Result<(), AppError> {
+    match command {
+        ViewerCommand::Info => {
+            envelope(
+                None,
+                CommandPayload::ViewerInfo(tasks_cli::viewer::info()),
+                cli.format,
+            );
+        }
+        ViewerCommand::Projects { request_file } => {
+            let data_root = resolved_root(cli)?;
+            let payload = tasks_cli::viewer::projects(&data_root, request_file)?;
+            envelope(None, CommandPayload::ViewerProjects(payload), cli.format);
+        }
+        ViewerCommand::Tasks { request_file } => {
+            let data_root = resolved_root(cli)?;
+            let project_id = resolved_project(cli, &data_root)?;
+            let payload = tasks_cli::viewer::tasks(&data_root, &project_id, request_file)?;
+            envelope(
+                Some(project_id),
+                CommandPayload::ViewerTasks(payload),
+                cli.format,
+            );
+        }
+        ViewerCommand::Show { id } => {
+            let data_root = resolved_root(cli)?;
+            let project_id = resolved_project(cli, &data_root)?;
+            let payload = tasks_cli::viewer::show(&data_root, &project_id, id)?;
+            envelope(
+                Some(project_id),
+                CommandPayload::ViewerShow(payload),
+                cli.format,
+            );
+        }
+        ViewerCommand::Update { request_file } => {
+            let data_root = resolved_root(cli)?;
+            let project_id = resolved_project(cli, &data_root)?;
+            let payload = tasks_cli::viewer::update(&data_root, &project_id, request_file)?;
+            envelope(
+                Some(project_id),
+                CommandPayload::ViewerUpdate(payload),
+                cli.format,
+            );
+        }
+    }
+    Ok(())
+}
+
 fn execute(cli: Cli) -> Result<(), AppError> {
+    if matches!(cli.command, Command::Viewer(_)) && cli.format != OutputFormat::Json {
+        return Err(AppError::Usage(
+            "viewer commands are JSON-only; add --format json to the command line".to_string(),
+        ));
+    }
     if interop::has_backend(&cli) && !interop::should_delegate(&cli) {
         return Err(AppError::Interop(
             "cannot use the Windows backend: --windows-exe or TASKS_WINDOWS_EXE is set, but this is not WSL; run the command on Windows, or run it from WSL"
@@ -108,6 +163,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     if interop::should_delegate(&cli) {
         let code = interop::delegate(&cli)?;
         std::process::exit(code);
+    }
+    if let Command::Viewer(command) = &cli.command {
+        // `viewer info` answers without touching a data root or a store.
+        return execute_viewer(&cli, command);
     }
     let data_root = resolved_root(&cli)?;
     match &cli.command {
@@ -708,6 +767,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 | Command::Init { .. }
                 | Command::Bind { .. }
                 | Command::BulkImport { .. }
+                | Command::Viewer(_)
                 | Command::Migrate => unreachable!(),
             }
         }

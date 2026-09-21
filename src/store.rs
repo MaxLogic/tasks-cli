@@ -22,6 +22,13 @@ use uuid::Uuid;
 
 pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
+/// The authoritative runnable-readiness predicate. Callers that build their own
+/// task SQL must splice this exact text, so the store and the viewer cannot
+/// drift into two different definitions of "runnable".
+pub(crate) const RUNNABLE_PREDICATE: &str = "t.status IN ('todo','in-progress')
+                   AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
+                   AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status!='done')";
+
 fn create_selection_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'));
         CREATE INDEX idx_tasks_priority_id ON tasks(priority,id);
@@ -1302,19 +1309,17 @@ impl Store {
             .map(|v| v.to_string());
         let size = validate_limit(limit)?;
         let snapshot = self.conn.unchecked_transaction()?;
-        let mut statement = snapshot.prepare(
+        let sql = format!(
             "SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks t
              WHERE (?1 IS NULL OR t.status=?1)
                AND (?1 IS NOT NULL OR t.status NOT IN ('done','cancelled'))
                AND (?2 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label=?2))
                AND (NOT ?3 OR (t.status NOT IN ('done','cancelled') AND EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')))
-               AND (?1 IS NOT NULL OR ?3 OR ?4 OR (
-                   t.status IN ('todo','in-progress')
-                   AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
-                   AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status!='done')))
+               AND (?1 IS NOT NULL OR ?3 OR ?4 OR ({RUNNABLE_PREDICATE}))
                AND (?5 IS NULL OR (t.priority,t.id) > (?5,?6))
              ORDER BY t.priority,t.id LIMIT ?7"
-        )?;
+        );
+        let mut statement = snapshot.prepare(&sql)?;
         let mut rows = statement.query(params![
             status,
             label,

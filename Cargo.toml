@@ -24,6 +24,7 @@ required-features = ["test-hooks"]
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
+file-id = "0.2.3"
 fs2 = "0.4.3"
 regex = "1.11.1"
 rusqlite = { version = "0.40.2", default-features = false, features = ["cache", "bundled", "backup", "trace", "fallible_uint"] }
