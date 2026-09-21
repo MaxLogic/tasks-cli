@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "voice": "Bella",
+  "model_id": "eleven_multilingual_v2",
+  "output_format": "mp3_44100_128",
+  "entries": [
+    { "id": "saving", "text": "Saving" },
+    { "id": "task_saved", "text": "Task saved" },
+    { "id": "task_done", "text": "Task marked done" },
+    { "id": "no_changes", "text": "No changes needed" },
+    { "id": "clipboard_enriched", "text": "Clipboard enriched" },
+    { "id": "clipboard_unchanged", "text": "Clipboard unchanged" },
+    { "id": "preview_ready", "text": "Preview ready" },
+    { "id": "reference_copied", "text": "Task reference copied" },
+    { "id": "project_id_copied", "text": "Project ID copied" },
+    { "id": "settings_saved", "text": "Settings saved" },
+    { "id": "loading", "text": "Loading" },
+    { "id": "refreshing", "text": "Refreshing" },
+    { "id": "refreshed", "text": "Refreshed" },
+    { "id": "no_matching_projects", "text": "No projects match these filters" },
+    { "id": "no_matching_tasks", "text": "No tasks match these filters" },
+    { "id": "no_tasks", "text": "This project has no tasks" },
+    { "id": "no_clipboard_text", "text": "Clipboard contains no text" },
+    { "id": "draft_restored", "text": "Draft restored" },
+    { "id": "draft_discarded", "text": "Draft discarded" },
+    { "id": "voice_test", "text": "This is Bella. Spoken announcements are enabled." }
+  ]
+}
