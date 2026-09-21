@@ -2,6 +2,10 @@ use crate::bulk::BulkRun;
 use crate::model::{
     HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, TaskDetail, TaskSummary,
 };
+use crate::viewer::{
+    ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload, ViewerTasksPayload,
+    ViewerUpdatePayload,
+};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -105,6 +109,11 @@ pub enum CommandPayload {
         schema_version: i32,
         sqlite_version: String,
     },
+    ViewerInfo(ViewerInfoPayload),
+    ViewerProjects(ViewerProjectsPayload),
+    ViewerTasks(ViewerTasksPayload),
+    ViewerShow(ViewerShowPayload),
+    ViewerUpdate(ViewerUpdatePayload),
 }
 
 #[derive(Serialize)]
@@ -440,6 +449,14 @@ impl Envelope {
             } => format!(
                 "db_path: {db_path}\nproject_id: {project_id}\nschema_version: {schema_version}\nsqlite_version: {sqlite_version}\n"
             ),
+            // The viewer protocol is JSON-only; main.rs rejects text mode before
+            // dispatch, so this arm exists to keep the renderer exhaustive.
+            CommandPayload::ViewerInfo(_)
+            | CommandPayload::ViewerProjects(_)
+            | CommandPayload::ViewerTasks(_)
+            | CommandPayload::ViewerShow(_)
+            | CommandPayload::ViewerUpdate(_) => serde_json::to_string(self)
+                .unwrap_or_else(|_| "viewer payloads require --format json".to_string()),
         };
         if let Some(project_id) = &self.project_id {
             if !matches!(

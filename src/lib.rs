@@ -18,3 +18,4 @@ pub mod labels;
 
 pub mod clipboard;
 pub mod enrich;
+pub mod viewer;

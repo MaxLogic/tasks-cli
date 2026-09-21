@@ -184,6 +184,32 @@ pub enum Command {
     },
     Migrate,
     Doctor,
+    /// Additive JSON protocol for the tasks viewer; requires --format json.
+    #[command(subcommand)]
+    Viewer(ViewerCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ViewerCommand {
+    /// Report the protocol version, operations and editable-field limits without opening a store.
+    Info,
+    /// Page through registry projects with per-project availability and statistics.
+    Projects {
+        #[arg(long = "request-file")]
+        request_file: PathBuf,
+    },
+    /// Page through one project's tasks with combined filters.
+    Tasks {
+        #[arg(long = "request-file")]
+        request_file: PathBuf,
+    },
+    /// Return the full task detail plus created_ms and updated_ms.
+    Show { id: String },
+    /// Apply one version-checked update over the six editable fields.
+    Update {
+        #[arg(long = "request-file")]
+        request_file: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
