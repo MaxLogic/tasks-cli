@@ -3,10 +3,11 @@
 ## Executables
 
 - Windows: `F:\CliTools\tasks.exe`
-  - SHA-256: `f7ec1aab97f19caaead8f93054f056f28e71052e3eb36fefed16a4f022612983`
+  - SHA-256: `f7acde2349697d97c560208da729a2ce93909167f8545c9659077a670d7a89d9`
 - Ubuntu/WSL: `/home/pawel/.local/bin/tasks`
-  - SHA-256: `67a782fab0092781b4c83fb991cf5ffa5377bf61b79d20cfbf50f79d4dda0688`
-- Both report `tasks 0.1.0`.
+  - SHA-256: `4e71b0b7d71517e8365b2351fae151249eb4d9789de105ceab7408d34b385125`
+- Both report `tasks 0.1.0 (commit 6e55a3a92a8f)` and were rebuilt from
+  implementation commit `6e55a3a`.
 
 `/home/pawel/.profile` exports
 `TASKS_WINDOWS_EXE=/mnt/f/CliTools/tasks.exe`. This makes ordinary WSL commands
