@@ -3,46 +3,45 @@ name: task-ledger
 description: "Access a project's shared SQLite task backlog with tasks CLI. Use for project identity, selected task queries, versioned mutations, dependency readiness, and task history. Pair with create-task for formulation or resolve-task for execution. Do not bootstrap, migrate, or edit a Markdown ledger implicitly."
 metadata:
   author: Pawel Piotrowski
-  version: "0.1.0-dev"
+  version: "1.0.0"
 ---
 
 # Task Ledger
 
 SQLite is the durable authority for task IDs, bodies, status, priority, labels,
 dependencies, rules, and history. Markdown exports are snapshots, never an
-editable second ledger. This development skill requires `tasks`, Python 3,
-Git, and the sibling development skills when formulation or execution is needed.
+editable second ledger. This skill requires `tasks` and the sibling skills when
+formulation or execution is needed.
 
 ## Identity before access
 
-For Git projects read the Git root's tracked `.tasks.json`, containing only a
-canonical UUID `project_id`. Outside Git (including SVN), use the nearest ancestor
-`.tasks.json` as the project boundary; never skip an invalid nearer identity to
-find a valid outer one. Use the bundled wrapper for each command:
+Each project root has a `.tasks.json` containing only a canonical UUID
+`project_id`. The CLI discovers the nearest identity from the working directory,
+including an inherited file in a Git worktree. It never skips an invalid nearer
+identity to find a usable outer one. Run commands from the project tree:
 
 ```text
-python -B <task-ledger>/scripts/task_project.py --cwd <working-directory> -- <command>
+tasks --format json list --limit 30
 ```
 
-The wrapper finds the Git root from nested directories, validates the file,
-checks the selected project through read-only `rules show`, and always passes
-`--project <uuid> --format json`. It never initializes or binds a worktree.
-Missing, malformed, untracked, or unknown identity stops access. Report the
-specific failure and necessary explicit setup; do not guess from a folder name,
-silently fall back to CWD binding, mint a UUID, or create another backlog.
+An explicit `--project` or `TASKS_PROJECT` overrides directory discovery. The
+registry remains a compatibility fallback when no identity file exists. Missing,
+malformed, or unknown identity stops the SQLite workflow. Report the specific
+failure and necessary explicit setup; do not guess from a folder name, mint a
+UUID, create another backlog, or edit a Markdown export.
 
-For synthetic tests pass wrapper `--data-root <unique-temp-root>`. For WSL with
-a Windows-owned store, use the Linux CLI's existing Windows delegation and
-wrapper `--windows-exe <path>` where needed. Do not open Windows SQLite files
+For synthetic tests pass `--data-root <unique-temp-root>`. For WSL with a
+Windows-owned store, use `--windows-exe <path>` or `TASKS_WINDOWS_EXE` so the
+Linux CLI delegates discovery and database access to Windows. Do not open Windows SQLite files
 with native Linux SQLite or propagate a Linux data root into a Windows store.
 Both worktrees use the same UUID even though their paths differ. A project UUID
 does not grant permission to migrate, deploy, or access unrelated projects.
 
 ## Read only the needed records
 
-All commands below follow the wrapper's `--` separator. Inspect live `tasks
---help` and command help if the installed binary differs from this development
-contract. Do not invent a fallback that broadens writes.
+The table omits the common `tasks --format json` prefix. Inspect live `tasks
+--help` and command help if the installed binary differs from this contract. Do
+not invent a fallback that broadens writes.
 
 | Need | Command |
 | --- | --- |

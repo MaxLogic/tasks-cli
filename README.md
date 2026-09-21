@@ -56,21 +56,24 @@ reach the same task.
 
 ## Finding the right project
 
-You rarely pass `--project`. From any directory inside a registered workspace,
-the registry picks the longest registered ancestor and routes there. An
-unregistered directory fails loudly instead of quietly creating a second
-backlog.
+You rarely pass `--project`. A project-root `.tasks.json` containing only its
+canonical `project_id` travels with Git worktrees and lets the CLI select the
+same backlog from any nested directory. When no identity file exists, the
+registry picks the longest registered ancestor. Unknown projects fail loudly
+instead of creating a second backlog.
 
 ```text
 tasks init --root "D:\Work\Project"
+echo {"project_id":"UUID"} > "D:\Work\Project\.tasks.json"
 tasks bind --root "D:\Work\Project\subdir" --project UUID
 tasks --project UUID doctor
 ```
 
-`TASKS_PROJECT` sets a default and an explicit `--project` beats it. That
-variable and the hidden `--route-root` option are routing context for routed
-project commands only. `init` and `bind` ignore both, native or delegated, and
-follow their own binding contract instead.
+Routing precedence is explicit `--project`, `TASKS_PROJECT`, the nearest
+`.tasks.json`, then the longest registry binding. A malformed nearer identity
+fails closed. The environment variable and hidden `--route-root` option are
+routing context for routed project commands only. `init` and `bind` ignore them,
+native or delegated, and follow their own binding contract instead.
 
 Data lives under `%LOCALAPPDATA%\MaxLogic\tasks-cli` on Windows and under
 `$XDG_DATA_HOME/MaxLogic/tasks-cli` or `$HOME/.local/share/MaxLogic/tasks-cli`
@@ -369,9 +372,10 @@ stdin, stdout, stderr, and the child exit code straight through, and never falls
 back to native Linux storage when the Windows executable cannot start. Writing
 to the wrong backlog would be worse than failing. With neither an explicit
 project nor `TASKS_PROJECT`, it translates the current directory and lets the
-Windows registry resolve the closest registered ancestor; an unknown directory
-fails without creating a backlog on either side. Native Linux commands without
-delegation use Linux-owned storage only, and a native Linux run rejects
+Windows child resolve the nearest `.tasks.json`, then the closest registered
+ancestor; an unknown directory fails without creating a backlog on either side.
+Native Linux commands without delegation use Linux-owned storage only, and a
+native Linux run rejects
 `/mnt/<drive>` and UNC or remote roots rather than open a Windows-owned SQLite
 file.
 
@@ -386,6 +390,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo test --locked --features test-hooks --test bulk_rollback
 cargo build --release --locked
+tasks --version
 ```
 
 The executable lands at `target/release/tasks.exe` on Windows and
@@ -396,8 +401,8 @@ is not Linux proof.
 
 ## Tests
 
-The 2026-09-19 verification ran 167 tests on Windows and 169 on Ubuntu/WSL
-with `cargo test --locked`. The separate feature-enabled bulk rollback regression
+The 2026-09-21 verification ran 187 tests on Windows and 191 on Ubuntu/WSL
+with `cargo test --locked --no-fail-fast`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
 commands, logs and measured results. Coverage includes routing and init contention,
@@ -421,7 +426,8 @@ never modified by the suite.
 `spec.md` is the normative contract when you need the exact rule behind any of
 this.
 
-States, labels, ranked search, priority, readiness selection and unlock queries are
-implemented. Development skill copies and worktree identity setup are in
-[integration/README.md](integration/README.md). Installed skills and live ledgers
-remain unchanged until the migration window.
+States, labels, ranked search, priority, readiness selection, unlock queries,
+direct `.tasks.json` routing and `--version` are implemented. The product-owned
+skills and deployment contract are in [integration/README.md](integration/README.md).
+The reviewed 2026-09-21 migration imported and verified 51 project backlogs;
+the canonical set and exclusions are in [migration/README.md](migration/README.md).
