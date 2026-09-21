@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "project_id": null,
+  "data": {
+    "command": "viewer_projects",
+    "protocol_version": 1,
+    "items": [
+      {
+        "project_id": "6bc32a95-434b-4545-b99d-4a264a6f919f",
+        "name": "alpha",
+        "roots": [
+          "C:\\viewer-fixture\\alpha",
+          "C:\\viewer-fixture\\mirror-alpha"
+        ],
+        "availability": "available",
+        "error": null,
+        "sampled_at_ms": 1790025045862,
+        "stats": {
+          "total": 10,
+          "open": 4,
+          "blocked": 1,
+          "done": 4,
+          "cancelled": 2,
+          "started_ms": 1790025015921,
+          "last_write_ms": 1790025016192,
+          "progress_percent": 50.0
+        }
+      },
+      {
+        "project_id": "546f045c-cf0a-4382-be46-c6530fabc3fa",
+        "name": "gamma",
+        "roots": [
+          "C:\\viewer-fixture\\gamma"
+        ],
+        "availability": "available",
+        "error": null,
+        "sampled_at_ms": 1790025045862,
+        "stats": {
+          "total": 1,
+          "open": 1,
+          "blocked": 1,
+          "done": 0,
+          "cancelled": 0,
+          "started_ms": 1790025016224,
+          "last_write_ms": 1790025016224,
+          "progress_percent": 0.0
+        }
+      },
+      {
+        "project_id": "9f35d6c1-013f-46bf-8f4b-59c180409f52",
+        "name": "ghost",
+        "roots": [
+          "C:\\viewer-fixture\\ghost"
+        ],
+        "availability": "error",
+        "error": {
+          "code": "database",
+          "message": "storage/database: file is not a database"
+        },
+        "sampled_at_ms": 1790025045862,
+        "stats": null
+      },
+      {
+        "project_id": "cfdb9779-1ae7-4a9e-b94f-61b27024c599",
+        "name": "orphan",
+        "roots": [
+          "C:\\viewer-fixture\\orphan"
+        ],
+        "availability": "missing",
+        "error": null,
+        "sampled_at_ms": 1790025045862,
+        "stats": null
+      },
+      {
+        "project_id": "84dda957-6a4a-4a65-89fd-0047d9f75b56",
+        "name": "vanished",
+        "roots": [
+          "C:\\viewer-fixture\\vanished"
+        ],
+        "availability": "available",
+        "error": null,
+        "sampled_at_ms": 1790025045862,
+        "stats": {
+          "total": 0,
+          "open": 0,
+          "blocked": 0,
+          "done": 0,
+          "cancelled": 0,
+          "started_ms": null,
+          "last_write_ms": null,
+          "progress_percent": null
+        }
+      }
+    ],
+    "total_count": 5,
+    "offset": 0,
+    "limit": 100,
+    "has_more": false,
+    "next_offset": null,
+    "snapshot": "v1:7b22636174616c6f67223a2264333638666462636533346136663835353461623762333832376235626430643964323531646633663730376561383865613030343637353437313062616662222c226b696e64223a2270726f6a65637473222c22706172616d73223a7b22646972656374696f6e223a22617363222c227175657279223a22222c22736f7274223a226e616d65222c227374617465223a22616c6c227d2c2276223a317d"
+  }
+}
