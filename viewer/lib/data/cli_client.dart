@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../app_environment.dart';
+import 'editor_models.dart';
 import 'models.dart';
 import 'settings_draft.dart';
 import 'settings_store.dart' show joinViewerPath;
@@ -112,7 +113,8 @@ class ViewerCliClient
     implements
         CancellableProjectReader,
         CancellableTaskReader,
-        CancellableTaskDetailReader {
+        CancellableTaskDetailReader,
+        TaskUpdateWriter {
   ViewerCliClient({
     required this.environment,
     ViewerSettingsDraftSource? savedSettings,
@@ -326,6 +328,48 @@ class ViewerCliClient
     );
     _requireProjectEcho(envelope, projectId);
     return TaskHistoryPage.fromJson(envelope.data);
+  }
+
+  /// Applies one version-checked edit (viewer/spec.md section 7).
+  ///
+  /// The request travels on stdin, so a large body or dependency list never
+  /// hits a command-line length limit. A rejected update arrives as a
+  /// [ViewerCliErrorFailure] with its `validation` or `version_conflict` code
+  /// and the conflict versions intact.
+  @override
+  Future<ViewerUpdateResult> updateTask(
+    String projectId,
+    ViewerUpdateRequest request,
+  ) async {
+    final envelope = await _updateTaskEnvelope(projectId, request);
+    _requireProjectEcho(envelope, projectId);
+    return ViewerUpdateResult.fromJson(envelope.data);
+  }
+
+  Future<ViewerEnvelope> _updateTaskEnvelope(
+    String projectId,
+    ViewerUpdateRequest request,
+  ) {
+    if (!_probePassed) {
+      return Future<ViewerEnvelope>.error(const ViewerProbeRequiredFailure());
+    }
+    return _runViewerCommand(
+      scopeKey: 'update',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('saving a task'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'viewer',
+        'update',
+        '--request-file',
+        '-',
+      ],
+      request: request.toJson(),
+      expectedCommands: const <String>{'viewer_update'},
+    );
   }
 
   String _requireDataRoot(String action) {

@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
+import '../data/settings_store.dart';
 import 'app_shell.dart';
 import 'details_pane.dart';
 import 'projects_pane.dart';
@@ -67,10 +68,18 @@ class ViewerWorkspaceProvider extends StatefulWidget {
     required this.environment,
     required this.readers,
     required this.child,
+    this.drafts,
+    this.closeGuard,
   });
 
   final ViewerEnvironment environment;
   final ViewerDataReader readers;
+
+  /// Recovery-draft persistence; null keeps drafts in memory.
+  final RecoveryDraftSink? drafts;
+
+  /// Platform close hook, so an open draft can be saved or discarded first.
+  final ViewerCloseGuard? closeGuard;
 
   /// Usually the shell.
   final Widget child;
@@ -82,15 +91,30 @@ class ViewerWorkspaceProvider extends StatefulWidget {
 
 class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
     with WidgetsBindingObserver {
+  /// Reader bundle plus the recovery-draft sink this window persists to.
+  late final ViewerDataReader _readers = widget.drafts == null
+      ? widget.readers
+      : ViewerDataReader(
+          projects: widget.readers.projects,
+          tasks: widget.readers.tasks,
+          detail: widget.readers.detail,
+          update: widget.readers.update,
+          drafts: widget.drafts,
+          probe: widget.readers.probe,
+        );
+
+  late final Future<bool> Function() _closeHandler = _model.closeWindow;
+
   late final ViewerWorkspaceModel _model = ViewerWorkspaceModel(
     environment: widget.environment,
-    readers: widget.readers,
+    readers: _readers,
   );
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.closeGuard?.attach(_closeHandler);
     // The handshake and the first catalog read start after the first frame, so
     // a failing CLI paints the shell and its status region first.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -102,6 +126,7 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
 
   @override
   void dispose() {
+    widget.closeGuard?.detach(_closeHandler);
     WidgetsBinding.instance.removeObserver(this);
     _model.dispose();
     super.dispose();
@@ -122,10 +147,28 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
   }
 }
 
-/// The shell plus the real workspace and the actions the real data supports.
+/// Lets the platform window ask the live workspace whether it may close.
 ///
-/// Slice 4 ships read views, so Edit and Mark done answer with what they did
-/// not do instead of failing silently; the editor slice replaces them.
+/// `main.dart` owns the window listener; the workspace provider registers the
+/// guard, so window management never leaks into the widget tree.
+class ViewerCloseGuard {
+  Future<bool> Function()? _handler;
+
+  bool get isAttached => _handler != null;
+
+  void attach(Future<bool> Function() handler) => _handler = handler;
+
+  void detach(Future<bool> Function() handler) {
+    if (identical(_handler, handler)) {
+      _handler = null;
+    }
+  }
+
+  /// True when the window may close; an unattached guard allows it.
+  Future<bool> call() async => _handler?.call() ?? true;
+}
+
+/// The shell plus the real workspace and the actions the real data supports.
 class ViewerWorkspaceHost extends StatelessWidget {
   const ViewerWorkspaceHost({
     super.key,
@@ -134,6 +177,8 @@ class ViewerWorkspaceHost extends StatelessWidget {
     required this.announcements,
     this.initialSettings,
     this.onSettingsChanged,
+    this.drafts,
+    this.closeGuard,
   });
 
   final ViewerEnvironment environment;
@@ -141,12 +186,16 @@ class ViewerWorkspaceHost extends StatelessWidget {
   final AnnouncementController announcements;
   final ViewerSettingsDraft? initialSettings;
   final ValueChanged<ViewerSettingsDraft>? onSettingsChanged;
+  final RecoveryDraftSink? drafts;
+  final ViewerCloseGuard? closeGuard;
 
   @override
   Widget build(BuildContext context) {
     return ViewerWorkspaceProvider(
       environment: environment,
       readers: readers,
+      drafts: drafts,
+      closeGuard: closeGuard,
       child: Builder(
         builder: (context) {
           final model = ViewerWorkspaceScope.of(context);
@@ -162,14 +211,10 @@ class ViewerWorkspaceHost extends StatelessWidget {
                   unawaited(model.goBack());
                 }
               },
-              onEditTask: () => announcements.announceStatus(
-                viewerEditDeferredMessage,
-                dynamic: true,
-              ),
-              onMarkDone: () => announcements.announceStatus(
-                viewerMarkDoneDeferredMessage,
-                dynamic: true,
-              ),
+              onEditTask: () => unawaited(model.beginEditTask()),
+              onMarkDone: () => unawaited(model.markDoneTask()),
+              onSave: () => unawaited(model.saveTask()),
+              onStoreChangeRequested: model.requestStoreChange,
               onSettingsChanged: onSettingsChanged,
             ),
           );

@@ -16,26 +16,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../controllers/detail_controller.dart';
+import '../controllers/editor_controller.dart';
+import '../data/editor_models.dart';
 import '../data/models.dart';
+import '../data/settings_store.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'body_text.dart';
 import 'commands.dart';
+import 'editor_dialogs.dart';
+import 'editor_form.dart';
 import 'viewer_controls.dart';
 import 'viewer_format.dart';
 import 'workspace_model.dart';
 
 /// How long a read may run before the pane says it is still loading.
 const Duration viewerSlowReadAfter = Duration(milliseconds: 500);
-
-/// Honest feedback for the two header actions the editor slice still owns.
-///
-/// Slice 4 ships read views only, so the buttons and their shortcuts must say
-/// what they did not do instead of failing silently.
-const String viewerEditDeferredMessage =
-    'The task editor is not part of this build yet. Nothing was changed.';
-const String viewerMarkDoneDeferredMessage =
-    'Mark done is not part of this build yet. Nothing was changed.';
 
 /// Task details region bound to one workspace model.
 class ViewerDetailsPane extends StatefulWidget {
@@ -48,8 +44,10 @@ class ViewerDetailsPane extends StatefulWidget {
   State<ViewerDetailsPane> createState() => _ViewerDetailsPaneState();
 }
 
-class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
+class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
+    implements ViewerEditorHost {
   final TextEditingController _body = TextEditingController();
+
   /// The loaded body in stored and engine coordinates; [ViewerBodyText.parse].
   ViewerBodyText _bodyText = ViewerBodyText.parse('');
   final TextEditingController _find = TextEditingController();
@@ -62,11 +60,21 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
   final FocusNode _snapshotFocus = FocusNode(debugLabel: 'details snapshot');
   final FocusNode _rulesFocus = FocusNode(debugLabel: 'details rules');
 
+  /// Focus targets the editor adds: one per field plus the header actions the
+  /// leaving guards return to.
+  final ViewerEditorFocusSet _editorFocus = ViewerEditorFocusSet();
+  final FocusNode _editActionFocus = FocusNode(debugLabel: 'details edit');
+  final FocusNode _markDoneActionFocus = FocusNode(
+    debugLabel: 'details mark done',
+  );
+
   /// Controller instance the local text controls are currently bound to.
   TaskDetailController? _boundController;
   String? _announcedNotice;
   String? _slowReadKey;
   Timer? _slowReadTimer;
+
+  ViewerEditorController get _editor => widget.model.editor;
 
   ViewerRegionHandles get _handles =>
       widget.api.handlesFor(ViewerRegion.details);
@@ -75,15 +83,24 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
   void initState() {
     super.initState();
     widget.api.registerScopeCommands(CommandScope.details, _onScopeCommand);
+    widget.api.registerScopeCommands(CommandScope.statusBar, _onStatusCommand);
     widget.model.addListener(_syncExternalContent);
+    widget.model.editorHost = this;
     _syncExternalContent();
   }
 
   @override
   void dispose() {
+    if (identical(widget.model.editorHost, this)) {
+      widget.model.editorHost = null;
+    }
     widget.api.registerScopeCommands(CommandScope.details, null);
+    widget.api.registerScopeCommands(CommandScope.statusBar, null);
     widget.model.removeListener(_syncExternalContent);
     _slowReadTimer?.cancel();
+    _editorFocus.dispose();
+    _editActionFocus.dispose();
+    _markDoneActionFocus.dispose();
     _body.dispose();
     _find.dispose();
     _snapshot.dispose();
@@ -97,6 +114,20 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
   }
 
   // ------------------------------------------------------------- commands
+
+  /// The status region asks first for the one command its own scope cannot
+  /// answer: Copy draft (design.md section 9, Status/error/setup).
+  KeyEventResult _onStatusCommand(String id) {
+    if (id != 'status.copyDraft') {
+      return KeyEventResult.ignored;
+    }
+    final editor = _editor;
+    if (!editor.isEditing || editor.draft == null) {
+      return KeyEventResult.ignored;
+    }
+    unawaited(_copyDraft());
+    return KeyEventResult.handled;
+  }
 
   KeyEventResult _onScopeCommand(String id) {
     switch (id) {
@@ -147,6 +178,13 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
       // control exists; the window then focuses the node itself, which is also
       // the whole path for a workspace without a Details pane of its own.
       case 'global.focusDescription':
+        // In edit mode F3 reaches the draft Body without leaving the editor
+        // (design.md section 7, "Task details and editor").
+        if (_editor.isEditing) {
+          widget.api.revealRegion(ViewerRegion.details);
+          _focusEditorField(EditorField.body);
+          return KeyEventResult.handled;
+        }
         _revealPanel(TaskDetailTab.details, _handles.bodyFocus);
         return KeyEventResult.handled;
       case 'global.findInBody':
@@ -155,10 +193,10 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
       case 'global.back':
         return _back() ? KeyEventResult.handled : KeyEventResult.ignored;
       case 'global.editTask':
-        _deferEdit();
+        unawaited(beginEdit());
         return KeyEventResult.handled;
       case 'global.markDone':
-        _deferMarkDone();
+        unawaited(_markDone());
         return KeyEventResult.handled;
       default:
         return KeyEventResult.ignored;
@@ -266,11 +304,370 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
 
   // -------------------------------------------------------------- actions
 
-  void _deferEdit() =>
-      widget.api.announce(viewerEditDeferredMessage, dynamic: true);
+  // ---------------------------------------------------------------- editor
 
-  void _deferMarkDone() =>
-      widget.api.announce(viewerMarkDoneDeferredMessage, dynamic: true);
+  /// F4, the Edit button and the shell's fallback action.
+  @override
+  Future<void> beginEdit() async {
+    final editor = _editor;
+    if (editor.isEditing) {
+      widget.api.revealRegion(ViewerRegion.details);
+      _focusEditorField(EditorField.title);
+      return;
+    }
+    final base = editor.base;
+    if (base == null) {
+      widget.api.announce('Select a task before editing.', dynamic: true);
+      return;
+    }
+    widget.api.revealRegion(ViewerRegion.details);
+    editor.beginEdit();
+    widget.api.announce(
+      'Editing ${base.canonicalId}, base version ${base.version}.',
+      dynamic: true,
+    );
+    _focusEditorField(EditorField.title);
+  }
+
+  /// Ctrl+D, the Mark done button and the shell's fallback action.
+  ///
+  /// A clean selected task needs no confirmation; a dirty editor asks first and
+  /// keeps the draft until the store confirms (spec.md section 7).
+  Future<EditorSaveResult?> _markDone() async {
+    final editor = _editor;
+    final base = editor.base;
+    if (base == null) {
+      widget.api.announce(
+        'Select a task before marking it done.',
+        dynamic: true,
+      );
+      return null;
+    }
+    if (base.status == 'done') {
+      widget.api.announce(
+        '${base.canonicalId} is already done.',
+        dynamic: true,
+      );
+      return null;
+    }
+    if (editor.isSaving) {
+      return null;
+    }
+    if (editor.isEditing && editor.isDirty) {
+      final decision = await widget.api.showModal<MarkDoneDirtyDecision>(
+        CommandScope.markDoneDirty,
+        (context) => ViewerMarkDoneDirtyDialog(
+          identity: base.canonicalId,
+          title: base.title,
+        ),
+      );
+      switch (decision) {
+        case MarkDoneDirtyDecision.saveAndMarkDone:
+          return _runWrite(
+            () => editor.markDone(includeDraft: true),
+            clipId: 'task_done',
+          );
+        case MarkDoneDirtyDecision.discardAndMarkDone:
+          // Discard sends only the status: the draft survives a failure or a
+          // conflict and is cleared once the store confirms.
+          return _runWrite(() => editor.markDone(), clipId: 'task_done');
+        case MarkDoneDirtyDecision.cancel:
+        case null:
+          return null;
+      }
+    }
+    return _runWrite(() => editor.markDone(), clipId: 'task_done');
+  }
+
+  /// Save / Ctrl+S from the form and the shell's fallback action.
+  @override
+  Future<EditorSaveResult?> save() async {
+    final editor = _editor;
+    if (!editor.isEditing || editor.isSaving) {
+      return null;
+    }
+    return _runWrite(() => editor.save(), clipId: 'task_saved');
+  }
+
+  @override
+  Future<EditorSaveResult?> markDone() => _markDone();
+
+  /// The reconciliation Retry under the form's unknown-outcome banner.
+  Future<void> _retryReconciliation() async {
+    final editor = _editor;
+    if (editor.isSaving) {
+      return;
+    }
+    await _runWrite(() => editor.retryReconciliation(), clipId: 'task_saved');
+  }
+
+  /// Cancel/Alt+C in the form: the dirty guard, then out of edit mode.
+  Future<void> _cancelEdit() async {
+    if (await confirmLeave(EditorLeaveReason.leaveEditMode)) {
+      _editor.exitEdit();
+    }
+  }
+
+  // ----------------------------------------------------------- editor host
+
+  @override
+  Future<bool> confirmLeave(EditorLeaveReason reason) async {
+    final editor = _editor;
+    if (!editor.isEditing) {
+      return true;
+    }
+    // Persist before the question: a crash inside the dialog must not lose the
+    // keystrokes the status line already promised to keep.
+    await editor.flushDraft();
+    if (!editor.isDirty) {
+      return true;
+    }
+    final base = editor.base;
+    final identity = base?.canonicalId ?? 'This task';
+    final decision = await widget.api.showModal<EditorLeaveDecision>(
+      CommandScope.unsavedChanges,
+      (context) => ViewerUnsavedChangesDialog(
+        identity: identity,
+        title: base?.title ?? '',
+        question: editorLeaveQuestion(reason),
+      ),
+    );
+    switch (decision) {
+      case EditorLeaveDecision.save:
+        final result = await _runWrite(
+          () => editor.save(),
+          clipId: 'task_saved',
+          refocusEdit: false,
+        );
+        // Navigation continues only after a confirmed save or reconciliation.
+        return result.isSuccess;
+      case EditorLeaveDecision.discard:
+        await editor.discardDraft();
+        widget.api.announce(
+          'Discarded the draft of $identity.',
+          clipId: 'draft_discarded',
+        );
+        return true;
+      case EditorLeaveDecision.cancel:
+      case null:
+        return false;
+    }
+  }
+
+  @override
+  Future<void> resolveConflict(EditorConflict conflict) async {
+    final editor = _editor;
+    final canonical = conflict.current.canonicalId;
+    final decision = await widget.api.showModal<EditorConflictDecision>(
+      CommandScope.conflict,
+      (context) => ViewerConflictDialog(conflict: conflict),
+    );
+    switch (decision) {
+      case EditorConflictDecision.reloadAndDiscard:
+        await editor.reloadCurrentAndDiscardDraft();
+        widget.api.announce(
+          'Reloaded $canonical at version ${conflict.current.version}. '
+          'Your draft was discarded.',
+          dynamic: true,
+        );
+        await widget.model.noteConfirmedRead();
+      case EditorConflictDecision.review:
+        final choices = await widget.api
+            .showModal<Map<EditorField, EditorConflictChoice>>(
+              CommandScope.conflictReview,
+              (context) => ViewerConflictReviewDialog(conflict: conflict),
+            );
+        if (choices == null) {
+          widget.api.announce(
+            'No choices applied. $canonical still conflicts with your draft.',
+            dynamic: true,
+          );
+          return;
+        }
+        editor.applyConflictReview(choices);
+        widget.api.announce(
+          'Rebased your draft on version ${conflict.current.version} of '
+          '$canonical. Save again to write it.',
+          dynamic: true,
+        );
+        final fields = conflict.conflictFields;
+        if (fields.isNotEmpty) {
+          _focusEditorField(fields.first);
+        }
+      case EditorConflictDecision.returnToEditor:
+      case null:
+        widget.api.announce(
+          '$canonical changed in the store. Resolve the conflict before '
+          'saving; your draft is kept.',
+          dynamic: true,
+        );
+    }
+  }
+
+  @override
+  Future<void> offerDraftRestore(ViewerRecoveryDraft draft) async {
+    final editor = _editor;
+    final current = widget.model.detail?.detail;
+    if (current == null || current.canonicalId != draft.taskId) {
+      return;
+    }
+    final TaskEditFields baseFields;
+    final TaskEditFields draftFields;
+    try {
+      baseFields = TaskEditFields.fromJson(draft.baseFields);
+      draftFields = TaskEditFields.fromJson(draft.draftFields);
+    } on FormatException catch (error) {
+      await editor.discardRecoveryDraft(draft);
+      widget.api.announce(
+        'The saved draft for ${draft.taskId} could not be read and was '
+        'removed: ${error.message}.',
+        dynamic: true,
+      );
+      return;
+    }
+    final decision = await widget.api.showModal<EditorRestoreDecision>(
+      CommandScope.restoreDraft,
+      (context) => ViewerRestoreDraftDialog(
+        identity: draft.taskId,
+        title: current.title,
+        baseVersion: draft.baseVersion,
+        currentVersion: current.version,
+      ),
+    );
+    if (decision != EditorRestoreDecision.restore) {
+      await editor.discardRecoveryDraft(draft);
+      widget.api.announce(
+        'Discarded the saved draft for ${draft.taskId}.',
+        clipId: 'draft_discarded',
+      );
+      return;
+    }
+    widget.api.revealRegion(ViewerRegion.details);
+    editor.restoreDraft(
+      projectId: draft.projectId,
+      current: current,
+      baseFields: baseFields,
+      baseVersion: draft.baseVersion,
+      draftFields: draftFields,
+    );
+    // The draft stays on disk until the restored form is saved or discarded.
+    editor.settleRecoveryDraft(draft);
+    widget.api.announce(
+      'Restored the saved draft for ${draft.taskId}. Check the fields, then '
+      'save.',
+      clipId: 'draft_restored',
+    );
+    _focusEditorField(EditorField.title);
+  }
+
+  @override
+  Future<bool> settleBeforeClose() async {
+    final editor = _editor;
+    if (!editor.isSaving) {
+      return true;
+    }
+    // "Keep waiting" is the only action: an atomic store write cannot be
+    // cancelled, and the window must not pretend otherwise.
+    await widget.api.showModal<void>(
+      CommandScope.slowSaveClose,
+      (context) => ViewerSlowSaveCloseDialog(
+        identity: editor.canonicalTaskId ?? 'this task',
+      ),
+    );
+    return !editor.isSaving;
+  }
+
+  // ------------------------------------------------------------ write paths
+
+  /// One write with the busy feedback, the outcome rules and the data refresh.
+  Future<EditorSaveResult> _runWrite(
+    Future<EditorSaveResult> Function() write, {
+    required String clipId,
+    bool refocusEdit = true,
+  }) async {
+    _startBusyWatch();
+    final result = await write();
+    await _afterWrite(result, clipId: clipId, refocusEdit: refocusEdit);
+    return result;
+  }
+
+  /// Speaks the outcome the way design.md section 7 asks, then refreshes.
+  Future<void> _afterWrite(
+    EditorSaveResult result, {
+    required String clipId,
+    bool refocusEdit = true,
+  }) async {
+    final editor = _editor;
+    switch (result.outcome) {
+      case EditorSaveOutcome.saved:
+      case EditorSaveOutcome.reconciled:
+        widget.api.announce(result.message ?? 'Saved.', clipId: clipId);
+        await widget.model.noteConfirmedRead();
+        if (refocusEdit) {
+          _returnToEditAction();
+        }
+      case EditorSaveOutcome.noop:
+        widget.api.announce(
+          result.message ?? 'No changes needed',
+          clipId: 'no_changes',
+        );
+        if (refocusEdit) {
+          _returnToEditAction();
+        }
+      case EditorSaveOutcome.unsaved:
+      case EditorSaveOutcome.failed:
+        widget.api.announce(
+          result.message ?? 'The write did not complete.',
+          dynamic: true,
+        );
+      case EditorSaveOutcome.invalid:
+        final field = editor.firstInvalidField;
+        if (field != null) {
+          _focusEditorField(field);
+        }
+        widget.api.announce(
+          result.message ?? 'Some fields need attention.',
+          dynamic: true,
+        );
+      case EditorSaveOutcome.conflict:
+        final conflict = result.conflict;
+        if (conflict != null) {
+          await resolveConflict(conflict);
+        }
+    }
+  }
+
+  /// The busy rule: one coalesced "Saving" status, with Bella's static clip
+  /// only once the write outlives the announcement controller's 500 ms
+  /// progress delay (design.md section 7). The outcome announcement that
+  /// follows every write clears the pending progress.
+  void _startBusyWatch() {
+    widget.api.announceProgress(viewerEditorSavingMessage, clipId: 'saving');
+  }
+
+  /// Focuses one field of the open form once the frame that owns it exists.
+  void _focusEditorField(EditorField field) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      final node = _editorFocus.forField(field);
+      if (node.context != null && node.canRequestFocus) {
+        node.requestFocus();
+      }
+    });
+  }
+
+  /// Returns focus to Edit after a save returns to read mode.
+  void _returnToEditAction() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          _editActionFocus.context != null &&
+          _editActionFocus.canRequestFocus) {
+        _editActionFocus.requestFocus();
+      }
+    });
+  }
 
   /// Dependency Back. False when there is nowhere to return to, so the key
   /// keeps whatever meaning the rest of the window has for it.
@@ -480,6 +877,28 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
           }
           return _buildMessage('Loading task ${state.canonicalTaskId}');
         }
+        // The editor replaces Details and the tab strip, so a half-written
+        // task can never sit next to a read view that claims it is stored.
+        if (_editor.isEditing) {
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final budget = viewerPaneBudgetFor(
+                context,
+                constraints.maxHeight,
+              );
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  ViewerPaneRegion(
+                    maxHeight: budget.header,
+                    child: _buildHeader(context, state, detail),
+                  ),
+                  Expanded(child: _buildEditor(context)),
+                ],
+              );
+            },
+          );
+        }
         return LayoutBuilder(
           builder: (context, constraints) {
             final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
@@ -534,6 +953,48 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
     );
   }
 
+  /// The draft form, bound to this pane's dialogs and the model's refresh.
+  Widget _buildEditor(BuildContext context) {
+    return ViewerEditorForm(
+      editor: _editor,
+      focus: _editorFocus,
+      onSave: () async {
+        await save();
+      },
+      onCancel: _cancelEdit,
+      onCopyDraft: _copyDraft,
+      onRetryReconciliation: _retryReconciliation,
+      onCommand: (id) => widget.api.dispatchFromScope(CommandScope.details, id),
+    );
+  }
+
+  /// Last resort for a draft that could not be persisted locally: hand the
+  /// user the exact text they would lose (spec.md section 7).
+  Future<void> _copyDraft() async {
+    final editor = _editor;
+    final base = editor.base;
+    final draft = editor.draft;
+    if (!editor.isEditing || draft == null) {
+      widget.api.announce('Open a draft before copying it.', dynamic: true);
+      return;
+    }
+    final lines = <String>[
+      '${base?.canonicalId ?? 'Task'} (base version ${base?.version ?? 0})',
+      for (final field in EditorField.values)
+        '${field.wireName}: ${draft.textOf(field)}',
+    ];
+    await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+    widget.api.announce('Draft copied to the clipboard.', dynamic: true);
+  }
+
+  /// Mark done needs a selected task that is not done and no write in flight
+  /// (spec.md section 7, "Mark done").
+  bool get _markDoneEnabled {
+    final editor = _editor;
+    final base = editor.base;
+    return base != null && base.status != 'done' && !editor.isSaving;
+  }
+
   // --------------------------------------------------------------- header
 
   Widget _buildHeader(
@@ -569,42 +1030,49 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane> {
             ],
           ),
           const SizedBox(height: 6),
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: <Widget>[
-              Tooltip(
-                message: 'F4',
-                child: TextButton(
-                  onPressed: _deferEdit,
-                  child: const Text('Edit'),
-                ),
-              ),
-              Tooltip(
-                message: 'Ctrl+D',
-                child: TextButton(
-                  onPressed: _deferMarkDone,
-                  child: const Text('Mark done'),
-                ),
-              ),
-              Tooltip(
-                message: 'Alt+C',
-                child: TextButton(
-                  onPressed: () => unawaited(_copyReference()),
-                  child: const Text('Copy reference'),
-                ),
-              ),
-              if (state.canGoBack)
+          // The form owns Save and Cancel, so the read-mode actions go away
+          // while it is open instead of offering a second way to write.
+          if (!_editor.isEditing)
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: <Widget>[
                 Tooltip(
-                  message: 'Alt+Left',
+                  message: 'F4',
                   child: TextButton(
-                    onPressed: () => unawaited(widget.model.goBack()),
-                    child: const Text('Back'),
+                    focusNode: _editActionFocus,
+                    onPressed: () => unawaited(beginEdit()),
+                    child: const Text('Edit'),
                   ),
                 ),
-            ],
-          ),
+                Tooltip(
+                  message: 'Ctrl+D',
+                  child: TextButton(
+                    focusNode: _markDoneActionFocus,
+                    onPressed: _markDoneEnabled
+                        ? () => unawaited(markDone())
+                        : null,
+                    child: const Text('Mark done'),
+                  ),
+                ),
+                Tooltip(
+                  message: 'Alt+C',
+                  child: TextButton(
+                    onPressed: () => unawaited(_copyReference()),
+                    child: const Text('Copy reference'),
+                  ),
+                ),
+                if (state.canGoBack)
+                  Tooltip(
+                    message: 'Alt+Left',
+                    child: TextButton(
+                      onPressed: () => unawaited(widget.model.goBack()),
+                      child: const Text('Back'),
+                    ),
+                  ),
+              ],
+            ),
         ],
       ),
     );

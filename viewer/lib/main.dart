@@ -7,6 +7,7 @@
 /// activation, the settings store and Bella playback arrive in later slices.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -16,8 +17,10 @@ import 'package:window_manager/window_manager.dart';
 import 'app.dart';
 import 'app_environment.dart';
 import 'data/cli_client.dart';
+import 'data/settings_store.dart';
 import 'launch_args.dart';
 import 'platform/window_state.dart';
+import 'ui/real_workspace.dart';
 import 'ui/workspace_model.dart';
 
 Future<void> main(List<String> arguments) async {
@@ -41,9 +44,16 @@ Future<void> main(List<String> arguments) async {
 
   WidgetsFlutterBinding.ensureInitialized();
   await _showViewerWindow();
+  final closeGuard = ViewerCloseGuard();
+  _installCloseGuard(closeGuard);
   // One client serves all three read scopes; the probe runs once before the
   // first data read, so a version mismatch is reported instead of parsed.
   final client = ViewerCliClient(environment: environment);
+  // Recovery drafts are private task content, so they live under the settings
+  // root the launch resolved and never under the store itself.
+  final drafts = SettingsStore(
+    settingsRoot: environment.settingsRoot,
+  ).recoveryDrafts;
   runApp(
     TasksViewerApp(
       environment: environment,
@@ -51,10 +61,42 @@ Future<void> main(List<String> arguments) async {
         projects: client,
         tasks: client,
         detail: client,
+        update: client,
+        drafts: drafts,
         probe: client.probe,
       ),
+      drafts: drafts,
+      closeGuard: closeGuard,
     ),
   );
+}
+
+/// Makes the window ask the workspace before it closes (spec.md section 7).
+///
+/// A close with a dirty draft prompts Save / Discard / Cancel, and a write in
+/// flight offers "Keep waiting" instead of pretending to cancel it.
+void _installCloseGuard(ViewerCloseGuard guard) {
+  final listener = _ViewerCloseListener(guard);
+  try {
+    windowManager.addListener(listener);
+    unawaited(windowManager.setPreventClose(true));
+  } on Object catch (error) {
+    stderr.writeln('Could not install the window close guard: $error');
+  }
+}
+
+/// Platform close request, routed to the live workspace model.
+class _ViewerCloseListener extends WindowListener {
+  _ViewerCloseListener(this.guard);
+
+  final ViewerCloseGuard guard;
+
+  @override
+  Future<void> onWindowClose() async {
+    if (await guard()) {
+      await windowManager.destroy();
+    }
+  }
 }
 
 /// Whether a `--startup` launch should open a window at all.

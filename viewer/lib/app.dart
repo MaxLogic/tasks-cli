@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'app_environment.dart';
 import 'controllers/announcement_controller.dart';
 import 'data/settings_draft.dart';
+import 'data/settings_store.dart';
 import 'platform/window_state.dart';
 import 'ui/app_shell.dart';
 import 'ui/prototype_workspace.dart';
@@ -25,6 +26,8 @@ class TasksViewerApp extends StatefulWidget {
     this.announcements,
     this.readers,
     this.workspaceBuilder,
+    this.drafts,
+    this.closeGuard,
   });
 
   /// Resolved paths and modes for this launch.
@@ -45,6 +48,14 @@ class TasksViewerApp extends StatefulWidget {
   /// Overrides the three panes the shell arranges; by default the root picks
   /// the prototype panes, or the real workspace when [readers] is set.
   final WorkspaceBuilder? workspaceBuilder;
+
+  /// Recovery-draft persistence for the editor. Null keeps drafts in memory,
+  /// which is what every test and the prototype workspace use; `main.dart`
+  /// passes the settings-root store.
+  final RecoveryDraftSink? drafts;
+
+  /// Platform close hook, wired by `main.dart` to the window listener.
+  final ViewerCloseGuard? closeGuard;
 
   @override
   State<TasksViewerApp> createState() => _TasksViewerAppState();
@@ -112,6 +123,8 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
       announcements: _announcements,
       initialSettings: _settings,
       onSettingsChanged: (draft) => setState(() => _settings = draft),
+      drafts: widget.drafts,
+      closeGuard: widget.closeGuard,
     );
   }
 

@@ -142,18 +142,17 @@ void main() {
     ) async {
       final log = <Map<dynamic, dynamic>>[];
       tester.binding.defaultBinaryMessenger
-          .setMockDecodedMessageHandler<dynamic>(
-        SystemChannels.accessibility,
-        (dynamic message) async {
-          log.add(message as Map<dynamic, dynamic>);
-        },
-      );
+          .setMockDecodedMessageHandler<dynamic>(SystemChannels.accessibility, (
+            dynamic message,
+          ) async {
+            log.add(message as Map<dynamic, dynamic>);
+          });
       addTearDown(
         () => tester.binding.defaultBinaryMessenger
             .setMockDecodedMessageHandler<dynamic>(
-          SystemChannels.accessibility,
-          null,
-        ),
+              SystemChannels.accessibility,
+              null,
+            ),
       );
 
       await pumpTaskBrowser(tester);
@@ -166,10 +165,7 @@ void main() {
       const message = 'Enter a row number from 1 to 3. Nothing moved.';
       final announced = log
           .where((entry) => entry['type'] == 'announce')
-          .map(
-            (entry) =>
-                (entry['data'] as Map<dynamic, dynamic>)['message'],
-          )
+          .map((entry) => (entry['data'] as Map<dynamic, dynamic>)['message'])
           .where((text) => text == message);
       expect(announced, hasLength(1));
     });

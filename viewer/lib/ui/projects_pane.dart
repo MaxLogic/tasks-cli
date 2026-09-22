@@ -473,13 +473,49 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
   }
 
   void _onRowSelected(int index) {
-    widget.model.selectProjectIndex(index);
-    unawaited(_ensureRow(index));
+    unawaited(_selectRow(index));
+  }
+
+  /// Arrow navigation runs the dirty-draft guard first; a refusal puts the
+  /// highlight back on the project the open editor still edits (spec.md 7).
+  Future<void> _selectRow(int index) async {
+    final moved = await widget.model.selectProjectRow(index);
+    if (!mounted) {
+      return;
+    }
+    if (!moved) {
+      _restoreRowSelection(index);
+      return;
+    }
+    await _ensureRow(index);
+  }
+
+  /// Puts the list highlight back where the model still is after a refusal.
+  void _restoreRowSelection(int refusedIndex) {
+    final current = widget.model.projectList.selectedIndex;
+    if (current != null) {
+      _handles.list.refuseMove(refusedIndex, current);
+    }
   }
 
   void _onRowActivated(int index) {
-    widget.model.openProjectIndex(index);
-    unawaited(_ensureRow(index));
+    unawaited(_activateRow(index));
+  }
+
+  Future<void> _activateRow(int index) async {
+    if (!await widget.model.selectProjectRow(index)) {
+      if (mounted) {
+        _restoreRowSelection(index);
+      }
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    await _ensureRow(index);
+    if (!mounted) {
+      return;
+    }
     if (widget.api.isReducedLayout) {
       // In a reduced layout the Tasks pane replaces this one, so opening a
       // project has to reveal it. The full layout keeps the focus here.

@@ -280,11 +280,49 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane> {
   }
 
   void _onRowSelected(int index) {
-    widget.model.selectTaskIndex(index);
-    unawaited(_ensureRow(index));
+    unawaited(_selectRow(index));
+  }
+
+  /// Arrow navigation runs the dirty-draft guard first; a refusal puts the
+  /// highlight back on the task the open editor still edits (spec.md 7).
+  Future<void> _selectRow(int index) async {
+    final moved = await widget.model.selectTaskRow(index);
+    if (!mounted) {
+      return;
+    }
+    if (!moved) {
+      _restoreRowSelection(index);
+      return;
+    }
+    await _ensureRow(index);
+  }
+
+  /// Puts the list highlight back where the model still is after a refusal.
+  void _restoreRowSelection(int refusedIndex) {
+    final current = widget.model.tasks?.selectedIndex;
+    if (current != null) {
+      _handles.list.refuseMove(refusedIndex, current);
+    }
   }
 
   void _onRowActivated(int index) {
+    unawaited(_activateRow(index));
+  }
+
+  Future<void> _activateRow(int index) async {
+    if (!await widget.model.selectTaskRow(index)) {
+      if (mounted) {
+        _restoreRowSelection(index);
+      }
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    await _ensureRow(index);
+    if (!mounted) {
+      return;
+    }
     unawaited(widget.model.openTaskIndex(index));
     if (widget.api.isReducedLayout) {
       widget.api.revealRegion(ViewerRegion.details);

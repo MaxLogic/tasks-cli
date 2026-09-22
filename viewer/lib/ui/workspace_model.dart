@@ -13,9 +13,13 @@ import 'package:flutter/foundation.dart';
 
 import '../app_environment.dart';
 import '../controllers/detail_controller.dart';
+import '../controllers/editor_controller.dart';
 import '../controllers/project_controller.dart';
 import '../controllers/task_controller.dart';
+import '../data/editor_models.dart';
 import '../data/models.dart';
+import '../data/settings_store.dart';
+import 'editor_dialogs.dart';
 
 /// How long a read may age before a regained window focus refreshes it
 /// (viewer/spec.md section 5).
@@ -33,12 +37,20 @@ class ViewerDataReader {
     required this.projects,
     required this.tasks,
     required this.detail,
+    this.update,
+    this.drafts,
     this.probe,
   });
 
   final ProjectReader projects;
   final TaskReader tasks;
   final TaskDetailReader detail;
+
+  /// The one write path the editor uses; null on a reader bundle without one.
+  final TaskUpdateWriter? update;
+
+  /// Recovery-draft persistence; null keeps the editor's drafts in memory.
+  final RecoveryDraftSink? drafts;
 
   /// Runs `viewer info` before the first data read; null when the reader needs
   /// no handshake (test doubles, and any reader that cannot fail one).
@@ -53,6 +65,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     this.staleRefreshAfter = viewerStaleRefreshAfter,
   }) {
     projectList.addListener(_onProjectListChanged);
+    editor.addListener(_onEditorChanged);
   }
 
   /// Launch configuration the panes describe in their summaries.
@@ -69,12 +82,26 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     reader: readers.projects,
   );
 
+  /// The one editor for this window; a pane rebuild never loses a draft.
+  late final ViewerEditorController editor = ViewerEditorController(
+    writer: readers.update,
+    detailReader: readers.detail,
+    drafts: readers.drafts,
+    dataRoot: environment.dataRoot,
+  );
+
+  /// The pane that can show the editor's dialogs; the Details pane sets this
+  /// while it is mounted, so a headless model simply cannot ask.
+  ViewerEditorHost? editorHost;
+
   final Map<String, TaskListState> _taskStates = <String, TaskListState>{};
 
   TaskController? _tasks;
   TaskDetailController? _detail;
   String? _appliedProjectId;
   int? _appliedTaskId;
+  final Set<String> _offeredDrafts = <String>{};
+  bool _leaving = false;
   bool _started = false;
   bool _disposed = false;
   ViewerFailure? _startupError;
@@ -139,6 +166,9 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     }
     _startupError = null;
     await projectList.reload();
+    // The recovery index is read after the first catalog read so a failing CLI
+    // reports its own problem first.
+    unawaited(editor.loadRecoveryDrafts());
   }
 
   /// Retry for a failed handshake or a failed first catalog read.
@@ -182,9 +212,11 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     projectList.removeListener(_onProjectListChanged);
+    editor.removeListener(_onEditorChanged);
+    editor.dispose();
     _tasks?.removeListener(_onTasksChanged);
     _tasks?.dispose();
-    _detail?.removeListener(_notify);
+    _detail?.removeListener(_onDetailChanged);
     _detail?.dispose();
     projectList.dispose();
     super.dispose();
@@ -241,6 +273,108 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     await _tasks?.retry();
   }
 
+  // ---------------------------------------------------------------- editor
+
+  /// Asks before an action that would drop a dirty draft.
+  ///
+  /// False when the user cancelled, and also when no pane can ask: without a
+  /// Details pane there is no dialog, so the draft wins over the navigation.
+  Future<bool> requestLeave(EditorLeaveReason reason) async {
+    if (!editor.isEditing || !editor.isDirty) {
+      return true;
+    }
+    final host = editorHost;
+    if (host == null || _leaving) {
+      return false;
+    }
+    _leaving = true;
+    try {
+      return await host.confirmLeave(reason);
+    } finally {
+      _leaving = false;
+    }
+  }
+
+  /// Arrow navigation across task rows, with the leaving guard in front.
+  ///
+  /// False means the guard cancelled, so the pane can put its row highlight
+  /// back on the task the editor still has open.
+  Future<bool> selectTaskRow(int index) async {
+    final tasks = _tasks;
+    if (tasks == null) {
+      return false;
+    }
+    final id = tasks.itemAt(index)?.id;
+    if (id == null || id == tasks.selectedTaskId) {
+      return true;
+    }
+    if (!await requestLeave(EditorLeaveReason.taskSwitch)) {
+      return false;
+    }
+    editor.exitEdit();
+    tasks.selectIndex(index);
+    return true;
+  }
+
+  /// Arrow navigation across project rows, with the leaving guard in front.
+  Future<bool> selectProjectRow(int index) async {
+    final id = projectList.itemAt(index)?.projectId;
+    if (id == null || id == projectList.selectedProjectId) {
+      return true;
+    }
+    if (!await requestLeave(EditorLeaveReason.projectSwitch)) {
+      return false;
+    }
+    editor.exitEdit();
+    projectList.selectIndex(index);
+    return true;
+  }
+
+  /// Re-reads what a confirmed write changed: the task and its list row.
+  Future<void> noteConfirmedRead() async {
+    final detail = _detail;
+    await _tasks?.refresh();
+    await detail?.reload();
+  }
+
+  /// F4 from anywhere in the window; the pane owns focus and speech.
+  Future<void> beginEditTask() async {
+    await editorHost?.beginEdit();
+  }
+
+  /// Ctrl+D from anywhere in the window.
+  Future<void> markDoneTask() async {
+    await editorHost?.markDone();
+  }
+
+  /// Ctrl+S from anywhere in the window; a no-op without an open editor.
+  Future<void> saveTask() async {
+    await editorHost?.save();
+  }
+
+  /// The window asks before it closes (spec.md section 7).
+  Future<bool> closeWindow() async {
+    if (!await requestLeave(EditorLeaveReason.windowClose)) {
+      return false;
+    }
+    final host = editorHost;
+    if (host != null && !await host.settleBeforeClose()) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Settings asked for another task store (spec.md section 7).
+  ///
+  /// Swapping the reader bundle belongs to the settings slice; this call owns
+  /// the guard, so a requested change can never quietly drop a draft.
+  Future<bool> requestStoreChange(String? dataRoot) async {
+    if (dataRoot == environment.dataRoot) {
+      return true;
+    }
+    return requestLeave(EditorLeaveReason.storeChange);
+  }
+
   // --------------------------------------------------------------- plumbing
 
   void _onProjectListChanged() {
@@ -267,6 +401,48 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     _notify();
   }
 
+  /// The confirmed record changed: mirror it into the editor, then offer any
+  /// recovery draft that belongs to it.
+  void _onDetailChanged() {
+    editor.observeDetail(
+      _detail?.detail,
+      projectId: _detail?.projectId ?? _appliedProjectId,
+    );
+    _maybeOfferDraft();
+    _notify();
+  }
+
+  void _onEditorChanged() {
+    _maybeOfferDraft();
+    _notify();
+  }
+
+  /// Offers the persisted draft that belongs to the open task, once.
+  ///
+  /// The prompt is the restart path in spec.md section 7: Restore draft or
+  /// Discard, with Restore as the default.
+  void _maybeOfferDraft() {
+    final host = editorHost;
+    final detail = _detail?.detail;
+    final projectId = _detail?.projectId ?? _appliedProjectId;
+    if (host == null || detail == null || projectId == null) {
+      return;
+    }
+    if (editor.isEditing) {
+      return;
+    }
+    for (final draft in editor.pendingDrafts) {
+      if (draft.projectId != projectId || draft.taskId != detail.canonicalId) {
+        continue;
+      }
+      if (!_offeredDrafts.add(draft.draftId)) {
+        continue;
+      }
+      unawaited(host.offerDraftRestore(draft));
+      return;
+    }
+  }
+
   /// Swaps the per-project controllers and re-reads the new project.
   void _activateProject(String? projectId) {
     _saveTaskState();
@@ -277,10 +453,13 @@ class ViewerWorkspaceModel extends ChangeNotifier {
       previous.removeListener(_onTasksChanged);
       previous.dispose();
     }
-    _detail?.removeListener(_notify);
+    _detail?.removeListener(_onDetailChanged);
     _detail?.dispose();
     _tasks = null;
     _detail = null;
+    // The new project has no confirmed record yet, so no editor can be based
+    // on the previous project's task.
+    editor.observeDetail(null, projectId: projectId);
     if (projectId == null) {
       return;
     }
@@ -292,7 +471,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     _tasks = tasks;
     _detail = detail;
     tasks.addListener(_onTasksChanged);
-    detail.addListener(_notify);
+    detail.addListener(_onDetailChanged);
     final saved = _taskStates[projectId];
     if (saved != null) {
       tasks.restoreState(saved);

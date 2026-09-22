@@ -21,9 +21,7 @@ import '../support/viewer_test_support.dart';
 const String firstProjectId = '00000000-0000-4000-8000-000000000001';
 
 Future<RealViewerHarness> pumpSlowFirstRead(WidgetTester tester) async {
-  final reads = fakeWorkspaceReads(
-    latency: const Duration(milliseconds: 400),
-  );
+  final reads = fakeWorkspaceReads(latency: const Duration(milliseconds: 400));
   final harness = await pumpRealViewer(tester, reads: reads, settle: false);
   // The first frame has no rows yet, so the focus sits in the list region
   // instead of falling to the window root.
@@ -82,9 +80,7 @@ List<SemanticsNode> focusedSemanticsNodes(WidgetTester tester) {
 
 void dumpSemantics(SemanticsNode node, [int depth = 0]) {
   final SemanticsData data = node.getSemanticsData();
-  debugPrint(
-    '${'  ' * depth}${data.label} | ${data.flagsCollection}',
-  );
+  debugPrint('${'  ' * depth}${data.label} | ${data.flagsCollection}');
   node.visitChildren((SemanticsNode child) {
     dumpSemantics(child, depth + 1);
     return true;

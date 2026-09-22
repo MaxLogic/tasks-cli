@@ -221,7 +221,8 @@ final Map<LogicalKeyboardKey, String> _keyLabels = <LogicalKeyboardKey, String>{
 
 String _keyLabel(LogicalKeyboardKey key) => _keyLabels[key] ?? key.keyLabel;
 
-SingleActivator _alt(LogicalKeyboardKey key) => SingleActivator(key, alt: true);
+SingleActivator _alt(LogicalKeyboardKey key) =>
+    SingleActivator(key, alt: true, includeRepeats: false);
 
 /// Every application command.
 final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
@@ -236,7 +237,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Move focus to the next region: Projects, Tasks, Task details, '
           'Status. Reveals the pane in a reduced layout.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f6),
+        SingleActivator(LogicalKeyboardKey.f6, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[
         HelpGroup.projects,
@@ -251,7 +252,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Previous region',
       description: 'Move focus to the previous region, in reverse order.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f6, shift: true),
+        SingleActivator(
+          LogicalKeyboardKey.f6,
+          shift: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[
         HelpGroup.projects,
@@ -268,7 +273,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Select the Projects region and focus its selected list row. An '
           'empty list focuses the list container. F1 is not Help.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f1),
+        SingleActivator(LogicalKeyboardKey.f1, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.projects],
     ),
@@ -281,7 +286,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Select the Tasks region and focus its selected list row. An empty '
           'list focuses the list container. F2 is not Edit.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f2),
+        SingleActivator(LogicalKeyboardKey.f2, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.tasks],
     ),
@@ -295,7 +300,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'directly, including the draft body while editing. F3 never stops '
           'at a heading or a tab.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f3),
+        SingleActivator(LogicalKeyboardKey.f3, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.details, HelpGroup.editor],
     ),
@@ -309,7 +314,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Outside both regions it uses the last focused list, default '
           'Projects.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyF, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyF,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[
         HelpGroup.projects,
@@ -325,7 +334,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Find in body',
       description: 'Focus Find in body in Task details.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyH, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyH,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.details],
     ),
@@ -336,7 +349,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Refresh',
       description: 'Refresh the workspace, preserving draft and focus.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f5),
+        SingleActivator(LogicalKeyboardKey.f5, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[
         HelpGroup.projects,
@@ -353,7 +366,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Enter edit mode for the selected task when Tasks or Task details '
           'has focus.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f4),
+        SingleActivator(LogicalKeyboardKey.f4, includeRepeats: false),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.details],
     ),
@@ -366,7 +379,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Mark the selected task done with one version-checked update. With a '
           'dirty editor the Save/Discard dialog opens first.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyD, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyD,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.details],
     ),
@@ -380,7 +397,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'focus. The selected project UUID is captured when the action '
           'starts.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyE, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyE,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.projects],
     ),
@@ -391,7 +412,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Save',
       description: 'Save the active editor; otherwise no action.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyS, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyS,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.editor],
     ),
@@ -402,7 +427,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Open Settings',
       description: 'Open the Settings dialog.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.comma, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.comma,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
     ),
     CommandSpec(
@@ -414,7 +443,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Go back from a dependency detail or a reduced-layout child pane. '
           'Text-caret commands are never intercepted.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true),
+        SingleActivator(
+          LogicalKeyboardKey.arrowLeft,
+          alt: true,
+          includeRepeats: false,
+        ),
       ],
       alsoIn: const <HelpGroup>[HelpGroup.details],
     ),
@@ -427,7 +460,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Open the searchable keyboard help. Available in every layout and '
           'from another modal.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f10),
+        SingleActivator(LogicalKeyboardKey.f10, includeRepeats: false),
       ],
     ),
     CommandSpec(
@@ -879,7 +912,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Close the active dialog through its safe Cancel/Close action. '
           'Escape never discards changes.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.escape),
+        SingleActivator(LogicalKeyboardKey.escape, includeRepeats: false),
       ],
     ),
     CommandSpec(
@@ -891,7 +924,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Open keyboard help without activating the background window; '
           'closing it returns focus to the dialog.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.f10),
+        SingleActivator(LogicalKeyboardKey.f10, includeRepeats: false),
       ],
     ),
 
@@ -1025,7 +1058,11 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       label: 'Save settings',
       description: 'Apply and store the settings.',
       activators: const <ShortcutActivator>[
-        SingleActivator(LogicalKeyboardKey.keyS, control: true),
+        SingleActivator(
+          LogicalKeyboardKey.keyS,
+          control: true,
+          includeRepeats: false,
+        ),
       ],
     ),
     CommandSpec(
