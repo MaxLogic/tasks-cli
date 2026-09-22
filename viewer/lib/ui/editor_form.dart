@@ -20,6 +20,15 @@ import 'dialog_scope.dart';
 /// Fixed feedback text for a write that outlives the busy threshold.
 const String viewerEditorSavingMessage = 'Saving';
 
+/// The form controls that hold editable text and therefore a caret. Status and
+/// Priority are dropdowns.
+const List<EditorField> _editorTextFields = <EditorField>[
+  EditorField.title,
+  EditorField.labels,
+  EditorField.deps,
+  EditorField.body,
+];
+
 /// One [FocusNode] per editor control.
 ///
 /// The details pane owns this set: F3 has to reach the draft Body without
@@ -99,20 +108,70 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
         for (final field in EditorField.values) field: TextEditingController(),
       };
 
+  /// What one text field held when it last lost focus.
+  ///
+  /// A single-line field on Windows selects its whole value when it regains
+  /// focus (`EditableText.selectAllOnFocus` defaults to true on desktop), which
+  /// would lose the caret the guard interrupted. The design promises focus and
+  /// caret back at the previous field after Cancel (design.md section 7), so
+  /// the value is kept here and put back on the way in.
+  final Map<EditorField, TextEditingValue> _caretMemory =
+      <EditorField, TextEditingValue>{};
+
+  final Map<EditorField, VoidCallback> _focusHandlers =
+      <EditorField, VoidCallback>{};
+
   @override
   void initState() {
     super.initState();
     widget.editor.addListener(_syncFromDraft);
+    for (final field in _editorTextFields) {
+      void handler() => _handleFieldFocus(field);
+      _focusHandlers[field] = handler;
+      widget.focus.forField(field).addListener(handler);
+    }
     _syncFromDraft();
   }
 
   @override
   void dispose() {
+    for (final entry in _focusHandlers.entries) {
+      widget.focus.forField(entry.key).removeListener(entry.value);
+    }
+    _focusHandlers.clear();
     widget.editor.removeListener(_syncFromDraft);
     for (final controller in _texts.values) {
       controller.dispose();
     }
     super.dispose();
+  }
+
+  /// Remembers the caret when a field loses focus and restores it once focus
+  /// comes back to the same text, after the frame that ran Flutter's own
+  /// select-all-on-focus.
+  void _handleFieldFocus(EditorField field) {
+    final node = widget.focus.forField(field);
+    final controller = _texts[field]!;
+    if (!node.hasFocus) {
+      _caretMemory[field] = controller.value;
+      return;
+    }
+    final remembered = _caretMemory[field];
+    if (remembered == null || remembered.text != controller.text) {
+      return;
+    }
+    // Flutter applies its own select-all-on-focus after this listener runs, so
+    // the comparison has to wait for the frame that ran it.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      final live = widget.focus.forField(field);
+      if (!live.hasFocus || controller.text != remembered.text) {
+        return;
+      }
+      controller.selection = remembered.selection;
+    });
   }
 
   /// Mirrors the draft into the text controllers without typing over a field
