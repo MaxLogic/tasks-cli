@@ -153,7 +153,7 @@ fn build_body(id: usize, seed: u64, big: bool) -> String {
     body.push_str("body ");
     body.push_str(&id.to_string());
     body.push(' ');
-    if id % 5000 == 0 {
+    if id.is_multiple_of(5000) {
         body.push_str("needle-%_ literal marker ");
     }
     let ascii_target = BODY_SIZE - suffix.len();
@@ -168,10 +168,10 @@ fn build_body(id: usize, seed: u64, big: bool) -> String {
 fn labels_for(id: usize, seed: u64) -> Vec<String> {
     let mut set = BTreeSet::new();
     set.insert(LABELS[(id + seed as usize) % LABELS.len()].to_string());
-    if id % 10 == 0 {
+    if id.is_multiple_of(10) {
         set.insert("perf".to_string());
     }
-    if id % 37 == 0 {
+    if id.is_multiple_of(37) {
         set.insert("needs-human".to_string());
     }
     set.into_iter().collect()
