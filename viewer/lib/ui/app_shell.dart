@@ -18,6 +18,7 @@ import 'package:flutter/scheduler.dart';
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
+import '../platform/viewer_startup.dart';
 import 'accessible_virtual_list.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
@@ -316,6 +317,7 @@ class ViewerShell extends StatefulWidget {
     required this.workspaceBuilder,
     this.actions = const ViewerShellActions(),
     this.initialSettings,
+    this.startup,
   });
 
   final ViewerEnvironment environment;
@@ -326,6 +328,10 @@ class ViewerShell extends StatefulWidget {
   /// Preferences resolved before the first frame; Settings edits merge into
   /// this value while the viewer runs.
   final ViewerSettingsDraft? initialSettings;
+
+  /// Startup-registration surface Settings reads and retries; null when this
+  /// build must not touch the real Startup folder.
+  final ViewerStartupController? startup;
 
   @override
   State<ViewerShell> createState() => ViewerShellState();
@@ -839,6 +845,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       (context) => SettingsDialog(
         environment: widget.environment,
         announcements: widget.announcements,
+        startup: widget.startup,
         initial: _settings,
       ),
     );

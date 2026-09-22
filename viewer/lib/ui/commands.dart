@@ -1052,6 +1052,15 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyY)],
     ),
     CommandSpec(
+      id: 'settings.retryStartup',
+      scope: CommandScope.settings,
+      group: HelpGroup.dialogs,
+      label: 'Retry startup registration',
+      description:
+          'Retry creating or removing the application-owned Startup shortcut.',
+      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyG)],
+    ),
+    CommandSpec(
       id: 'settings.save',
       scope: CommandScope.settings,
       group: HelpGroup.dialogs,

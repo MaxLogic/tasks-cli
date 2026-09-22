@@ -36,6 +36,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   window_manager: ^0.5.2
   screen_retriever: ^0.2.2
+  # Windows shell link registration (IShellLink) for "Start with Windows".
+  win32: ^6.3.0
+  ffi: ^2.1.4
 
 dev_dependencies:
   flutter_test:
@@ -60,7 +63,9 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/announcements/catalog.json
+    # The whole directory ships: the fixed catalog, its provenance manifest and
+    # every generated Bella clip, so playback works offline (spec.md 9.1).
+    - assets/announcements/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
