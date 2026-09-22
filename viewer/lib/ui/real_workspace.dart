@@ -15,6 +15,7 @@ import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
 import '../data/settings_store.dart';
+import '../platform/clipboard_text.dart';
 import 'app_shell.dart';
 import 'details_pane.dart';
 import 'projects_pane.dart';
@@ -67,6 +68,8 @@ class ViewerWorkspaceProvider extends StatefulWidget {
     super.key,
     required this.environment,
     required this.readers,
+    required this.announcements,
+    this.viewerClipboard,
     required this.child,
     this.drafts,
     this.closeGuard,
@@ -74,6 +77,12 @@ class ViewerWorkspaceProvider extends StatefulWidget {
 
   final ViewerEnvironment environment;
   final ViewerDataReader readers;
+
+  /// The one announcement channel this window speaks through.
+  final AnnouncementController announcements;
+
+  /// Clipboard the preview reads; null uses the real platform clipboard.
+  final ViewerClipboard? viewerClipboard;
 
   /// Recovery-draft persistence; null keeps drafts in memory.
   final RecoveryDraftSink? drafts;
@@ -99,6 +108,7 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
           tasks: widget.readers.tasks,
           detail: widget.readers.detail,
           update: widget.readers.update,
+          clipboard: widget.readers.clipboard,
           drafts: widget.drafts,
           probe: widget.readers.probe,
         );
@@ -108,6 +118,8 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
   late final ViewerWorkspaceModel _model = ViewerWorkspaceModel(
     environment: widget.environment,
     readers: _readers,
+    announcements: widget.announcements,
+    viewerClipboard: widget.viewerClipboard,
   );
 
   @override
@@ -177,6 +189,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
     required this.announcements,
     this.initialSettings,
     this.onSettingsChanged,
+    this.viewerClipboard,
     this.drafts,
     this.closeGuard,
   });
@@ -186,6 +199,10 @@ class ViewerWorkspaceHost extends StatelessWidget {
   final AnnouncementController announcements;
   final ViewerSettingsDraft? initialSettings;
   final ValueChanged<ViewerSettingsDraft>? onSettingsChanged;
+
+  /// Clipboard the preview reads; null uses the real platform clipboard.
+  final ViewerClipboard? viewerClipboard;
+
   final RecoveryDraftSink? drafts;
   final ViewerCloseGuard? closeGuard;
 
@@ -194,6 +211,8 @@ class ViewerWorkspaceHost extends StatelessWidget {
     return ViewerWorkspaceProvider(
       environment: environment,
       readers: readers,
+      announcements: announcements,
+      viewerClipboard: viewerClipboard,
       drafts: drafts,
       closeGuard: closeGuard,
       child: Builder(
@@ -214,6 +233,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
               onEditTask: () => unawaited(model.beginEditTask()),
               onMarkDone: () => unawaited(model.markDoneTask()),
               onSave: () => unawaited(model.saveTask()),
+              onEnrichClipboard: () => unawaited(model.enrichClipboard()),
               onStoreChangeRequested: model.requestStoreChange,
               onSettingsChanged: onSettingsChanged,
             ),

@@ -114,7 +114,8 @@ class ViewerCliClient
         CancellableProjectReader,
         CancellableTaskReader,
         CancellableTaskDetailReader,
-        TaskUpdateWriter {
+        TaskUpdateWriter,
+        ClipboardEnricher {
   ViewerCliClient({
     required this.environment,
     ViewerSettingsDraftSource? savedSettings,
@@ -372,6 +373,65 @@ class ViewerCliClient
     );
   }
 
+  /// Runs `enrich-clipboard` for one captured project scope.
+  ///
+  /// The CLI reads the clipboard, checks it still matches before replacing it
+  /// and reports the counts; this client never reads or writes the clipboard
+  /// itself, so no read-transform-write logic is duplicated in Dart.
+  @override
+  Future<ClipboardEnrichment> enrichClipboard(String projectId) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'clipboard',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('enriching the clipboard'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'enrich-clipboard',
+      ],
+      request: null,
+      expectedCommands: const <String>{'enrich'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    return ClipboardEnrichment.fromJson(envelope.data);
+  }
+
+  /// Runs `enrich --file -` with [text] on stdin.
+  ///
+  /// The preview route: the caller already read the plain-text clipboard, and
+  /// nothing here writes it back. The CLI owns the 16 MiB input and 10,000
+  /// distinct-reference limits and reports them as ordinary validation errors.
+  @override
+  Future<ClipboardEnrichment> enrichText(String projectId, String text) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'clipboard',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('previewing enrichment'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'enrich',
+        '--file',
+        '-',
+      ],
+      request: null,
+      rawStdin: utf8.encode(text),
+      expectedCommands: const <String>{'enrich'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    return ClipboardEnrichment.fromJson(envelope.data);
+  }
+
   String _requireDataRoot(String action) {
     final dataRoot = environment.dataRoot;
     if (dataRoot == null || dataRoot.isEmpty) {
@@ -436,6 +496,7 @@ class ViewerCliClient
     required List<String> arguments,
     required Map<String, Object?>? request,
     required Set<String>? expectedCommands,
+    List<int>? rawStdin,
   }) async {
     final resolution = resolveExecutable();
     final executable = resolution.executable;
@@ -443,11 +504,14 @@ class ViewerCliClient
       throw ViewerExecutableNotFoundFailure(resolution.attemptedPaths);
     }
 
-    // The size check happens before a process exists.
-    final requestBytes = request == null
-        ? null
-        : utf8.encode(jsonEncode(request));
-    if (requestBytes != null && requestBytes.length > requestByteLimit) {
+    // The size check happens before a process exists. A raw payload is
+    // already-encoded caller text: the CLI owns its own limits and this
+    // transport adds none.
+    final requestBytes =
+        rawStdin ?? (request == null ? null : utf8.encode(jsonEncode(request)));
+    if (rawStdin == null &&
+        requestBytes != null &&
+        requestBytes.length > requestByteLimit) {
       throw ViewerRequestTooLargeFailure(
         byteLength: requestBytes.length,
         limitBytes: requestByteLimit,

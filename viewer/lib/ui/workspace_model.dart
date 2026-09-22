@@ -12,6 +12,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import '../app_environment.dart';
+import '../controllers/announcement_controller.dart';
+import '../controllers/clipboard_controller.dart';
 import '../controllers/detail_controller.dart';
 import '../controllers/editor_controller.dart';
 import '../controllers/project_controller.dart';
@@ -19,6 +21,7 @@ import '../controllers/task_controller.dart';
 import '../data/editor_models.dart';
 import '../data/models.dart';
 import '../data/settings_store.dart';
+import '../platform/clipboard_text.dart';
 import 'editor_dialogs.dart';
 
 /// How long a read may age before a regained window focus refreshes it
@@ -40,6 +43,7 @@ class ViewerDataReader {
     this.update,
     this.drafts,
     this.probe,
+    this.clipboard,
   });
 
   final ProjectReader projects;
@@ -55,6 +59,10 @@ class ViewerDataReader {
   /// Runs `viewer info` before the first data read; null when the reader needs
   /// no handshake (test doubles, and any reader that cannot fail one).
   final ViewerProbe? probe;
+
+  /// The one clipboard scope (spec.md section 8); null in a reader bundle that
+  /// cannot enrich, which disables both clipboard actions with a reason.
+  final ClipboardEnricher? clipboard;
 }
 
 /// Project catalog, task browser and detail state for one window.
@@ -62,10 +70,18 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   ViewerWorkspaceModel({
     required this.environment,
     required this.readers,
+    required this.announcements,
+    ViewerClipboard? viewerClipboard,
     this.staleRefreshAfter = viewerStaleRefreshAfter,
-  }) {
+  }) : clipboard = ClipboardController(
+         enricher: readers.clipboard,
+         clipboard: viewerClipboard ?? const SystemViewerClipboard(),
+         announcements: announcements,
+         dataRoot: environment.dataRoot,
+       ) {
     projectList.addListener(_onProjectListChanged);
     editor.addListener(_onEditorChanged);
+    clipboard.addListener(_notify);
   }
 
   /// Launch configuration the panes describe in their summaries.
@@ -73,6 +89,12 @@ class ViewerWorkspaceModel extends ChangeNotifier {
 
   /// Reader bundle; one CLI client serves all three scopes.
   final ViewerDataReader readers;
+
+  /// The one announcement channel this window speaks through.
+  final AnnouncementController announcements;
+
+  /// Clipboard enrichment state, speech and the captured project scope.
+  final ClipboardController clipboard;
 
   /// Age after which a regained window focus refreshes the workspace.
   final Duration staleRefreshAfter;
@@ -214,6 +236,8 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     projectList.removeListener(_onProjectListChanged);
     editor.removeListener(_onEditorChanged);
     editor.dispose();
+    clipboard.removeListener(_notify);
+    clipboard.dispose();
     _tasks?.removeListener(_onTasksChanged);
     _tasks?.dispose();
     _detail?.removeListener(_onDetailChanged);
@@ -351,6 +375,24 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   Future<void> saveTask() async {
     await editorHost?.save();
   }
+
+  // ------------------------------------------------------------- clipboard
+
+  /// Ctrl+E and the Enrich clipboard button share this one handler.
+  ///
+  /// The selection is captured here, when the action starts.
+  Future<void> enrichClipboard() => clipboard.enrichClipboard(selectedProject);
+
+  /// The Preview enrichment button and Alt+P; null when nothing can be shown.
+  ///
+  /// The pane renders the returned preview in its dialog, so the reading and
+  /// the speech rules stay in one place and the clipboard is never written.
+  Future<ClipboardPreview?> previewEnrichment() =>
+      clipboard.previewEnrichment(selectedProject);
+
+  /// Why the clipboard toolbar is disabled, or null when both actions can run.
+  String? get clipboardBlockedReason =>
+      clipboard.blockedReason(selectedProject);
 
   /// The window asks before it closes (spec.md section 7).
   Future<bool> closeWindow() async {

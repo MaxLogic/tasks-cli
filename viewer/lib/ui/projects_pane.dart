@@ -16,6 +16,7 @@ import '../data/models.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'commands.dart';
+import 'enrichment_preview_dialog.dart';
 import 'viewer_controls.dart';
 import 'viewer_format.dart';
 import 'workspace_model.dart';
@@ -31,7 +32,8 @@ class ViewerProjectsPane extends StatefulWidget {
   State<ViewerProjectsPane> createState() => _ViewerProjectsPaneState();
 }
 
-class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
+class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
+    with FailureViewRegionFocus<ViewerProjectsPane> {
   final TextEditingController _search = TextEditingController();
   final TextEditingController _goToRow = TextEditingController();
   final FocusNode _stateFocus = FocusNode(debugLabel: 'projects state filter');
@@ -39,6 +41,9 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
   final FocusNode _directionFocus = FocusNode(debugLabel: 'projects direction');
   final FocusNode _goToRowFocus = FocusNode(debugLabel: 'projects go to row');
   final FocusNode _summaryFocus = FocusNode(debugLabel: 'projects summary');
+  final FocusNode _previewFocus = FocusNode(
+    debugLabel: 'projects preview enrichment',
+  );
   bool _compactRows = false;
   String? _goToRowError;
 
@@ -66,6 +71,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
     _directionFocus.dispose();
     _goToRowFocus.dispose();
     _summaryFocus.dispose();
+    _previewFocus.dispose();
     super.dispose();
   }
 
@@ -107,6 +113,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
         return KeyEventResult.handled;
       case 'projects.copyProjectId':
         unawaited(_copyProjectId());
+        return KeyEventResult.handled;
+      case 'projects.enrichClipboard':
+        unawaited(_enrichClipboard());
+        return KeyEventResult.handled;
+      case 'projects.previewEnrichment':
+        unawaited(_previewEnrichment());
         return KeyEventResult.handled;
       case 'projects.rowDensity':
         _toggleRowDensity();
@@ -181,6 +193,25 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
     }
     await Clipboard.setData(ClipboardData(text: id));
     widget.api.announce('Project ID copied', clipId: 'project_id_copied');
+  }
+
+  /// The same handler Ctrl+E reaches: button and shortcut never diverge.
+  Future<void> _enrichClipboard() => widget.model.enrichClipboard();
+
+  /// Preview reads the clipboard and shows both texts; it never writes one.
+  Future<void> _previewEnrichment() async {
+    final preview = await widget.model.previewEnrichment();
+    if (preview == null || !mounted) {
+      return;
+    }
+    await widget.api.showModal<void>(
+      CommandScope.enrichmentPreview,
+      (context) => ViewerEnrichmentPreviewDialog(preview: preview),
+    );
+    if (mounted) {
+      // Close returns to the control that started the preview.
+      _previewFocus.requestFocus();
+    }
   }
 
   // ---------------------------------------------------------------- build
@@ -415,11 +446,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
   Widget _buildList(BuildContext context, ProjectController projects) {
     final blocking = widget.model.startupError ?? projects.firstLoadError;
     if (blocking != null && !projects.hasConfirmedData) {
+      claimFailureViewRegionFocus(widget.api, ViewerRegion.projects);
       return ViewerFailureView(
         failure: blocking,
         onRetry: () => unawaited(widget.model.retryStartup()),
       );
     }
+    releaseFailureViewRegionFocus();
     final handles = _handles;
     final itemCount = projects.totalCount;
     final duplicates = _duplicateProjectNames(projects);
@@ -660,41 +693,85 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane> {
                 else
                   for (final root in item.roots)
                     _summaryLine(context, 'Root: $root'),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: <Widget>[
-                    FilledButton(
-                      onPressed: () => unawaited(_copyProjectId()),
-                      child: const Text('Copy project ID (Alt+Y)'),
-                    ),
-                    if (stats == null)
-                      OutlinedButton(
-                        onPressed: () => unawaited(projects.retry()),
-                        child: const Text('Retry'),
-                      ),
-                    Tooltip(
-                      message: 'Arrives with clipboard integration',
-                      child: TextButton(
-                        onPressed: null,
-                        child: const Text('Enrich clipboard'),
-                      ),
-                    ),
-                    Tooltip(
-                      message: 'Arrives with clipboard integration',
-                      child: TextButton(
-                        onPressed: null,
-                        child: const Text('Preview enrichment'),
-                      ),
-                    ),
-                  ],
-                ),
               ],
+              const SizedBox(height: 8),
+              _buildClipboardActions(context, projects, item),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// The selected project's toolbar.
+  ///
+  /// Both clipboard buttons stay in place when they cannot act, so the reason
+  /// is readable instead of hidden in a missing control (spec.md section 8).
+  Widget _buildClipboardActions(
+    BuildContext context,
+    ProjectController projects,
+    ProjectItem? item,
+  ) {
+    final reason = widget.model.clipboardBlockedReason;
+    final busy = widget.model.clipboard.isRunning;
+    final canEnrich = reason == null && !busy;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (reason != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text(
+              reason,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: <Widget>[
+            FilledButton(
+              onPressed: item == null
+                  ? null
+                  : () => unawaited(_copyProjectId()),
+              child: const Text('Copy project ID (Alt+Y)'),
+            ),
+            if (item != null && item.stats == null)
+              OutlinedButton(
+                onPressed: () => unawaited(projects.retry()),
+                child: const Text('Retry'),
+              ),
+            Tooltip(
+              message:
+                  reason ??
+                  'Enrich the clipboard in ${item?.name ?? 'the selected '
+                          'project'} and write the result back (Alt+E).',
+              child: TextButton(
+                onPressed: canEnrich
+                    ? () => unawaited(_enrichClipboard())
+                    : null,
+                child: const Text('Enrich clipboard'),
+              ),
+            ),
+            Tooltip(
+              message:
+                  reason ??
+                  'Preview enrichment without writing the clipboard (Alt+P).',
+              child: Focus(
+                focusNode: _previewFocus,
+                child: TextButton(
+                  onPressed: canEnrich
+                      ? () => unawaited(_previewEnrichment())
+                      : null,
+                  child: const Text('Preview enrichment'),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
