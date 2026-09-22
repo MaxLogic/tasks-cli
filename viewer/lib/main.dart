@@ -15,8 +15,10 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app.dart';
 import 'app_environment.dart';
+import 'data/cli_client.dart';
 import 'launch_args.dart';
 import 'platform/window_state.dart';
+import 'ui/workspace_model.dart';
 
 Future<void> main(List<String> arguments) async {
   final ViewerLaunchArgs launchArgs;
@@ -39,7 +41,20 @@ Future<void> main(List<String> arguments) async {
 
   WidgetsFlutterBinding.ensureInitialized();
   await _showViewerWindow();
-  runApp(TasksViewerApp(environment: environment));
+  // One client serves all three read scopes; the probe runs once before the
+  // first data read, so a version mismatch is reported instead of parsed.
+  final client = ViewerCliClient(environment: environment);
+  runApp(
+    TasksViewerApp(
+      environment: environment,
+      readers: ViewerDataReader(
+        projects: client,
+        tasks: client,
+        detail: client,
+        probe: client.probe,
+      ),
+    ),
+  );
 }
 
 /// Whether a `--startup` launch should open a window at all.

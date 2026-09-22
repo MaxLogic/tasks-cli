@@ -10,6 +10,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -23,6 +24,7 @@ import 'dialog_scope.dart';
 import 'keyboard_help_dialog.dart';
 import 'settings_dialog.dart';
 import 'status_bar.dart';
+import 'viewer_controls.dart';
 
 /// Focusable regions cycled by F6.
 enum ViewerRegion { projects, tasks, details, status }
@@ -190,6 +192,40 @@ ViewerLayoutMode viewerLayoutModeFor(double width, double textScale) {
     return ViewerLayoutMode.twoPane;
   }
   return ViewerLayoutMode.singlePane;
+}
+
+/// Vertical caps for the shell's own regions: the top toolbar, the reduced
+/// layout's pane navigation and the bottom status bar.
+///
+/// The panes keep at least [viewerShellPaneFloor] logical pixels, and each
+/// capped region scrolls its own content, so a large in-app text size can
+/// never squeeze the work area out of the window (spec.md section 9: no
+/// clipping and no lost operation at 800x600 with 200% in-app text).
+class ViewerShellBudget {
+  const ViewerShellBudget({
+    required this.toolbar,
+    required this.navigation,
+    required this.status,
+  });
+
+  final double toolbar;
+  final double navigation;
+  final double status;
+}
+
+/// The work area never shrinks below this height.
+const double viewerShellPaneFloor = 150;
+
+ViewerShellBudget viewerShellBudgetFor(double height) {
+  if (height <= 0) {
+    return const ViewerShellBudget(toolbar: 0, navigation: 0, status: 0);
+  }
+  final available = math.max(0.0, height - viewerShellPaneFloor);
+  return ViewerShellBudget(
+    toolbar: available * 0.30,
+    navigation: available * 0.15,
+    status: available * 0.12,
+  );
 }
 
 /// The three panes the workspace contributes; the shell owns their layout.
@@ -506,11 +542,32 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
         }
         _focusCollection(region);
       case ViewerRegion.details:
-        _requestDetails();
-        _requestFocusAfterReveal(ViewerRegion.details, handles.bodyFocus);
+        _focusDescription();
       case ViewerRegion.status:
         _requestFocusAfterReveal(ViewerRegion.status, handles.regionFocus);
     }
+  }
+
+  /// Reveals Task details and focuses the description/body control.
+  ///
+  /// The Details pane owns which of its four panels is on screen, and the body
+  /// control only exists while the Description panel is showing, so the pane
+  /// gets the command before the region tries to focus the node. Reaching the
+  /// description must not stop at another tab (viewer/design.md section 9).
+  void _focusDescription() {
+    _requestDetails();
+    _scopeCommandHandlers[CommandScope.details]?.call('global.focusDescription');
+    _requestFocusAfterReveal(ViewerRegion.details, _details.bodyFocus);
+  }
+
+  /// Reveals Task details and focuses Find in body.
+  ///
+  /// Same panel hand-off as [_focusDescription]: the Find control lives on the
+  /// Description panel.
+  void _focusFindInBody() {
+    _requestDetails();
+    _scopeCommandHandlers[CommandScope.details]?.call('global.findInBody');
+    _requestFocusAfterReveal(ViewerRegion.details, _details.findFocus);
   }
 
   void _cycleRegion(int delta) {
@@ -648,13 +705,9 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     final target = _activeRegion.isCollection
         ? _activeRegion
         : _lastCollectionRegion;
+    final node = handlesFor(target).filterFocus;
     revealRegion(target);
-    _requestFocusAfterReveal(target, handlesFor(target).filterFocus);
-  }
-
-  void _focusFindInBody() {
-    _requestDetails();
-    _requestFocusAfterReveal(ViewerRegion.details, _details.findFocus);
+    _requestFocusAfterReveal(target, node);
   }
 
   bool _enrichFromProjectsList() {
@@ -810,14 +863,25 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
             final workspace = widget.workspaceBuilder(context, this);
             return Scaffold(
               body: SafeArea(
-                child: Column(
-                  children: <Widget>[
-                    _buildToolbar(context),
-                    const Divider(height: 1),
-                    Expanded(child: _buildPanes(workspace, mode)),
-                    const Divider(height: 1),
-                    _buildStatusRegion(),
-                  ],
+                child: LayoutBuilder(
+                  builder: (context, body) {
+                    final budget = viewerShellBudgetFor(body.maxHeight);
+                    return Column(
+                      children: <Widget>[
+                        ViewerPaneRegion(
+                          maxHeight: budget.toolbar,
+                          child: _buildToolbar(context),
+                        ),
+                        const Divider(height: 1),
+                        Expanded(child: _buildPanes(workspace, mode, budget)),
+                        const Divider(height: 1),
+                        ViewerPaneRegion(
+                          maxHeight: budget.status,
+                          child: _buildStatusRegion(),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
             );
@@ -864,7 +928,11 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     );
   }
 
-  Widget _buildPanes(ViewerWorkspace workspace, ViewerLayoutMode mode) {
+  Widget _buildPanes(
+    ViewerWorkspace workspace,
+    ViewerLayoutMode mode,
+    ViewerShellBudget budget,
+  ) {
     final projects = _regionPane(ViewerRegion.projects, workspace.projectsPane);
     final tasks = _regionPane(ViewerRegion.tasks, workspace.tasksPane);
     final details = _regionPane(ViewerRegion.details, workspace.detailsPane);
@@ -899,7 +967,10 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       case ViewerLayoutMode.singlePane:
         return Column(
           children: <Widget>[
-            _buildRegionNavigation(context),
+            ViewerPaneRegion(
+              maxHeight: budget.navigation,
+              child: _buildRegionNavigation(context),
+            ),
             const Divider(height: 1),
             Expanded(
               child: Stack(
@@ -922,8 +993,8 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     };
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Align(
-        alignment: Alignment.centerLeft,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
         child: SegmentedButton<ViewerRegion>(
           emptySelectionAllowed: true,
           showSelectedIcon: false,

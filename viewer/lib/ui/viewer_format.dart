@@ -1,0 +1,172 @@
+/// Row names, positions, extents and dates shared by the two collections and
+/// the read views.
+///
+/// Contract: viewer/design.md sections 4, 5 and 7. Every string here is either
+/// a tested accessible name or a locale-formatted timestamp; none of them is
+/// built from task content that a screen reader could not also read in the
+/// details pane.
+library;
+
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../data/models.dart';
+
+/// Row extent for one row of [textLines] stacked text lines.
+///
+/// viewer/design.md section 2: the extent follows the active text scale, so
+/// scaled text grows the row instead of being clipped. Normal density keeps
+/// its 56-pixel minimum.
+double viewerRowExtent(BuildContext context, {int textLines = 2}) {
+  final scaler = MediaQuery.textScalerOf(context);
+  final text = Theme.of(context).textTheme;
+  double line(TextStyle? style, double fallbackSize, double fallbackHeight) {
+    final size = scaler.scale(style?.fontSize ?? fallbackSize);
+    return size * (style?.height ?? fallbackHeight);
+  }
+
+  final title = line(text.bodyMedium, 14, 1.43);
+  final secondary = line(text.bodySmall, 12, 1.33);
+  final lines = textLines <= 1 ? title : title + secondary * (textLines - 1);
+  const verticalPadding = 12.0;
+  return math.max(56, (lines + verticalPadding).ceilToDouble());
+}
+
+/// A percentage without a redundant trailing zero, for example `50` or `12.5`.
+String viewerPercent(double value) => value == value.roundToDouble()
+    ? value.toStringAsFixed(0)
+    : value.toStringAsFixed(1);
+
+/// Accessible name of one project row (design.md section 4).
+///
+/// Counts never read as zeros for an unavailable project: the row says
+/// `Unavailable` and carries the registry error instead.
+String viewerProjectRowLabel(
+  BuildContext context,
+  ProjectItem item, {
+  bool includeRoot = false,
+}) {
+  final buffer = StringBuffer(item.name);
+  if (includeRoot && item.roots.isNotEmpty) {
+    buffer
+      ..write(', root ')
+      ..write(item.roots.first);
+  }
+  final stats = item.stats;
+  if (stats == null) {
+    final error = item.error;
+    buffer.write('. Unavailable');
+    if (error != null) {
+      buffer
+        ..write('. ')
+        ..write(error.message);
+    }
+    return buffer.toString();
+  }
+  buffer
+    ..write('. ')
+    ..write(stats.open)
+    ..write(' open, ')
+    ..write(stats.total)
+    ..write(' total, ')
+    ..write(stats.blocked)
+    ..write(' blocked. ');
+  final progress = stats.progressPercent;
+  buffer.write(
+    progress == null
+        ? 'Progress not applicable'
+        : 'Progress ${viewerPercent(progress)} percent',
+  );
+  buffer.write('. Started, first recorded task, ');
+  buffer.write(
+    stats.startedMs == null
+        ? 'no recorded tasks'
+        : viewerDate(context, stats.startedMs!),
+  );
+  buffer.write('. Last task write, ');
+  buffer.write(
+    stats.lastWriteMs == null
+        ? 'no recorded tasks'
+        : viewerTimestamp(context, stats.lastWriteMs!),
+  );
+  buffer.write('.');
+  return buffer.toString();
+}
+
+/// Position label exposed next to a row name, for example `row 43 of 100000`.
+String viewerRowPosition(int index, int total) => 'row ${index + 1} of $total';
+
+/// Accessible name of one task row (design.md section 5).
+String viewerTaskRowLabel(TaskItem item) {
+  final buffer = StringBuffer()
+    ..write(item.canonicalId)
+    ..write(', ')
+    ..write(item.priority)
+    ..write(', ')
+    ..write(viewerStatusLabel(item.status))
+    ..write(', ')
+    ..write(item.title);
+  if (item.labels.isNotEmpty) {
+    buffer
+      ..write('. Labels ')
+      ..write(item.labels.join(', '));
+  }
+  final waiting = item.waitingDependencyCount;
+  if (waiting > 0) {
+    buffer
+      ..write('. Waiting on ')
+      ..write(waiting)
+      ..write(waiting == 1 ? ' dependency' : ' dependencies');
+  }
+  return buffer.toString();
+}
+
+/// Accessible name of one dependency row (design.md section 7).
+String viewerDependencyRowLabel(DependencySummary dependency) {
+  final buffer = StringBuffer()
+    ..write(dependency.canonicalId)
+    ..write(', ')
+    ..write(viewerStatusLabel(dependency.status))
+    ..write(', ')
+    ..write(dependency.title);
+  buffer.write(
+    dependency.preventsReadiness
+        ? '. Waiting for this dependency'
+        : '. Does not withhold readiness',
+  );
+  return buffer.toString();
+}
+
+/// Accessible name of one history event row; [when] is its formatted time.
+String viewerHistoryRowLabel(HistoryEvent event, String when) =>
+    'Event ${event.eventId}, ${event.operation}, version '
+    '${event.resultingVersion}, $when';
+
+/// Local date and time of [epochMs], for example `21 September 2026, 10:30`.
+String viewerTimestamp(BuildContext context, int epochMs) {
+  final local = DateTime.fromMillisecondsSinceEpoch(epochMs).toLocal();
+  final localizations = MaterialLocalizations.of(context);
+  final monthYear = localizations.formatMonthYear(local);
+  final time = localizations.formatTimeOfDay(
+    TimeOfDay.fromDateTime(local),
+    alwaysUse24HourFormat: true,
+  );
+  return '${local.day} $monthYear, $time';
+}
+
+/// Local date of [epochMs], for example `21 September 2026`.
+String viewerDate(BuildContext context, int epochMs) {
+  final local = DateTime.fromMillisecondsSinceEpoch(epochMs).toLocal();
+  return '${local.day} ${MaterialLocalizations.of(context).formatMonthYear(local)}';
+}
+
+/// `UTC+02:00` style offset label, so a summary states its timezone.
+String viewerTimezoneLabel(DateTime local) {
+  final offset = local.timeZoneOffset;
+  final sign = offset.isNegative ? '-' : '+';
+  final absolute = offset.abs();
+  final hours = absolute.inHours.toString().padLeft(2, '0');
+  final minutes = (absolute.inMinutes % 60).toString().padLeft(2, '0');
+  return 'UTC$sign$hours:$minutes';
+}

@@ -170,6 +170,82 @@ String projectsDocument({String availability = 'available'}) =>
     '"total_count":1,"offset":0,"limit":100,"has_more":false,'
     '"next_offset":null,"snapshot":"p1.abc"}}';
 
+/// One `viewer tasks` page for slice 4; [projectId] is overridable so a
+/// routing mismatch can be exercised.
+String tasksDocument({String projectId = projectUuid}) =>
+    '{"schema_version":1,"project_id":"$projectId","data":{"command":'
+    '"viewer_tasks","protocol_version":1,"items":[{"id":42,'
+    '"title":"Parser rewrite","status":"todo","priority":"P1","version":7,'
+    '"labels":["ui"],"dependency_count":2,"waiting_dependency_count":1,'
+    '"created_ms":1700000000000,"updated_ms":1700000001000}],'
+    '"total_count":1,"offset":0,"limit":100,"has_more":false,'
+    '"next_offset":null,"snapshot":"t1.abc"}}';
+
+/// One `viewer show` document with a real, complete body.
+String showDocument({
+  String projectId = projectUuid,
+  String body = 'Full body\ntext',
+  String title = 'Parser rewrite',
+}) => jsonEncode(<String, Object?>{
+  'schema_version': 1,
+  'project_id': projectId,
+  'data': <String, Object?>{
+    'command': 'viewer_show',
+    'protocol_version': 1,
+    'id': 42,
+    'title': title,
+    'body': body,
+    'status': 'todo',
+    'priority': 'P1',
+    'version': 7,
+    'deps': <int>[9],
+    'labels': <String>['ui'],
+    'dependency_summaries': <Map<String, Object?>>[
+      <String, Object?>{
+        'id': 9,
+        'status': 'in-progress',
+        'version': 2,
+        'title': 'Lexer',
+      },
+    ],
+    'rule_version': 3,
+    'rules': '# Rules',
+    'created_ms': 1700000000000,
+    'updated_ms': 1700000001000,
+  },
+});
+
+/// One legacy `history` page; [projectId] is overridable for routing checks.
+String historyDocument({
+  String projectId = projectUuid,
+  int id = 42,
+  List<Map<String, Object?>>? items,
+  bool hasMore = false,
+  int? nextAfter,
+}) => jsonEncode(<String, Object?>{
+  'schema_version': 1,
+  'project_id': projectId,
+  'data': <String, Object?>{
+    'command': 'history',
+    'id': id,
+    'items':
+        items ??
+        <Map<String, Object?>>[
+          <String, Object?>{
+            'event_id': 11,
+            'task_id': 42,
+            'entity_type': 'task',
+            'operation': 'update',
+            'resulting_version': 7,
+            'created_ms': 1700000001000,
+            'snapshot_json': '{"version":7}',
+          },
+        ],
+    'has_more': hasMore,
+    'next_after': nextAfter,
+  },
+});
+
 ViewerEnvironment viewerEnvironmentForTest({
   String? dataRoot = r'C:\store',
   String? tasksExe = r'C:\tools\tasks.exe',
@@ -674,6 +750,235 @@ void main() {
     test('cancelling a scope with no read is harmless', () {
       final client = buildClient();
       expect(() => client.cancelScope('projects'), returnsNormally);
+    });
+  });
+
+  group('task and detail reads', () {
+    test('viewer tasks routes by project UUID and sends the query', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      launcher.replyWith(tasksDocument());
+
+      final page = await client.fetchTasks(
+        projectUuid,
+        const TaskQuery(
+          query: 'parser',
+          scope: TaskScope.all,
+          statuses: <String>['todo'],
+          priorities: <String>['P1'],
+          labels: <String>['ui'],
+          readiness: TaskReadiness.waiting,
+          sort: TaskSort.updated,
+          direction: SortDirection.descending,
+          offset: 400,
+          limit: 100,
+          snapshot: 't1.abc',
+        ),
+      );
+
+      expect(page.totalCount, 1);
+      expect(page.items.single.canonicalId, 'T-042');
+      expect(page.items.single.waitingDependencyCount, 1);
+      expect(page.snapshot, 't1.abc');
+
+      final launch = launcher.launches.last;
+      expect(launch.executable, r'C:\tools\tasks.exe');
+      expect(launch.arguments, <String>[
+        '--data-root',
+        r'C:\store',
+        '--project',
+        projectUuid,
+        '--format',
+        'json',
+        'viewer',
+        'tasks',
+        '--request-file',
+        '-',
+      ]);
+      expect(launch.handle.stdinClosed, isTrue);
+      final sent =
+          jsonDecode(utf8.decode(launch.handle.stdinBytes))
+              as Map<String, Object?>;
+      expect(sent, <String, Object?>{
+        'query': 'parser',
+        'scope': 'all',
+        'statuses': <String>['todo'],
+        'priorities': <String>['P1'],
+        'labels': <String>['ui'],
+        'readiness': 'waiting',
+        'sort': 'updated',
+        'direction': 'desc',
+        'offset': 400,
+        'limit': 100,
+        'snapshot': 't1.abc',
+      });
+    });
+
+    test('viewer show reads the canonical id and keeps a 1 MiB body', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      final body = 'line\n' * 209715 + 'x';
+      expect(utf8.encode(body), hasLength(1048576));
+      launcher.replyWith(showDocument(body: body));
+
+      final detail = await client.fetchTaskDetail(projectUuid, 42);
+
+      expect(detail.canonicalId, 'T-042');
+      expect(detail.body, body);
+      expect(detail.dependencySummaries.single.canonicalId, 'T-009');
+      expect(detail.dependencySummaries.single.preventsReadiness, isTrue);
+      expect(detail.ruleVersion, 3);
+      expect(detail.rules, '# Rules');
+      expect(launcher.launches.last.arguments, <String>[
+        '--data-root',
+        r'C:\store',
+        '--project',
+        projectUuid,
+        '--format',
+        'json',
+        'viewer',
+        'show',
+        'T-042',
+      ]);
+      expect(launcher.launches.last.handle.stdinClosed, isTrue);
+      expect(launcher.launches.last.handle.stdinBytes, isEmpty);
+    });
+
+    test('history pages carry --limit and --after', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      launcher.replyWith(historyDocument(hasMore: true, nextAfter: 11));
+
+      final page = await client.fetchTaskHistory(
+        projectUuid,
+        42,
+        after: 7,
+        limit: 100,
+      );
+
+      expect(page.items.single.eventId, 11);
+      expect(page.items.single.operation, 'update');
+      expect(page.items.single.snapshotJson, '{"version":7}');
+      expect(page.hasMore, isTrue);
+      expect(page.nextAfter, 11);
+      expect(launcher.launches.last.arguments, <String>[
+        '--data-root',
+        r'C:\store',
+        '--project',
+        projectUuid,
+        '--format',
+        'json',
+        'history',
+        'T-042',
+        '--limit',
+        '100',
+        '--after',
+        '7',
+      ]);
+    });
+
+    test('one selected event is read with --event and no --after', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      launcher.replyWith(historyDocument());
+
+      final page = await client.fetchTaskHistory(
+        projectUuid,
+        42,
+        event: 11,
+        limit: 1,
+      );
+
+      expect(page.items.single.eventId, 11);
+      expect(page.hasMore, isFalse);
+      expect(page.nextAfter, isNull);
+      expect(launcher.launches.last.arguments, <String>[
+        '--data-root',
+        r'C:\store',
+        '--project',
+        projectUuid,
+        '--format',
+        'json',
+        'history',
+        'T-042',
+        '--limit',
+        '1',
+        '--event',
+        '11',
+      ]);
+    });
+
+    test('an answer for another project UUID is rejected', () async {
+      const other = '99999999-8888-7777-6666-555555555555';
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+
+      launcher.replyWith(tasksDocument(projectId: other));
+      await expectLater(
+        client.fetchTasks(projectUuid, const TaskQuery()),
+        throwsA(
+          isA<ViewerMalformedResponseFailure>().having(
+            (failure) => failure.message,
+            'message',
+            contains(other),
+          ),
+        ),
+      );
+
+      launcher.replyWith(showDocument(projectId: other));
+      await expectLater(
+        client.fetchTaskDetail(projectUuid, 42),
+        throwsA(isA<ViewerMalformedResponseFailure>()),
+      );
+
+      launcher.replyWith(historyDocument(projectId: other));
+      await expectLater(
+        client.fetchTaskHistory(projectUuid, 42, limit: 100),
+        throwsA(isA<ViewerMalformedResponseFailure>()),
+      );
+    });
+
+    test('every read requires a passing probe first', () async {
+      final launcher = ScriptedLauncher();
+      final client = buildClient(launcher: launcher);
+      launcher.replyWith(tasksDocument());
+
+      await expectLater(
+        client.fetchTasks(projectUuid, const TaskQuery()),
+        throwsA(isA<ViewerProbeRequiredFailure>()),
+      );
+      await expectLater(
+        client.fetchTaskDetail(projectUuid, 42),
+        throwsA(isA<ViewerProbeRequiredFailure>()),
+      );
+      await expectLater(
+        client.fetchTaskHistory(projectUuid, 42, limit: 100),
+        throwsA(isA<ViewerProbeRequiredFailure>()),
+      );
+      expect(launcher.launches, isEmpty, reason: 'no process before a probe');
+    });
+
+    test('a missing data root is reported before a process starts', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(
+        launcher,
+        environment: viewerEnvironmentForTest(dataRoot: null),
+      );
+      final launchesAfterProbe = launcher.launches.length;
+
+      await expectLater(
+        client.fetchTasks(projectUuid, const TaskQuery()),
+        throwsA(
+          isA<ViewerCliErrorFailure>()
+              .having((failure) => failure.code, 'code', 'no_store')
+              .having(
+                (failure) => failure.message,
+                'message',
+                contains('Settings'),
+              ),
+        ),
+      );
+      expect(launcher.launches, hasLength(launchesAfterProbe));
     });
   });
 }

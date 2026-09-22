@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 
 import '../controllers/announcement_controller.dart';
 
@@ -38,11 +39,23 @@ class _StatusBarState extends State<StatusBar> {
   int _lastRevision = -1;
   bool _flip = false;
 
+  /// Windows answers the engine `announce` channel, so dynamic status goes
+  /// through it. The live region stays the fallback for platforms where
+  /// announcements are unsupported or discouraged (dart:ui
+  /// `AccessibilityFeatures.supportsAnnounce`).
+  bool _supportsAnnounce = false;
+
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_onAnnouncementChanged);
     _onAnnouncementChanged();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _supportsAnnounce = MediaQuery.supportsAnnounceOf(context);
   }
 
   @override
@@ -73,6 +86,13 @@ class _StatusBarState extends State<StatusBar> {
         _liveText = text;
       }
       _lastLiveSource = text;
+      if (_supportsAnnounce && text.isNotEmpty) {
+        SemanticsService.sendAnnouncement(
+          View.of(context),
+          text,
+          Directionality.maybeOf(context) ?? TextDirection.ltr,
+        );
+      }
     }
     if (mounted) {
       setState(() {});
@@ -83,7 +103,10 @@ class _StatusBarState extends State<StatusBar> {
   Widget build(BuildContext context) {
     final controller = widget.controller;
     final statusText = controller.statusText;
-    final isLive = controller.liveRegionText != null && _liveText.isNotEmpty;
+    final isLive =
+        !_supportsAnnounce &&
+        controller.liveRegionText != null &&
+        _liveText.isNotEmpty;
     final text = Text(
       statusText,
       style: Theme.of(context).textTheme.bodyMedium,

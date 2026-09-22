@@ -147,6 +147,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   final Map<int, FocusNode> _rowNodes = <int, FocusNode>{};
 
   int? _selectedIndex;
+  int? _notifiedIndex;
   int? _pendingIndex;
   int? _forwardIndex;
   int _focusAttempts = 0;
@@ -169,6 +170,11 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       widget.controller._attach(this);
     }
     _syncSelectionWithItemCount();
+    if (oldWidget.itemCount != widget.itemCount) {
+      // The rows changed under the selection, so whatever the owner was last
+      // told describes a different list; let the next row focus speak again.
+      _notifiedIndex = null;
+    }
     final pending = _pendingIndex;
     if (pending != null && pending >= widget.itemCount) {
       _pendingIndex = null;
@@ -209,6 +215,23 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     return null;
   }
 
+  /// Keeps the container's `focused` semantics flag describing the container
+  /// alone.
+  ///
+  /// `hasFocus` is ancestor-inclusive: the container reports it while a row
+  /// holds the focus, and a row reports it while one of *its* descendants does.
+  /// The platform builds the element it reports as focused from these flags, so
+  /// a container that keeps advertising focus after a row took it leaves two
+  /// nodes claiming the same focus and hands the region to the screen reader
+  /// instead of the row (viewer/design.md section 9).
+  void _syncContainerFocusFlag() {
+    final focused = _containerFocus.hasPrimaryFocus;
+    if (focused == _containerFocused) {
+      return;
+    }
+    setState(() => _containerFocused = focused);
+  }
+
   // --------------------------------------------------------------- selection
 
   void _focusRegion() {
@@ -239,6 +262,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     }
     setState(() => _selectedIndex = index);
     if (notify && index != null) {
+      _notifiedIndex = index;
       widget.onSelectedIndexChanged?.call(index);
     }
   }
@@ -335,7 +359,6 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       final node = _rowNodes[target];
       if (node != null) {
         _pendingIndex = null;
-        _focusAttempts = 0;
         // Take the focus when the move was deliberate, when the list already
         // owned it, or when nothing else does (the previous row was disposed
         // mid-jump). Only a real move to another control forwards instead.
@@ -348,7 +371,9 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
         _cancelSlowTimer();
         if (takeFocus) {
           node.requestFocus();
+          _confirmRowFocus(target, node);
         } else {
+          _focusAttempts = 0;
           // Focus moved elsewhere while the row was loading: do not steal it.
           _forwardIndex = target;
         }
@@ -367,6 +392,39 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       }
     }
     _startSlowTimer(target);
+  }
+
+  /// Confirms one frame later that a completed jump really took focus.
+  ///
+  /// A jump can settle in the same frame that swaps a placeholder row for the
+  /// loaded row. That rebuild keys the row differently, so it disposes the node
+  /// the request targeted; the request lands nowhere and the list would be left
+  /// unfocused with nothing pending. Re-arm the jump against the rebuilt row
+  /// instead (viewer/design.md section 6: rows that are not built yet must
+  /// still be reachable). Retrying is bounded, and a row that survived without
+  /// taking focus is left alone because another control holds it on purpose.
+  void _confirmRowFocus(int target, FocusNode node) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pendingIndex != null) {
+        return; // A newer jump owns the pending state.
+      }
+      final current = _rowNodes[target];
+      if (node.hasFocus || (current?.hasFocus ?? false)) {
+        _focusAttempts = 0;
+        return;
+      }
+      if (identical(current, node)) {
+        return; // The row survived, so another control kept the focus.
+      }
+      if (_focusAttempts >= 20) {
+        return; // Stop instead of fighting a row that keeps being rebuilt.
+      }
+      _focusAttempts++;
+      _pendingIndex = target;
+      _pendingFocusIntent = true;
+      SchedulerBinding.instance.scheduleFrame();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _settleFocus());
+    });
   }
 
   void _startSlowTimer(int target) {
@@ -400,24 +458,44 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   }
 
   void _onRowFocusGained(int index) {
+    // The container callback also fires for this transition, because the
+    // container's ancestor-inclusive `hasFocus` turned true with the row's.
+    _syncContainerFocusFlag();
     if (index != _selectedIndex) {
       setState(() => _selectedIndex = index);
-      widget.onSelectedIndexChanged?.call(index);
     }
+    // A row that takes focus *is* the selection, so the owner hears about it
+    // even when the index already matched: a selection seeded while the list
+    // loaded never reached the owner, and the pane that reads "the selected
+    // task" would keep showing nothing while a row looks selected, leaving F3
+    // with no body to focus. Each index is reported once, so a rebuild that
+    // re-focuses the same row does not repeat the selection to the owner.
+    if (index == _notifiedIndex) {
+      return;
+    }
+    _notifiedIndex = index;
+    widget.onSelectedIndexChanged?.call(index);
   }
 
   void _onContainerFocusChange(bool hasFocus) {
-    setState(() => _containerFocused = hasFocus);
+    _syncContainerFocusFlag();
     widget.onFocusChange?.call(
       hasFocus || _rowNodes.values.any((n) => n.hasFocus),
     );
     if (!hasFocus || widget.itemCount == 0) {
       return;
     }
+    if (!_containerFocus.hasPrimaryFocus) {
+      // A row took the focus: this callback only heard that the region became
+      // focused, and that row is the focus target. Tab entry is the case the
+      // seed below exists for.
+      return;
+    }
     // Tab enters the collection at its selected row, or the first row.
     final index = _selectedIndex ?? 0;
     if (_selectedIndex == null) {
       setState(() => _selectedIndex = index);
+      _notifiedIndex = index;
       widget.onSelectedIndexChanged?.call(index);
     }
     final node = _rowNodes[index];
@@ -450,7 +528,11 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.home) {
-      _moveSelection(-widget.itemCount);
+      // A relative move can never reach row zero from inside the list, so ask
+      // for the first row directly, exactly like End asks for the last one.
+      if (_selectedIndex != 0) {
+        _requestIndex(0, moveFocus: true);
+      }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.end) {
