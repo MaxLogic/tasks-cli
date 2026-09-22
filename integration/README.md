@@ -14,7 +14,7 @@ state.
 Setup is a separate authorized operation. For an existing project, obtain and
 verify its UUID from the existing tasks registry/CLI output. For a genuinely new
 project, run authorized
-`tasks init --root <absolute-project-root> --write-identity` and retain the
+`tasks init --root <absolute-project-root>` and retain the
 returned project UUID. Do not generate a UUID independently.
 
 The command creates root `.tasks.json` with only

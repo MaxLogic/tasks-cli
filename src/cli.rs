@@ -35,9 +35,6 @@ pub enum Command {
     Init {
         #[arg(long)]
         root: PathBuf,
-        /// Create .tasks.json at the project root, or verify the existing identity.
-        #[arg(long)]
-        write_identity: bool,
     },
     Bind {
         #[arg(long)]

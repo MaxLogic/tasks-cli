@@ -21,7 +21,7 @@ in the current crate, not a claim to bundle the latest upstream SQLite patch.
 ## Sixty-second tour
 
 ```text
-tasks init --root "D:\Work\Project" --write-identity
+tasks init --root "D:\Work\Project"
 tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
@@ -63,7 +63,7 @@ registry picks the longest registered ancestor. Unknown projects fail loudly
 instead of creating a second backlog.
 
 ```text
-tasks init --root "D:\Work\Project" --write-identity
+tasks init --root "D:\Work\Project"
 tasks bind --root "D:\Work\Project\subdir" --project UUID
 tasks --project UUID doctor
 ```
@@ -405,7 +405,7 @@ is not Linux proof.
 
 ## Tests
 
-The 2026-09-21 verification ran 189 tests on Windows and 193 on Ubuntu/WSL
+The 2026-09-22 verification ran 214 tests on Windows and 218 on Ubuntu/WSL
 with `cargo test --locked --no-fail-fast`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
@@ -413,7 +413,7 @@ commands, logs and measured results. Coverage includes routing and init contenti
 selective reads, transactional mutations, Markdown preservation, migration and
 backup recovery, history, dependencies, output contracts, and WSL interop, using
 real temporary SQLite stores and real subprocesses for contention, exit codes,
-stdin, backup recovery, and crash rollback. Live project `TASKS.md` files are
+stdin, backup recovery, and crash rollback. Live legacy Markdown ledgers are
 never modified by the suite.
 
 ## What v1 deliberately does not do
