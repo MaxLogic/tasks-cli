@@ -24,6 +24,7 @@ import 'data/cli_client.dart';
 import 'data/settings_draft.dart';
 import 'data/settings_store.dart';
 import 'launch_args.dart';
+import 'launch_plan.dart';
 import 'platform/announcement_player.dart';
 import 'platform/single_instance.dart';
 import 'platform/startup_registration.dart';
@@ -40,8 +41,7 @@ Future<void> main(List<String> arguments) async {
     // There is no window yet, so the command line is the only place to report
     // a bad launch. A non-zero code keeps scripting failures visible.
     stderr.writeln(error.message);
-    exitCode = 2;
-    return;
+    exit(2);
   }
 
   final settingsStore = SettingsStore(
@@ -55,9 +55,12 @@ Future<void> main(List<String> arguments) async {
   }
   var currentSettings = loaded.draft;
 
-  if (launchArgs.startup && !currentSettings.startWithWindows) {
+  if (planViewerLaunch(args: launchArgs, settings: currentSettings) ==
+      ViewerLaunchPlan.exitWithoutWindow) {
     // A stale registration must exit before any window appears (spec 3.1).
-    return;
+    // Returning from `main` is not enough: the Windows runner owns a message
+    // loop that keeps the process alive until it is told to quit.
+    exit(0);
   }
 
   final environment = ViewerEnvironment.fromLaunchArgs(
@@ -74,17 +77,17 @@ Future<void> main(List<String> arguments) async {
     );
   } on ViewerInstanceUnavailable catch (error) {
     stderr.writeln(error.message);
-    exitCode = 3;
-    return;
+    exit(3);
   }
   if (!claim.isPrimary) {
-    return;
+    // The running instance already received the activation request; this
+    // process only has to go away.
+    exit(0);
   }
   final instance = claim.instance;
   if (instance == null) {
     stderr.writeln('The instance registry returned no activation channel.');
-    exitCode = 3;
-    return;
+    exit(3);
   }
 
   WidgetsFlutterBinding.ensureInitialized();
