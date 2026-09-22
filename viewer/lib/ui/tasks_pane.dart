@@ -30,7 +30,8 @@ class ViewerTasksPane extends StatefulWidget {
   State<ViewerTasksPane> createState() => _ViewerTasksPaneState();
 }
 
-class _ViewerTasksPaneState extends State<ViewerTasksPane> {
+class _ViewerTasksPaneState extends State<ViewerTasksPane>
+    with FailureViewRegionFocus<ViewerTasksPane> {
   final TextEditingController _search = TextEditingController();
   final TextEditingController _labels = TextEditingController();
   final TextEditingController _goToRow = TextEditingController();
@@ -832,12 +833,14 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane> {
   Widget _buildList(BuildContext context, TaskController tasks) {
     final failure = tasks.firstLoadError;
     if (failure != null && !tasks.hasConfirmedData) {
+      claimFailureViewRegionFocus(widget.api, ViewerRegion.tasks);
       return ViewerFailureView(
         failure: failure,
         heading: 'Could not load tasks',
         onRetry: () => unawaited(widget.model.retryTasks()),
       );
     }
+    releaseFailureViewRegionFocus();
     final handles = _handles;
     final itemCount = tasks.totalCount;
     return AccessibleVirtualList(

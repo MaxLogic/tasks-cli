@@ -62,6 +62,7 @@ Future<void> main(List<String> arguments) async {
         tasks: client,
         detail: client,
         update: client,
+        clipboard: client,
         drafts: drafts,
         probe: client.probe,
       ),

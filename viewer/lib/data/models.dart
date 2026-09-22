@@ -145,6 +145,15 @@ final class ViewerProbeRequiredFailure extends ViewerFailure {
       'connect to the CLI before loading projects.';
 }
 
+/// The platform clipboard refused to hand over its plain text. The message
+/// never repeats the clipboard contents.
+final class ViewerClipboardFailure extends ViewerFailure {
+  const ViewerClipboardFailure(this.message);
+
+  @override
+  final String message;
+}
+
 /// A decoded success envelope with its command tag and payload object.
 final class ViewerEnvelope {
   const ViewerEnvelope({
@@ -1524,6 +1533,63 @@ abstract interface class TaskDetailReader {
 abstract interface class CancellableTaskDetailReader
     implements TaskDetailReader {
   void cancelScope(String scopeKey);
+}
+
+/// The clipboard enrichment surface of one project scope (spec.md section 8).
+///
+/// Both operations reuse the legacy commands: [enrichClipboard] runs
+/// `enrich-clipboard`, so the CLI owns the clipboard read, the text-equality
+/// check and the replacement; [enrichText] runs `enrich --file -` with text the
+/// caller already read and never touches the clipboard.
+abstract interface class ClipboardEnricher {
+  Future<ClipboardEnrichment> enrichClipboard(String projectId);
+
+  Future<ClipboardEnrichment> enrichText(String projectId, String text);
+}
+
+/// One `enrich` payload: the transformed text and what changed.
+///
+/// `unknown_ids` are numeric task IDs that exist in the text but not in the
+/// project; they stay unchanged and are reported so the UI can name them.
+final class ClipboardEnrichment {
+  const ClipboardEnrichment({
+    required this.text,
+    required this.replacements,
+    required this.unknownIds,
+    required this.clipboard,
+  });
+
+  /// Enriched text. Never shown for the direct action, which must not expose
+  /// the whole clipboard.
+  final String text;
+
+  /// How many references received a title annotation.
+  final int replacements;
+
+  /// Numeric IDs that were left unchanged.
+  final List<int> unknownIds;
+
+  /// True when the CLI read and replaced the clipboard itself.
+  final bool clipboard;
+
+  factory ClipboardEnrichment.fromJson(
+    Map<String, Object?> json, {
+    String path = r'$.data',
+  }) {
+    final rawUnknown = _requireList(
+      _requiredValue(json, 'unknown_ids', path),
+      '$path.unknown_ids',
+    );
+    return ClipboardEnrichment(
+      text: _requireString(json, 'text', path),
+      replacements: _requireInt(json, 'replacements', path),
+      unknownIds: List<int>.unmodifiable(<int>[
+        for (var index = 0; index < rawUnknown.length; index++)
+          _requireIntValue(rawUnknown[index], '$path.unknown_ids[$index]'),
+      ]),
+      clipboard: _requireBool(json, 'clipboard', path),
+    );
+  }
 }
 
 // --------------------------------------------------------------- readers

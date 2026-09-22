@@ -5,6 +5,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -18,6 +19,7 @@ import 'package:tasks_viewer/data/editor_models.dart';
 import 'package:tasks_viewer/data/settings_store.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/launch_args.dart';
+import 'package:tasks_viewer/platform/clipboard_text.dart';
 import 'package:tasks_viewer/ui/accessible_virtual_list.dart';
 import 'package:tasks_viewer/ui/app_shell.dart';
 import 'package:tasks_viewer/ui/prototype_workspace.dart';
@@ -526,6 +528,8 @@ Future<RealViewerHarness> pumpRealViewer(
   Size surface = const Size(1600, 900),
   AnnouncementMode mode = AnnouncementMode.nvdaOnly,
   TaskUpdateWriter? update,
+  ClipboardEnricher? enricher,
+  ViewerClipboard? clipboard,
   RecoveryDraftSink? drafts,
   ViewerCloseGuard? closeGuard,
   bool settle = true,
@@ -553,10 +557,12 @@ Future<RealViewerHarness> pumpRealViewer(
           detail: backend,
           probe: backend.probe,
           update: update,
+          clipboard: enricher,
           drafts: drafts,
         ),
         announcements: announcements,
         initialSettings: settings,
+        viewerClipboard: clipboard,
         drafts: drafts,
         closeGuard: closeGuard,
       ),
@@ -814,6 +820,96 @@ class FakeTaskWriter implements TaskUpdateWriter {
     );
   }
 }
+
+/// In-memory recovery drafts with injectable disk failures.
+/// Scriptable clipboard for the preview route: the direct action never uses it.
+class FakeViewerClipboard implements ViewerClipboard {
+  FakeViewerClipboard({this.text});
+
+  /// Plain text the clipboard holds; null stands for a non-text clipboard.
+  String? text;
+
+  /// While set, the read stays pending until a test completes it.
+  Completer<void>? gate;
+
+  /// While set, every read throws it, the way a locked clipboard does.
+  ViewerFailure? failure;
+
+  int reads = 0;
+
+  @override
+  Future<String?> readText() async {
+    reads += 1;
+    final pending = gate;
+    if (pending != null) {
+      await pending.future;
+    }
+    final broken = failure;
+    if (broken != null) {
+      throw broken;
+    }
+    return text;
+  }
+}
+
+/// One scriptable `enrich` / `enrich-clipboard` surface.
+///
+/// Records the captured project UUID of every call, so a test can prove the
+/// scope of a running action did not follow a later selection change.
+class FakeClipboardEnricher implements ClipboardEnricher {
+  final List<String> directProjectIds = <String>[];
+  final List<String> textProjectIds = <String>[];
+  final List<String> texts = <String>[];
+
+  /// Delay before every answer, so a test can observe the busy state.
+  Duration latency = Duration.zero;
+
+  /// When set, the next call throws it once and clears the field.
+  ViewerFailure? failure;
+
+  /// Answer for the next successful call.
+  ClipboardEnrichment answer = testClipboardEnrichment();
+
+  int get calls => directProjectIds.length + textProjectIds.length;
+
+  @override
+  Future<ClipboardEnrichment> enrichClipboard(String projectId) async {
+    directProjectIds.add(projectId);
+    return _answer();
+  }
+
+  @override
+  Future<ClipboardEnrichment> enrichText(String projectId, String text) async {
+    textProjectIds.add(projectId);
+    texts.add(text);
+    return _answer();
+  }
+
+  Future<ClipboardEnrichment> _answer() async {
+    if (latency > Duration.zero) {
+      await Future<void>.delayed(latency);
+    }
+    final pending = failure;
+    if (pending != null) {
+      failure = null;
+      throw pending;
+    }
+    return answer;
+  }
+}
+
+/// One enrichment answer with the counts a test cares about.
+ClipboardEnrichment testClipboardEnrichment({
+  String text = '',
+  int replacements = 0,
+  List<int> unknownIds = const <int>[],
+  bool clipboard = false,
+}) => ClipboardEnrichment(
+  text: text,
+  replacements: replacements,
+  unknownIds: List<int>.unmodifiable(unknownIds),
+  clipboard: clipboard,
+);
 
 /// In-memory recovery drafts with injectable disk failures.
 class MemoryDraftSink implements RecoveryDraftSink {

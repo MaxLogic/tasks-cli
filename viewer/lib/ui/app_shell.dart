@@ -174,6 +174,9 @@ abstract class ViewerShellApi {
 
   ViewerRegion get activeRegion;
 
+  /// True while a dialog owns the window's keys (design.md section 9).
+  bool get hasOpenModal;
+
   void announce(String text, {String? clipId, bool dynamic = false});
 
   void announceProgress(String text, {String? clipId});
@@ -193,6 +196,49 @@ abstract class ViewerShellApi {
 
   /// Reveals a pane in the reduced layout.
   void revealRegion(ViewerRegion region);
+}
+
+/// Keeps the window's own keys reachable while a blocking failure view has
+/// replaced one pane's list.
+///
+/// design.md section 2 starts the window in the Projects region: its selected
+/// row, or the empty list container. A fatal read failure mounts neither, so
+/// the control that held the focus is unmounted and the focus falls back to
+/// the route scope. The shell's shortcuts sit *above* the focused node and
+/// never see a key from there, which would make F1, F10 and Ctrl+, look dead in
+/// the one state design.md section 2 requires the Hotkey help button to stay
+/// visible in. The region node takes that focus instead.
+///
+/// The claim is made once per failure, and only when no real control holds the
+/// focus and no dialog is open, so a user who reached another control or a
+/// modal is never pulled away.
+mixin FailureViewRegionFocus<T extends StatefulWidget> on State<T> {
+  bool _claimed = false;
+
+  /// Call from `build` while the pane shows its blocking failure view.
+  void claimFailureViewRegionFocus(ViewerShellApi api, ViewerRegion region) {
+    if (_claimed) {
+      return;
+    }
+    _claimed = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || api.hasOpenModal) {
+        return;
+      }
+      final focused = FocusManager.instance.primaryFocus;
+      if (focused != null && focused is! FocusScopeNode) {
+        return;
+      }
+      final node = api.handlesFor(region).regionFocus;
+      if (node.hasFocus) {
+        return;
+      }
+      node.requestFocus();
+    });
+  }
+
+  /// Call from `build` once the pane shows its list again.
+  void releaseFailureViewRegionFocus() => _claimed = false;
 }
 
 /// How many panes the current window can show (design.md section 2).
@@ -362,6 +408,9 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
 
   /// Number of open modals; a background command is blocked while positive.
   int get modalDepth => _modalDepth;
+
+  @override
+  bool get hasOpenModal => _modalDepth > 0;
 
   @override
   ViewerRegionHandles handlesFor(ViewerRegion region) => switch (region) {
