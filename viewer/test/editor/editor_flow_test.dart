@@ -1046,6 +1046,69 @@ void main() {
       expect(harness.statusText, 'Discarded the draft of T-001.');
     });
 
+    // The live defect only exists on a desktop target: EditableText selects the
+    // whole value when a single-line field regains focus (selectAllOnFocus
+    // defaults to true on Windows), and the test binding reports Android
+    // unless the target is pinned.
+    testWidgets(
+      'Cancel of the close guard restores the caret it interrupted',
+      variant: TargetPlatformVariant(<TargetPlatform>{TargetPlatform.windows}),
+      (WidgetTester tester) async {
+        final (harness, _) = await openDirtyEditor(tester);
+        final TextEditingController controller = tester
+            .widget<TextField>(editorField('Title (Alt+T)'))
+            .controller!;
+        controller.selection = const TextSelection.collapsed(offset: 6);
+        await tester.pump();
+
+        final Future<bool> closes = harness.model.closeWindow();
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Close the viewer and lose the changes to this task?'),
+          findsOneWidget,
+        );
+
+        await pressAlt(tester, LogicalKeyboardKey.keyC);
+
+        expect(await closes, isFalse);
+        expect(harness.focusedDebugLabel, 'editor title');
+        expect(controller.text, 'Renamed task');
+        expect(
+          controller.selection,
+          const TextSelection.collapsed(offset: 6),
+          reason: 'Cancel must restore the caret the guard interrupted',
+        );
+      },
+    );
+
+    testWidgets(
+      'Cancel of the form guard keeps the caret it interrupted',
+      variant: TargetPlatformVariant(<TargetPlatform>{TargetPlatform.windows}),
+      (WidgetTester tester) async {
+        final (harness, writer) = await openDirtyEditor(tester);
+        final TextEditingController controller = tester
+            .widget<TextField>(editorField('Title (Alt+T)'))
+            .controller!;
+        controller.selection = const TextSelection.collapsed(offset: 4);
+        await tester.pump();
+
+        await pressAlt(tester, LogicalKeyboardKey.keyC);
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Leave the editor and lose your changes?'),
+          findsOneWidget,
+        );
+
+        await pressAlt(tester, LogicalKeyboardKey.keyC);
+        await tester.pumpAndSettle();
+
+        expect(harness.model.editor.isEditing, isTrue);
+        expect(harness.focusedDebugLabel, 'editor title');
+        expect(controller.selection, const TextSelection.collapsed(offset: 4));
+        expect(writer.requests, isEmpty);
+      },
+    );
+
     testWidgets('a store change asks, and Save lets the change continue', (
       WidgetTester tester,
     ) async {
