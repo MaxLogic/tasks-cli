@@ -62,6 +62,7 @@ fn path_flag(arg: &str) -> Option<(&'static str, Option<&str>)> {
         "--root",
         "--route-root",
         "--data-root",
+        "--request-file",
         "--body-file",
         "--map-file",
         "--file",
@@ -234,6 +235,11 @@ mod tests {
     #[test]
     fn inline_path_flags_are_recognized_without_touching_text() {
         assert_eq!(
+            path_flag("--request-file=requests/projects.json"),
+            Some(("--request-file", Some("requests/projects.json")))
+        );
+        assert_eq!(path_flag("--request-file"), Some(("--request-file", None)));
+        assert_eq!(
             path_flag("--body-file=notes with Ω.md"),
             Some(("--body-file", Some("notes with Ω.md")))
         );
@@ -243,6 +249,50 @@ mod tests {
             Some(("--route-root", Some("C:\\work tree")))
         );
         assert_eq!(path_flag("search text_%\\literal"), None);
+    }
+
+    #[test]
+    fn viewer_request_files_are_translated_like_other_path_flags() {
+        let args: Vec<String> = [
+            "viewer",
+            "projects",
+            "--request-file",
+            "requests/projects.json",
+            "--data-root",
+            "/mnt/f/root",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let result = convert_args(&args, |path| {
+            Ok(PathBuf::from(format!("translated:{}", path.display())))
+        })
+        .expect("converted args");
+        assert_eq!(
+            result,
+            [
+                "viewer",
+                "projects",
+                "--request-file",
+                "translated:requests/projects.json",
+                "--data-root",
+                "translated:/mnt/f/root",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<String>>()
+        );
+        let stdin: Vec<String> = ["viewer", "projects", "--request-file", "-"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            convert_args(&stdin, |path| {
+                Ok(PathBuf::from(format!("translated:{}", path.display())))
+            })
+            .expect("converted stdin args"),
+            stdin
+        );
     }
 
     #[test]
