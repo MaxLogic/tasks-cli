@@ -410,6 +410,7 @@ Focused proof for slice 7: run `flutter test test/platform test/announcements te
 | Cross-platform Rust checks | Implementer uses Ubuntu/WSL, Linux-owned fixture root and two real binaries | Slice 2 certification/final gate |
 | Expensive project aggregation | Measure representative catalog; optimize aggregate SQL if targets fail, without adding a daemon or bypassing storage ownership | Slices 3, 7 |
 | Project start provenance | UI always labels first recorded task; historical project creation is unavailable and excluded | Project statistics |
+| NVDA consumes plain F4 in its default desktop layout (report current object) | Implementer records the key-delivery probe (F4 absent from the Flutter trace, F3 and Shift/Ctrl+F4 arriving, F4 also consumed in File Explorer) and reaches the editor through the Edit button during the walkthrough; an alternative in-app binding stays a slice-7 decision | Slice 5 walkthrough C, slice 7 |
 
 Review: the author performed a bounded consistency review and a separate read-only contract reviewer checked the repository boundary. Corrections adopted: scoped timestamp/count extensions, count reuse within query tokens, explicit platform file identity, immediate locked-project error rows, presence-aware JSON parsing, explicit SQL sort expressions, catalog-page invalidation and honest clipboard race limits. No material review finding remains deferred. No implementation tests were run for this documentation change.
 

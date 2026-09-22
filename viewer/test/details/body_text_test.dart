@@ -45,10 +45,7 @@ void main() {
     const String stored = 'alpha\r\nMARKER-42\r\nomega\r\n';
     final ViewerBodyText body = ViewerBodyText.parse(stored);
 
-    expect(
-      body.display,
-      'alpha\nMARKER-42\nomega\n',
-    );
+    expect(body.display, 'alpha\nMARKER-42\nomega\n');
     expect(body.storedRange(0, body.display.length), stored);
     expect(body.storedRange(6, 15), 'MARKER-42');
     // A range that spans the line break keeps the stored CRLF.

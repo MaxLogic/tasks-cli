@@ -14,6 +14,8 @@ import 'package:tasks_viewer/app_environment.dart';
 import 'package:tasks_viewer/controllers/announcement_catalog.dart';
 import 'package:tasks_viewer/controllers/announcement_controller.dart';
 import 'package:tasks_viewer/data/models.dart';
+import 'package:tasks_viewer/data/editor_models.dart';
+import 'package:tasks_viewer/data/settings_store.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/launch_args.dart';
 import 'package:tasks_viewer/ui/accessible_virtual_list.dart';
@@ -523,6 +525,9 @@ Future<RealViewerHarness> pumpRealViewer(
   ViewerSettingsDraft settings = const ViewerSettingsDraft(),
   Size surface = const Size(1600, 900),
   AnnouncementMode mode = AnnouncementMode.nvdaOnly,
+  TaskUpdateWriter? update,
+  RecoveryDraftSink? drafts,
+  ViewerCloseGuard? closeGuard,
   bool settle = true,
 }) async {
   final backend = reads ?? fakeWorkspaceReads();
@@ -547,9 +552,13 @@ Future<RealViewerHarness> pumpRealViewer(
           tasks: backend,
           detail: backend,
           probe: backend.probe,
+          update: update,
+          drafts: drafts,
         ),
         announcements: announcements,
         initialSettings: settings,
+        drafts: drafts,
+        closeGuard: closeGuard,
       ),
     ),
   );
@@ -746,3 +755,111 @@ ViewerInfo testViewerInfo() => const ViewerInfo(
     depsMaxCount: 1000,
   ),
 );
+
+// ------------------------------------------------------- editor fixtures
+
+/// One scriptable `viewer update` surface.
+///
+/// Records every request, then answers with a canned result or throws an
+/// injected failure. Nothing here can reach a real task store.
+class FakeTaskWriter implements TaskUpdateWriter {
+  final List<ViewerUpdateRequest> requests = <ViewerUpdateRequest>[];
+  final List<String> projectIds = <String>[];
+
+  /// Version reported for the next confirmed write.
+  int nextVersion = 2;
+
+  /// Event id reported for the next confirmed write; null means a no-op.
+  int? nextEventId = 100;
+
+  /// Status the store reports after a confirmed write.
+  String nextStatus = 'todo';
+
+  /// Delay before every answer, so a test can observe the busy state.
+  Duration latency = Duration.zero;
+
+  /// When set, the next call throws it once and clears the field.
+  ViewerFailure? failure;
+
+  /// Failure thrown by every call while set.
+  ViewerFailure? persistentFailure;
+
+  ViewerUpdateRequest get lastRequest => requests.last;
+
+  @override
+  Future<ViewerUpdateResult> updateTask(
+    String projectId,
+    ViewerUpdateRequest request,
+  ) async {
+    requests.add(request);
+    projectIds.add(projectId);
+    if (latency > Duration.zero) {
+      await Future<void>.delayed(latency);
+    }
+    final persistent = persistentFailure;
+    if (persistent != null) {
+      throw persistent;
+    }
+    final failure = this.failure;
+    if (failure != null) {
+      this.failure = null;
+      throw failure;
+    }
+    final eventId = nextEventId;
+    return ViewerUpdateResult(
+      id: request.id,
+      status: nextStatus,
+      version: eventId == null ? request.expectVersion : nextVersion,
+      eventId: eventId,
+    );
+  }
+}
+
+/// In-memory recovery drafts with injectable disk failures.
+class MemoryDraftSink implements RecoveryDraftSink {
+  final Map<String, ViewerRecoveryDraft> drafts =
+      <String, ViewerRecoveryDraft>{};
+
+  /// Raised by every [loadAll] while set.
+  Object? loadFailure;
+
+  /// Raised by every [save] while set.
+  Object? saveFailure;
+
+  /// Raised by every [delete] while set.
+  Object? deleteFailure;
+
+  int loads = 0;
+  int saves = 0;
+  int deletes = 0;
+
+  @override
+  Future<List<ViewerRecoveryDraft>> loadAll() async {
+    loads += 1;
+    final failure = loadFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return List<ViewerRecoveryDraft>.unmodifiable(drafts.values);
+  }
+
+  @override
+  Future<void> save(ViewerRecoveryDraft draft) async {
+    saves += 1;
+    final failure = saveFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    drafts[draft.draftId] = draft;
+  }
+
+  @override
+  Future<void> delete(String draftId) async {
+    deletes += 1;
+    final failure = deleteFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    drafts.remove(draftId);
+  }
+}

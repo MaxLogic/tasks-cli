@@ -52,6 +52,17 @@ class VirtualListController extends ChangeNotifier {
   void selectIndex(int? index) =>
       _state?._setSelectedIndex(index, notify: true);
 
+  /// Returns the highlight to [restoreIndex] after the owner refused a move
+  /// to [refusedIndex] (spec.md section 7).
+  ///
+  /// The dialog that asked the question hands keyboard focus back to the row
+  /// it was opened from. That focus return is a restoration, not a fresh user
+  /// move, so it must not re-run the guard: the next focus change is consumed
+  /// once and, when it lands on the refused row, focus is pulled back to the
+  /// row the owner still has open.
+  void refuseMove(int refusedIndex, int restoreIndex) =>
+      _state?._refuseMove(refusedIndex, restoreIndex);
+
   /// Called by the owner when data for the pending target row arrived.
   void retryPending() => _state?._settleFocus();
 
@@ -147,6 +158,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   final Map<int, FocusNode> _rowNodes = <int, FocusNode>{};
 
   int? _selectedIndex;
+
+  /// Row the owner refused to move to; the next focus change is the dialog's
+  /// restoration, which must not be reported as a fresh move.
+  int? _refusedFocusIndex;
   int? _notifiedIndex;
   int? _pendingIndex;
   int? _forwardIndex;
@@ -275,6 +290,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     if (widget.itemCount == 0) {
       return;
     }
+    _refusedFocusIndex = null;
     final target = index.clamp(0, widget.itemCount - 1);
     _setSelectedIndex(target, notify: true);
     if (!moveFocus) {
@@ -295,6 +311,21 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       // list region with a pending target instead of falling to the window.
       _containerFocus.requestFocus();
     }
+  }
+
+  /// Puts the selection back on [restoreIndex] after the owner refused the
+  /// move to [refusedIndex]; the dialog's focus restoration is consumed by
+  /// [_onRowFocusGained] instead of looking like a fresh move.
+  void _refuseMove(int refusedIndex, int restoreIndex) {
+    if (widget.itemCount == 0) {
+      return;
+    }
+    _refusedFocusIndex = refusedIndex.clamp(0, widget.itemCount - 1);
+    // The refused move is no longer a pending jump to that row.
+    _pendingIndex = null;
+    _pendingFocusIntent = false;
+    _cancelSlowTimer();
+    _setSelectedIndex(restoreIndex, notify: true);
   }
 
   void _moveSelection(int delta) {
@@ -461,6 +492,19 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     // The container callback also fires for this transition, because the
     // container's ancestor-inclusive `hasFocus` turned true with the row's.
     _syncContainerFocusFlag();
+    final refused = _refusedFocusIndex;
+    if (refused != null) {
+      _refusedFocusIndex = null;
+      if (index == refused) {
+        // The dialog that asked the guarding question handed focus back to the
+        // row the owner refused; the highlight stays where the owner put it.
+        final selected = _selectedIndex;
+        if (selected != null && selected != index) {
+          _requestIndex(selected, moveFocus: true, forceFocus: true);
+        }
+        return;
+      }
+    }
     if (index != _selectedIndex) {
       setState(() => _selectedIndex = index);
     }
@@ -510,6 +554,9 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
+    // A key in the list is a deliberate move, so a refusal that never handed
+    // focus back cannot claim a later focus change.
+    _refusedFocusIndex = null;
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.arrowDown) {
       _moveSelection(1);

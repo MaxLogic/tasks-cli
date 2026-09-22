@@ -311,6 +311,20 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
   );
 }
 
+/// Normalizes a store path for draft identity comparison.
+///
+/// Windows stores are compared case-insensitively with forward slashes, so the
+/// same store reached through two spellings keeps one draft.
+String recoveryDraftSlug(String path) =>
+    path.replaceAll('\\', '/').toLowerCase();
+
+/// Stable identity of the recovery draft for one store, project and task.
+String viewerRecoveryDraftId({
+  required String dataRoot,
+  required String projectId,
+  required String taskId,
+}) => '${recoveryDraftSlug(dataRoot)}|$projectId|$taskId';
+
 /// One unsaved editor draft, keyed by store, project and task identity.
 ///
 /// Slice 5 owns when drafts are written and deleted; this type and
@@ -335,9 +349,11 @@ final class ViewerRecoveryDraft {
   final int updatedMs;
 
   /// Stable identity of one editor draft.
-  String get draftId => '${_slug(dataRoot)}|$projectId|$taskId';
-
-  static String _slug(String path) => path.replaceAll('\\', '/').toLowerCase();
+  String get draftId => viewerRecoveryDraftId(
+    dataRoot: dataRoot,
+    projectId: projectId,
+    taskId: taskId,
+  );
 
   factory ViewerRecoveryDraft.fromJson(Map<String, Object?> json) {
     Map<String, Object?> fields(String key) {
@@ -382,14 +398,28 @@ final class ViewerRecoveryDraft {
   };
 }
 
+/// The persistence surface the editor needs for recovery drafts.
+///
+/// The editor depends on this interface rather than the file-backed store, so
+/// tests can inject keep-in-memory drafts, a damaged index or a failing disk
+/// without touching the file system.
+abstract interface class RecoveryDraftSink {
+  Future<List<ViewerRecoveryDraft>> loadAll();
+
+  Future<void> save(ViewerRecoveryDraft draft);
+
+  Future<void> delete(String draftId);
+}
+
 /// Persists recovery drafts as one atomically replaced index file.
-class RecoveryDraftStore {
+class RecoveryDraftStore implements RecoveryDraftSink {
   RecoveryDraftStore({required this.indexFilePath, DateTime Function()? clock})
     : _clock = clock ?? DateTime.now;
 
   final String indexFilePath;
   final DateTime Function() _clock;
 
+  @override
   Future<List<ViewerRecoveryDraft>> loadAll() async {
     final file = File(indexFilePath);
     if (!await file.exists()) {
@@ -419,6 +449,7 @@ class RecoveryDraftStore {
   }
 
   /// Inserts or replaces one draft, keeping the rest.
+  @override
   Future<void> save(ViewerRecoveryDraft draft) async {
     final drafts = <String, ViewerRecoveryDraft>{
       for (final existing in await loadAll()) existing.draftId: existing,
@@ -427,6 +458,7 @@ class RecoveryDraftStore {
     await _write(drafts.values.toList(growable: false));
   }
 
+  @override
   Future<void> delete(String draftId) async {
     final drafts = <String, ViewerRecoveryDraft>{
       for (final existing in await loadAll()) existing.draftId: existing,

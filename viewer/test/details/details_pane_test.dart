@@ -484,12 +484,11 @@ void main() {
   group('body line endings', () {
     // A Windows-authored body: the store keeps its CRLF pairs, and the reader
     // must show every line without handing U+000D to the paragraph engine.
-    final String crlfBody =
-        <String>[
-          for (int index = 1; index <= 60; index++)
-            'line $index of a Windows-authored body\r\n',
-          'MARKER-42\r\n',
-        ].join();
+    final String crlfBody = <String>[
+      for (int index = 1; index <= 60; index++)
+        'line $index of a Windows-authored body\r\n',
+      'MARKER-42\r\n',
+    ].join();
 
     FakeWorkspaceReads crlfReads() => fakeWorkspaceReads(
       details: <int, TaskDetail>{
@@ -573,20 +572,36 @@ void main() {
   });
 
   group('actions and recovery', () {
-    testWidgets('Edit and Mark done report they are not in this build', (
+    testWidgets('F4 opens the real editor on the selected task', (
       WidgetTester tester,
     ) async {
       final harness = await pumpTaskDetails(tester);
       await pressKey(tester, LogicalKeyboardKey.f3);
 
-      await pressControl(tester, LogicalKeyboardKey.keyD);
-      expect(harness.liveText, viewerMarkDoneDeferredMessage);
-      expect(harness.statusText, viewerMarkDoneDeferredMessage);
-
       await pressKey(tester, LogicalKeyboardKey.f4);
-      expect(harness.liveText, viewerEditDeferredMessage);
-      expect(harness.statusText, viewerEditDeferredMessage);
+      expect(harness.model.editor.isEditing, isTrue);
+      expect(harness.focusedDebugLabel, 'editor title');
+      expect(harness.liveText, contains('Editing T-001'));
+
+      await pressAlt(tester, LogicalKeyboardKey.keyC);
+      expect(
+        harness.model.editor.isEditing,
+        isFalse,
+        reason: 'Cancel on a clean draft leaves without a prompt',
+      );
     });
+
+    testWidgets(
+      'Ctrl+D without a writable CLI keeps the read view and says so',
+      (WidgetTester tester) async {
+        final harness = await pumpTaskDetails(tester);
+        await pressKey(tester, LogicalKeyboardKey.f3);
+
+        await pressControl(tester, LogicalKeyboardKey.keyD);
+        expect(harness.liveText, contains('No tasks CLI is available'));
+        expect(harness.model.editor.isEditing, isFalse);
+      },
+    );
 
     testWidgets('Alt+C copies the task reference as plain text', (
       WidgetTester tester,

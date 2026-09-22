@@ -115,6 +115,7 @@ class ViewerShellActions {
     this.onTestConnection,
     this.onRegionChanged,
     this.onSettingsChanged,
+    this.onStoreChangeRequested,
   });
 
   final VoidCallback? onRefresh;
@@ -135,6 +136,12 @@ class ViewerShellActions {
   final VoidCallback? onTestConnection;
   final ValueChanged<ViewerRegion>? onRegionChanged;
 
+  /// Asked before the window accepts a settings draft that names a different
+  /// task store. False means the change was refused (a dirty editor said
+  /// Cancel), so the rest of the draft is refused with it. The reader swap
+  /// itself happens in the settings slice; this only keeps the guard here.
+  final Future<bool> Function(String? dataRoot)? onStoreChangeRequested;
+
   /// Reports saved preferences to the application root so the window theme and
   /// text scale follow Settings without a restart.
   final ValueChanged<ViewerSettingsDraft>? onSettingsChanged;
@@ -152,6 +159,15 @@ abstract class ViewerShellApi {
   /// `projects.*` / `tasks.*` / `details.*` / `editor.*` ids to the pane that is
   /// currently mounted. Pass null to unregister.
   void registerScopeCommands(CommandScope scope, CommandDispatch? handler);
+
+  /// Runs one command id as if it had been bound in [scope]'s region.
+  ///
+  /// Flutter resolves a [CommandIntent] at the innermost [Actions] widget, so
+  /// a nested scope — the editor form inside Task details — must hand over the
+  /// ids it does not own. Returning ignored there would swallow Ctrl+S, Ctrl+D
+  /// and F1..F6 instead of letting the region or the window answer them
+  /// (design.md section 9, dispatch precedence).
+  KeyEventResult dispatchFromScope(CommandScope scope, String id);
 
   /// True while the window is too narrow for three panes.
   bool get isReducedLayout;
@@ -556,7 +572,9 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   /// description must not stop at another tab (viewer/design.md section 9).
   void _focusDescription() {
     _requestDetails();
-    _scopeCommandHandlers[CommandScope.details]?.call('global.focusDescription');
+    _scopeCommandHandlers[CommandScope.details]?.call(
+      'global.focusDescription',
+    );
     _requestFocusAfterReveal(ViewerRegion.details, _details.bodyFocus);
   }
 
@@ -583,6 +601,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   /// The scope that installed the binding checks ownership first; a global
   /// command is run here for whichever region had focus, which is how F1..F10
   /// stay available everywhere without duplicating bindings.
+  @override
   KeyEventResult dispatchFromScope(CommandScope scope, String id) {
     final spec = commandSpecById(id);
     if (spec == null) {
@@ -776,6 +795,22 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     );
     if (draft == null) {
       return;
+    }
+    if (draft.dataRoot != _settings.dataRoot) {
+      final guard = widget.actions.onStoreChangeRequested;
+      if (guard != null) {
+        final allowed = await guard(draft.dataRoot);
+        if (!mounted) {
+          return;
+        }
+        if (!allowed) {
+          announce(
+            'Store change cancelled. Settings were not saved.',
+            dynamic: true,
+          );
+          return;
+        }
+      }
     }
     setState(() {
       _settings = draft;
