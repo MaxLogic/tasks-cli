@@ -22,6 +22,11 @@ name = "tasks-test-fixture"
 path = "src/bin/tasks-test-fixture.rs"
 required-features = ["test-hooks"]
 
+[[bin]]
+name = "tasks-perf-fixture"
+path = "src/bin/tasks-perf-fixture.rs"
+required-features = ["test-hooks"]
+
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
 file-id = "0.2.3"
