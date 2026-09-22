@@ -8,13 +8,13 @@
 library;
 
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'commands.dart';
+import 'viewer_format.dart';
 
 /// Rows rendered in each synthetic collection.
 const int prototypeRowCount = 10000;
@@ -37,20 +37,8 @@ String _padded(int value, int width) => value.toString().padLeft(width, '0');
 /// viewer/design.md section 2: the extent follows the active text scale and
 /// the row mode, so scaled text is never clipped. Normal density keeps its
 /// 56-pixel minimum; taller text grows the row instead of truncating it.
-double prototypeRowExtent(BuildContext context, {int textLines = 2}) {
-  final scaler = MediaQuery.textScalerOf(context);
-  final text = Theme.of(context).textTheme;
-  double line(TextStyle? style, double fallbackSize, double fallbackHeight) {
-    final size = scaler.scale(style?.fontSize ?? fallbackSize);
-    return size * (style?.height ?? fallbackHeight);
-  }
-
-  final title = line(text.bodyMedium, 14, 1.43);
-  final secondary = line(text.bodySmall, 12, 1.33);
-  final lines = textLines <= 1 ? title : title + secondary * (textLines - 1);
-  const verticalPadding = 12.0;
-  return math.max(56, (lines + verticalPadding).ceilToDouble());
-}
+double prototypeRowExtent(BuildContext context, {int textLines = 2}) =>
+    viewerRowExtent(context, textLines: textLines);
 
 /// Synthetic project row.
 class PrototypeProject {
@@ -181,6 +169,11 @@ class _PrototypeProjectsPaneState extends State<PrototypeProjectsPane> {
   void _onFilterChanged(String value) {
     setState(() {
       _visible = _matchingIndexes(_haystacks, value);
+      if (_selected != null && _selected! >= _visible.length) {
+        // The filter hid the selected row, so the summary must forget it
+        // instead of reading a row the list no longer shows.
+        _selected = null;
+      }
     });
   }
 
@@ -302,7 +295,14 @@ class _PrototypeTasksPaneState extends State<PrototypeTasksPane> {
   }
 
   void _onFilterChanged(String value) {
-    setState(() => _visible = _matchingIndexes(_haystacks, value));
+    setState(() {
+      _visible = _matchingIndexes(_haystacks, value);
+      if (_selected != null && _selected! >= _visible.length) {
+        // Same stale-selection rule as the Projects pane: a row the filter
+        // hides must not stay in the summary.
+        _selected = null;
+      }
+    });
   }
 
   @override

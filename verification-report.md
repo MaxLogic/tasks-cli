@@ -1,5 +1,113 @@
 # tasks-cli verification report
 
+## Viewer slice 4: projects, tasks, details and history under NVDA — 2026-09-22
+
+Slice 4 of `viewer/` adds the real project and task lists, the details pane with
+its Details, Dependencies, History and Project rules tabs, and the read paths
+behind them. Verification ran against the release build of the slice-4 working
+tree, in `--test-mode` with a synthetic fixture root and the real `tasks.exe`.
+Nothing was pushed, no live backlog was opened and no installed executable was
+replaced. Evidence is under
+`viewer/target/evidence/viewer/2026-09-22-slice4-nvda/` (`drive/` for harness
+logs and UIA dumps, `nvda/` for speech logs).
+
+### Proof
+
+- **The 1 MiB body no longer freezes the reader.** `delta-reading` T-001 holds
+  1 046 247 stored characters with 24 870 CRLF pairs. Focusing it in a profile
+  build stalled the next frame for **278.1 s** (`drive/focus-probe-6.log`,
+  03:27:24.740 → 03:32:02.837) and 285.5 s in the confirming run
+  (`drive/focus-probe-before-crfix.log`); NVDA logged repeated 10 s
+  freeze-recovery cycles over the same period
+  (`nvda/nvda-walkthrough-before-nvdaoff.log`). The isolated paragraph probe
+  puts the cost on U+000D: 64 KiB of CRLF paragraph text lays out in 448 ms
+  against 18 ms with LF, and the whole 1 021 377-character LF form in 321 ms
+  (`drive/paragraph-probe.log`). `ViewerBodyText` now lays out the LF form and
+  keeps the stored text as the source of truth for offsets and for anything
+  leaving the app, after which the same focus path completes a frame in
+  **0.48 s** (`drive/focus-probe-profile.log`, 04:06:54.867 → 04:06:55.351).
+  The stall was never NVDA's: with NVDA stopped the small-body frame still
+  completed and the 1 MiB frame still did not (`drive/Z-nvdaoff.log`,
+  `drive/Z-nvdaoff2.log`).
+- **Copy hands over the store's own characters.** With the body focused,
+  Ctrl+C after a Find-in-body match copied exactly the 31-character marker at
+  stored index 1 046 201 (sha256 `1D6A3D9C…`), and Ctrl+A then Ctrl+C copied
+  all 1 046 247 characters including 24 870 CRLF (sha256 `E1D10C56…`), equal
+  to the stored body (`drive/B29-b1-summary.json`,
+  `drive/B27-whole-body-result.json`). Two earlier runs whose verdicts read
+  `fail` had in fact copied exactly CRLF, two characters
+  (`drive/B19-copy-result.json`, `drive/B22-copy-result.json`); the harness
+  predicate expected the marker. They show the same stored characters and are
+  retained as such.
+- **A refused row jump is announced.** Typing 99999 into Go to row and pressing
+  Enter in the four-task delta-reading list speaks
+  `Enter a row number from 1 to 4. Nothing moved.` as an alert
+  (`drive/R2-announce.speech.txt`), matching the `a refused row reaches the
+  engine announce channel` widget test.
+- **Dependencies, driven from a fresh instance.** Alt+2 moves focus to the
+  Dependencies tab (node name `Dependencies\nAlt+2`) and the pane reads
+  `Dependencies of T-003` (`drive/N31-alt2.uia.json`); Alt+L then Down move to
+  `T-001 … Waiting for this dependency` and `T-002 … Waiting for this
+  dependency` (`N32`, `N33`); Alt+O opens the dependency, so the details header
+  becomes `Follow up with the vendor` / `ID T-002` with
+  `Dependencies of T-002. No dependencies` (`N44`,
+  `N45-names-after-alt-o.txt`); Alt+Left returns to `ID T-003` with both
+  dependency rows (`N46`, `N47-names-after-back.txt`).
+- **History reads, and the snapshot matches the CLI byte for byte.** Alt+3
+  moves focus to the History tab (`History\nAlt+3`), Alt+V focuses
+  `Event 2, create, version 1, 22 September 2026, 00:48`, Enter opens the event
+  and Alt+E focuses `Event snapshot (Alt+E)` (`drive/O34`…`O37`). The focused
+  value is 167 characters with sha256 `b215d8dd…`, identical to the
+  `snapshot_json` returned by `tasks history T-002 --event 2`
+  (`O38-cli-event2.json`, `O39-snapshot-value.txt`,
+  `O40-snapshot-focus.speech.txt`). Alt+E with no event selected alerts
+  `Select a history event before reading its snapshot.`
+- **History paging crosses the 100-event boundary.** `taskHistoryPageSize` is
+  100 (`viewer/lib/controllers/detail_controller.dart:24`, spec section 183),
+  so the original fixture's 31-event T-001 could never show the button. One
+  additive project, `epsilon-history` (`a680d42a-6a44-4c3e-b2a4-ab9ee2b1b592`,
+  131 events on T-001, `drive/H10-history-fixture.json`), was added to the same
+  temporary fixture root; the four original projects are unchanged. The first
+  page reports `100 events loaded` with a `Load more events` button
+  (`P21-footer.uia.json`, `P22-button.uia.json`); invoking it moves focus to
+  `No more events` and the footer to `131 events loaded`
+  (`P23-loadmore-invoke.log`, `P24`, `P25`); NVDA reads
+  `Event 1, create, version 1 … row 1 of 131 … selected`
+  (`P27-history-131.speech.txt`).
+- **Gates and artifact.** `flutter analyze` reports `No issues found!` and
+  `flutter test` ends `All tests passed!` with **241 passed / 0 failed**
+  (`final-analyze.log`, `final-test.log`). The release build
+  (`drive/CF-release-build.log`, 04:19) postdates the last source edit (04:14)
+  and the gates postdate the build: `tasks_viewer.exe` sha256 `B56B1608…`,
+  `data/app.so` sha256 `762E805F…` (6 112 144 bytes). The profiling hooks used
+  during the investigation are not in the shipped source.
+- **Body focus announces the whole body, report-only.** Putting focus on the
+  1 MiB body makes NVDA speak its full text as one utterance; the speech log
+  for that focus is 1 046 315 bytes (`drive/CF-b1-body-focus.speech.txt`).
+  Design.md section 10 forbids suppressing a text editor's native semantics to
+  reduce speech, and the body must stay focusable, selectable and copyable, so
+  this is recorded rather than changed.
+
+### Superseded and bounded findings
+
+- The whole-script run `drive/release-9-fresh.ps1` recorded verdict `partial`
+  with nine failing steps (`drive/O1-fresh-result.json`). All nine are one
+  harness wedge: the first details-scope chord after an idle period is
+  swallowed, and the batch's own retry hits the same state. Re-driven one chord
+  at a time after a mouse wake inside the details region, the identical steps
+  pass (`drive/N31`…`N47`, `drive/O34`…`O40`). The run is retained and is not
+  reported as an app defect.
+- `drive/C1-gaps-result.json` carries verdict `partial`. Its details-scope
+  steps were sent while focus was still in the tasks list, so they failed on
+  scope, and its `betaWork` row count of 5 is a grep artifact: the pattern also
+  matches the project search placeholder, while the list itself reported
+  `4 matching tasks` (`drive/F6-rows.uia.json`). The filter, Hide-filters and
+  T-003 detail observations in that file stand.
+- Intermittent drops of synthetic keyboard chords (logged by NVDA, never
+  reaching the viewer) are a harness finding: a real mouse click on a text
+  field restores delivery (`drive/B29-b1-summary.json`). Root cause was
+  not established.
+
 ## Current verification and deployment — 2026-09-21
 
 Direct nearest-ancestor `.tasks.json` routing, `init --write-identity`, and

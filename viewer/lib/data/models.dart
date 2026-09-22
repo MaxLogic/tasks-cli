@@ -1024,6 +1024,508 @@ class _StrictJsonParser {
   }
 }
 
+// --------------------------------------------------------------------- tasks
+
+/// Task scope values from viewer/spec.md section 4.3.
+enum TaskScope {
+  open('open', 'Open tasks'),
+  all('all', 'All tasks');
+
+  const TaskScope(this.wireValue, this.label);
+
+  final String wireValue;
+  final String label;
+
+  static TaskScope fromWire(String value) {
+    for (final candidate in values) {
+      if (candidate.wireValue == value) {
+        return candidate;
+      }
+    }
+    throw ViewerMalformedResponseFailure('unsupported task scope "$value"');
+  }
+}
+
+/// Readiness filter values from viewer/spec.md section 4.3.
+enum TaskReadiness {
+  any('any', 'Any'),
+  runnable('runnable', 'Runnable'),
+  waiting('waiting', 'Waiting for dependencies');
+
+  const TaskReadiness(this.wireValue, this.label);
+
+  final String wireValue;
+  final String label;
+
+  static TaskReadiness fromWire(String value) {
+    for (final candidate in values) {
+      if (candidate.wireValue == value) {
+        return candidate;
+      }
+    }
+    throw ViewerMalformedResponseFailure('unsupported readiness "$value"');
+  }
+}
+
+/// Task sort keys from viewer/spec.md section 4.3.
+enum TaskSort {
+  priority('priority', 'Priority'),
+  id('id', 'Task ID'),
+  status('status', 'Status'),
+  title('title', 'Title'),
+  created('created', 'Created'),
+  updated('updated', 'Last updated');
+
+  const TaskSort(this.wireValue, this.label);
+
+  final String wireValue;
+  final String label;
+
+  static TaskSort fromWire(String value) {
+    for (final candidate in values) {
+      if (candidate.wireValue == value) {
+        return candidate;
+      }
+    }
+    throw ViewerMalformedResponseFailure('unsupported task sort "$value"');
+  }
+}
+
+/// Canonical status values in display order (viewer/spec.md section 4.3).
+const List<String> viewerTaskStatuses = <String>[
+  'draft',
+  'todo',
+  'in-progress',
+  'blocked',
+  'done',
+  'cancelled',
+];
+
+/// Canonical priority values in display order.
+const List<String> viewerTaskPriorities = <String>['P0', 'P1', 'P2', 'P3'];
+
+/// Label that the "Needs human" checkbox synchronizes with.
+const String needsHumanLabel = 'needs-human';
+
+/// Human label for one canonical status value.
+String viewerStatusLabel(String wireValue) => switch (wireValue) {
+  'draft' => 'Draft',
+  'todo' => 'Todo',
+  'in-progress' => 'In progress',
+  'blocked' => 'Blocked',
+  'done' => 'Done',
+  'cancelled' => 'Cancelled',
+  _ => wireValue,
+};
+
+/// True for statuses that end the task without further work.
+bool viewerStatusIsTerminal(String wireValue) =>
+    wireValue == 'done' || wireValue == 'cancelled';
+
+/// Canonical display form of a task ID: T-007, T-12000.
+String viewerCanonicalTaskId(int id) => 'T-${id.toString().padLeft(3, '0')}';
+
+/// Throws unless [value] is one of the canonical statuses.
+String _requireStatus(Object? value, String path) {
+  final text = _requireStringValue(value, path);
+  if (viewerTaskStatuses.contains(text)) {
+    return text;
+  }
+  throw ViewerMalformedResponseFailure(
+    'unsupported task status "$text" at $path',
+  );
+}
+
+/// Throws unless [value] is one of the canonical priorities.
+String _requirePriority(Object? value, String path) {
+  final text = _requireStringValue(value, path);
+  if (viewerTaskPriorities.contains(text)) {
+    return text;
+  }
+  throw ViewerMalformedResponseFailure(
+    'unsupported task priority "$text" at $path',
+  );
+}
+
+/// One combined task request document (viewer/spec.md section 4.3).
+///
+/// The project UUID is not part of the document: every call passes it as an
+/// explicit `--project` argument, so a page can never be routed by the
+/// viewer's working directory.
+final class TaskQuery {
+  const TaskQuery({
+    this.query = '',
+    this.scope = TaskScope.open,
+    this.statuses = const <String>[],
+    this.priorities = const <String>[],
+    this.labels = const <String>[],
+    this.readiness = TaskReadiness.any,
+    this.sort = TaskSort.priority,
+    this.direction = SortDirection.ascending,
+    this.offset = 0,
+    this.limit = 100,
+    this.snapshot,
+  });
+
+  final String query;
+  final TaskScope scope;
+  final List<String> statuses;
+  final List<String> priorities;
+  final List<String> labels;
+  final TaskReadiness readiness;
+  final TaskSort sort;
+  final SortDirection direction;
+  final int offset;
+  final int limit;
+  final String? snapshot;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'query': query,
+    'scope': scope.wireValue,
+    'statuses': statuses,
+    'priorities': priorities,
+    'labels': labels,
+    'readiness': readiness.wireValue,
+    'sort': sort.wireValue,
+    'direction': direction.wireValue,
+    'offset': offset,
+    'limit': limit,
+    'snapshot': snapshot,
+  };
+}
+
+/// One task row from `viewer tasks`; bodies never appear here.
+final class TaskItem {
+  const TaskItem({
+    required this.id,
+    required this.title,
+    required this.status,
+    required this.priority,
+    required this.version,
+    required this.labels,
+    required this.dependencyCount,
+    required this.waitingDependencyCount,
+    required this.createdMs,
+    required this.updatedMs,
+  });
+
+  final int id;
+  final String title;
+  final String status;
+  final String priority;
+  final int version;
+  final List<String> labels;
+  final int dependencyCount;
+  final int waitingDependencyCount;
+  final int createdMs;
+  final int updatedMs;
+
+  String get canonicalId => viewerCanonicalTaskId(id);
+
+  factory TaskItem.fromJson(Map<String, Object?> json, {required String path}) {
+    return TaskItem(
+      id: _requireInt(json, 'id', path),
+      title: _requireString(json, 'title', path),
+      status: _requireStatus(
+        _requiredValue(json, 'status', path),
+        '$path.status',
+      ),
+      priority: _requirePriority(
+        _requiredValue(json, 'priority', path),
+        '$path.priority',
+      ),
+      version: _requireInt(json, 'version', path),
+      labels: _requireStringList(json, 'labels', path),
+      dependencyCount: _requireInt(json, 'dependency_count', path),
+      waitingDependencyCount: _requireInt(
+        json,
+        'waiting_dependency_count',
+        path,
+      ),
+      createdMs: _requireInt(json, 'created_ms', path),
+      updatedMs: _requireInt(json, 'updated_ms', path),
+    );
+  }
+}
+
+/// One page of the combined task query.
+final class TaskPage {
+  const TaskPage({
+    required this.protocolVersion,
+    required this.items,
+    required this.totalCount,
+    required this.offset,
+    required this.limit,
+    required this.hasMore,
+    required this.nextOffset,
+    required this.snapshot,
+  });
+
+  final int protocolVersion;
+  final List<TaskItem> items;
+  final int totalCount;
+  final int offset;
+  final int limit;
+  final bool hasMore;
+  final int? nextOffset;
+  final String? snapshot;
+
+  factory TaskPage.fromJson(
+    Map<String, Object?> json, {
+    String path = r'$.data',
+  }) {
+    final rawItems = _requireList(
+      _requiredValue(json, 'items', path),
+      '$path.items',
+    );
+    return TaskPage(
+      protocolVersion: _requireProtocolVersion(json, path),
+      items: List<TaskItem>.unmodifiable(<TaskItem>[
+        for (var index = 0; index < rawItems.length; index++)
+          TaskItem.fromJson(
+            _requireObject(rawItems[index], '$path.items[$index]'),
+            path: '$path.items[$index]',
+          ),
+      ]),
+      totalCount: _requireInt(json, 'total_count', path),
+      offset: _requireInt(json, 'offset', path),
+      limit: _requireInt(json, 'limit', path),
+      hasMore: _requireBool(json, 'has_more', path),
+      nextOffset: _requiredNullableInt(json, 'next_offset', path),
+      snapshot: _requiredNullableString(json, 'snapshot', path),
+    );
+  }
+}
+
+/// One dependency row inside a task detail.
+final class DependencySummary {
+  const DependencySummary({
+    required this.id,
+    required this.title,
+    required this.status,
+    required this.version,
+  });
+
+  final int id;
+  final String title;
+  final String status;
+  final int version;
+
+  String get canonicalId => viewerCanonicalTaskId(id);
+
+  /// True while this dependency still withholds readiness from the task.
+  ///
+  /// Dependency waiting is separate from an explicit blocked status, so a
+  /// terminal dependency is shown but stops preventing readiness.
+  bool get preventsReadiness => !viewerStatusIsTerminal(status);
+
+  factory DependencySummary.fromJson(
+    Map<String, Object?> json, {
+    required String path,
+  }) {
+    return DependencySummary(
+      id: _requireInt(json, 'id', path),
+      title: _requireString(json, 'title', path),
+      status: _requireStatus(
+        _requiredValue(json, 'status', path),
+        '$path.status',
+      ),
+      version: _requireInt(json, 'version', path),
+    );
+  }
+}
+
+/// The complete `viewer show` payload: every editable and read-only field.
+final class TaskDetail {
+  const TaskDetail({
+    required this.id,
+    required this.title,
+    required this.body,
+    required this.status,
+    required this.priority,
+    required this.version,
+    required this.labels,
+    required this.deps,
+    required this.dependencySummaries,
+    required this.ruleVersion,
+    required this.rules,
+    required this.createdMs,
+    required this.updatedMs,
+  });
+
+  final int id;
+  final String title;
+  final String body;
+  final String status;
+  final String priority;
+  final int version;
+  final List<String> labels;
+  final List<int> deps;
+  final List<DependencySummary> dependencySummaries;
+  final int ruleVersion;
+  final String rules;
+  final int createdMs;
+  final int updatedMs;
+
+  String get canonicalId => viewerCanonicalTaskId(id);
+
+  factory TaskDetail.fromJson(
+    Map<String, Object?> json, {
+    String path = r'$.data',
+  }) {
+    final rawDeps = _requireList(
+      _requiredValue(json, 'deps', path),
+      '$path.deps',
+    );
+    final rawSummaries = _requireList(
+      _requiredValue(json, 'dependency_summaries', path),
+      '$path.dependency_summaries',
+    );
+    return TaskDetail(
+      id: _requireInt(json, 'id', path),
+      title: _requireString(json, 'title', path),
+      body: _requireString(json, 'body', path),
+      status: _requireStatus(
+        _requiredValue(json, 'status', path),
+        '$path.status',
+      ),
+      priority: _requirePriority(
+        _requiredValue(json, 'priority', path),
+        '$path.priority',
+      ),
+      version: _requireInt(json, 'version', path),
+      labels: _requireStringList(json, 'labels', path),
+      deps: List<int>.unmodifiable(<int>[
+        for (var index = 0; index < rawDeps.length; index++)
+          _requireIntValue(rawDeps[index], '$path.deps[$index]'),
+      ]),
+      dependencySummaries:
+          List<DependencySummary>.unmodifiable(<DependencySummary>[
+            for (var index = 0; index < rawSummaries.length; index++)
+              DependencySummary.fromJson(
+                _requireObject(
+                  rawSummaries[index],
+                  '$path.dependency_summaries[$index]',
+                ),
+                path: '$path.dependency_summaries[$index]',
+              ),
+          ]),
+      ruleVersion: _requireInt(json, 'rule_version', path),
+      rules: _requireString(json, 'rules', path),
+      createdMs: _requireInt(json, 'created_ms', path),
+      updatedMs: _requireInt(json, 'updated_ms', path),
+    );
+  }
+}
+
+/// One append-only history event from the existing `history` command.
+final class HistoryEvent {
+  const HistoryEvent({
+    required this.eventId,
+    required this.taskId,
+    required this.entityType,
+    required this.operation,
+    required this.resultingVersion,
+    required this.createdMs,
+    required this.snapshotJson,
+  });
+
+  final int eventId;
+  final int? taskId;
+  final String entityType;
+  final String operation;
+  final int resultingVersion;
+  final int createdMs;
+
+  /// Complete stored snapshot text, or null for events without one.
+  final String? snapshotJson;
+
+  factory HistoryEvent.fromJson(
+    Map<String, Object?> json, {
+    required String path,
+  }) {
+    return HistoryEvent(
+      eventId: _requireInt(json, 'event_id', path),
+      taskId: _requiredNullableInt(json, 'task_id', path),
+      entityType: _requireString(json, 'entity_type', path),
+      operation: _requireString(json, 'operation', path),
+      resultingVersion: _requireInt(json, 'resulting_version', path),
+      createdMs: _requireInt(json, 'created_ms', path),
+      snapshotJson: _requiredNullableString(json, 'snapshot_json', path),
+    );
+  }
+}
+
+/// One page of history events for a task, 100 per read.
+final class TaskHistoryPage {
+  const TaskHistoryPage({
+    required this.items,
+    required this.hasMore,
+    required this.nextAfter,
+  });
+
+  final List<HistoryEvent> items;
+  final bool hasMore;
+  final int? nextAfter;
+
+  factory TaskHistoryPage.fromJson(
+    Map<String, Object?> json, {
+    String path = r'$.data',
+  }) {
+    final rawItems = _requireList(
+      _requiredValue(json, 'items', path),
+      '$path.items',
+    );
+    return TaskHistoryPage(
+      items: List<HistoryEvent>.unmodifiable(<HistoryEvent>[
+        for (var index = 0; index < rawItems.length; index++)
+          HistoryEvent.fromJson(
+            _requireObject(rawItems[index], '$path.items[$index]'),
+            path: '$path.items[$index]',
+          ),
+      ]),
+      hasMore: _requireBool(json, 'has_more', path),
+      nextAfter: _requiredNullableInt(json, 'next_after', path),
+    );
+  }
+}
+
+int _requireIntValue(Object? value, String path) {
+  if (value is int) {
+    return value;
+  }
+  throw ViewerMalformedResponseFailure('field "$path" must be an integer');
+}
+
+/// The read surface a task list needs.
+abstract interface class TaskReader {
+  Future<TaskPage> fetchTasks(String projectId, TaskQuery query);
+}
+
+/// A task reader whose in-flight read for one scope can be abandoned.
+abstract interface class CancellableTaskReader implements TaskReader {
+  void cancelScope(String scopeKey);
+}
+
+/// The read surface the details pane needs: full detail and paged history.
+abstract interface class TaskDetailReader {
+  Future<TaskDetail> fetchTaskDetail(String projectId, int taskId);
+
+  Future<TaskHistoryPage> fetchTaskHistory(
+    String projectId,
+    int taskId, {
+    int? after,
+    int limit,
+    int? event,
+  });
+}
+
+/// A detail reader whose in-flight read for one scope can be abandoned.
+abstract interface class CancellableTaskDetailReader
+    implements TaskDetailReader {
+  void cancelScope(String scopeKey);
+}
+
 // --------------------------------------------------------------- readers
 
 Object? _requiredValue(Map<String, Object?> json, String key, String path) {

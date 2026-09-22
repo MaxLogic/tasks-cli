@@ -108,7 +108,11 @@ final class ViewerCliResolution {
 }
 
 /// Reads task data by running the CLI once per request.
-class ViewerCliClient implements CancellableProjectReader {
+class ViewerCliClient
+    implements
+        CancellableProjectReader,
+        CancellableTaskReader,
+        CancellableTaskDetailReader {
   ViewerCliClient({
     required this.environment,
     ViewerSettingsDraftSource? savedSettings,
@@ -213,16 +217,7 @@ class ViewerCliClient implements CancellableProjectReader {
     if (!_probePassed) {
       throw const ViewerProbeRequiredFailure();
     }
-    final dataRoot = environment.dataRoot;
-    if (dataRoot == null || dataRoot.isEmpty) {
-      throw const ViewerCliErrorFailure(
-        code: 'no_store',
-        message:
-            'No task data root is configured. Choose one in Settings before '
-            'loading projects.',
-        exitCode: 2,
-      );
-    }
+    final dataRoot = _requireDataRoot('loading projects');
     final envelope = await _runViewerCommand(
       scopeKey: 'projects',
       arguments: <String>[
@@ -239,6 +234,130 @@ class ViewerCliClient implements CancellableProjectReader {
       expectedCommands: const <String>{'viewer_projects'},
     );
     return ProjectPage.fromJson(envelope.data);
+  }
+
+  /// Loads one page of the combined task query for [projectId].
+  @override
+  Future<TaskPage> fetchTasks(String projectId, TaskQuery query) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'tasks',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('loading tasks'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'viewer',
+        'tasks',
+        '--request-file',
+        '-',
+      ],
+      request: query.toJson(),
+      expectedCommands: const <String>{'viewer_tasks'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    return TaskPage.fromJson(envelope.data);
+  }
+
+  /// Loads the complete record for one task.
+  @override
+  Future<TaskDetail> fetchTaskDetail(String projectId, int taskId) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'detail',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('loading a task'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'viewer',
+        'show',
+        viewerCanonicalTaskId(taskId),
+      ],
+      request: null,
+      expectedCommands: const <String>{'viewer_show'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    return TaskDetail.fromJson(envelope.data);
+  }
+
+  /// Loads one page of a task's append-only history.
+  ///
+  /// History reuses the existing `history` command: the viewer protocol has no
+  /// history operation, and the legacy command already returns complete
+  /// snapshot text for one event.
+  @override
+  Future<TaskHistoryPage> fetchTaskHistory(
+    String projectId,
+    int taskId, {
+    int? after,
+    int limit = 100,
+    int? event,
+  }) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'history',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('loading task history'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'history',
+        viewerCanonicalTaskId(taskId),
+        '--limit',
+        '$limit',
+        if (after != null) ...<String>['--after', '$after'],
+        if (event != null) ...<String>['--event', '$event'],
+      ],
+      request: null,
+      expectedCommands: const <String>{'history'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    return TaskHistoryPage.fromJson(envelope.data);
+  }
+
+  String _requireDataRoot(String action) {
+    final dataRoot = environment.dataRoot;
+    if (dataRoot == null || dataRoot.isEmpty) {
+      throw ViewerCliErrorFailure(
+        code: 'no_store',
+        message:
+            'No task data root is configured. Choose one in Settings before '
+            '$action.',
+        exitCode: 2,
+      );
+    }
+    return dataRoot;
+  }
+
+  /// Rejects a response that belongs to another project UUID.
+  ///
+  /// Every project-scoped read passes its UUID explicitly, so an answer for a
+  /// different project is a routing bug, not usable data.
+  void _requireProjectEcho(ViewerEnvelope envelope, String projectId) {
+    final echo = envelope.projectId;
+    if (echo == null) {
+      throw const ViewerMalformedResponseFailure(
+        'a project-scoped response did not echo its project_id',
+      );
+    }
+    if (echo.toLowerCase() != projectId.toLowerCase()) {
+      throw ViewerMalformedResponseFailure(
+        'the tasks CLI answered for project $echo instead of $projectId',
+      );
+    }
   }
 
   /// Runs an arbitrary `viewer` subcommand; slice 4 and 5 build on it.

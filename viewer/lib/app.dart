@@ -13,6 +13,8 @@ import 'data/settings_draft.dart';
 import 'platform/window_state.dart';
 import 'ui/app_shell.dart';
 import 'ui/prototype_workspace.dart';
+import 'ui/real_workspace.dart';
+import 'ui/workspace_model.dart';
 
 /// Root widget of one viewer process.
 class TasksViewerApp extends StatefulWidget {
@@ -21,7 +23,8 @@ class TasksViewerApp extends StatefulWidget {
     required this.environment,
     this.initialSettings = const ViewerSettingsDraft(),
     this.announcements,
-    this.workspaceBuilder = buildPrototypeWorkspace,
+    this.readers,
+    this.workspaceBuilder,
   });
 
   /// Resolved paths and modes for this launch.
@@ -35,8 +38,13 @@ class TasksViewerApp extends StatefulWidget {
   /// region until the packaged Bella player lands in slice 7.
   final AnnouncementController? announcements;
 
-  /// Builds the three panes the shell arranges.
-  final WorkspaceBuilder workspaceBuilder;
+  /// Real data readers. Null keeps the slice-1 prototype panes, which never
+  /// touch a task store.
+  final ViewerDataReader? readers;
+
+  /// Overrides the three panes the shell arranges; by default the root picks
+  /// the prototype panes, or the real workspace when [readers] is set.
+  final WorkspaceBuilder? workspaceBuilder;
 
   @override
   State<TasksViewerApp> createState() => _TasksViewerAppState();
@@ -76,17 +84,34 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
               _settings.textScalePercent,
             ),
           ),
-          child: ViewerShell(
-            environment: widget.environment,
-            announcements: _announcements,
-            initialSettings: _settings,
-            workspaceBuilder: widget.workspaceBuilder,
-            actions: ViewerShellActions(
-              onSettingsChanged: (draft) => setState(() => _settings = draft),
-            ),
-          ),
+          child: _buildShell(),
         ),
       ),
+    );
+  }
+
+  Widget _buildShell() {
+    final readers = widget.readers;
+    final builder =
+        widget.workspaceBuilder ??
+        (readers == null ? buildPrototypeWorkspace : buildViewerWorkspace);
+    if (readers == null) {
+      return ViewerShell(
+        environment: widget.environment,
+        announcements: _announcements,
+        initialSettings: _settings,
+        workspaceBuilder: builder,
+        actions: ViewerShellActions(
+          onSettingsChanged: (draft) => setState(() => _settings = draft),
+        ),
+      );
+    }
+    return ViewerWorkspaceHost(
+      environment: widget.environment,
+      readers: readers,
+      announcements: _announcements,
+      initialSettings: _settings,
+      onSettingsChanged: (draft) => setState(() => _settings = draft),
     );
   }
 
