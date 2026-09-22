@@ -298,6 +298,24 @@ real NVDA instance, speech logs recorded by line offset and CLI ground truth:
   `partial` verdict file whose retry hit the same state) are recorded there as harness behaviour, not
   as app defects.
 
+### Smallest external action to close each unavailable gate
+
+Everything this repository can prove headlessly is already proven; each remaining acceptance row
+needs one step from outside the agent's authority. The standing "headless only, do not steal the
+mouse and keyboard" directive forbids the agent from taking any of them, so they are listed as
+options rather than queued work.
+
+| Gate | Smallest external action | What it closes |
+| --- | --- | --- |
+| V08 | Authorize one bounded live windowed session of the packaged candidate (window flows plus UI Automation), with synthetic-only clipboard text placed by the tester | packaged launch, cross virtual boundary, second-writer conflict, clipboard preview/enrichment, restart-with-draft and unavailable-store recovery |
+| V09 rows M09-M11 | Authorize the bounded windowed profiling run, with NVDA running for M11 | 60-second scroll frame time, release peak working set, frame/memory with NVDA on and off |
+| V10 | Run NVDA with the Speech Viewer open in a bounded live session, or perform the remaining walkthroughs by hand: A (its `NVDA+N`, `T`, `S` unblock note is in `target/evidence/viewer/2026-09-21-nvda-walkthrough-a/README.md`), C step 4a against the caret fix, E and F | every design.md walkthrough with speech evidence and real text editing |
+| V12 | Create or authorize a disposable local Windows account and one bounded monitor/DPI change | real sign-in launch, default-on registration across sign-out/in, changed/missing monitor and live-DPI checks |
+| V13 | One human listening pass over the 20 bundled clips, with the packaged offline playback | audible Bella playback, volume and Test-voice modes, rapid-event cancellation and playback-failure fallback |
+
+V01-V07, V11 and the catalog rows of V09 pass headlessly, and the portable bundle re-verifies against
+the current candidate, so these rows are the complete distance between it and release acceptance.
+
 ## 8. Limitations
 
 - The verification is single-machine: Windows 11 Home x64 plus Ubuntu 22.04 in WSL2, no other Linux
