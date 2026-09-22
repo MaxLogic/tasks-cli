@@ -5,12 +5,15 @@
 /// client in later slices and synthetic panes in slice 1.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'app_environment.dart';
 import 'controllers/announcement_controller.dart';
 import 'data/settings_draft.dart';
 import 'data/settings_store.dart';
+import 'platform/viewer_startup.dart';
 import 'platform/window_state.dart';
 import 'ui/app_shell.dart';
 import 'ui/prototype_workspace.dart';
@@ -25,9 +28,12 @@ class TasksViewerApp extends StatefulWidget {
     this.initialSettings = const ViewerSettingsDraft(),
     this.announcements,
     this.readers,
+    this.readersFor,
     this.workspaceBuilder,
     this.drafts,
     this.closeGuard,
+    this.startup,
+    this.onSettingsPersist,
   });
 
   /// Resolved paths and modes for this launch.
@@ -45,6 +51,11 @@ class TasksViewerApp extends StatefulWidget {
   /// touch a task store.
   final ViewerDataReader? readers;
 
+  /// Builds the reader bundle for one environment. Settings uses it when the
+  /// data root changes, so cached rows and selection start over instead of
+  /// describing another store.
+  final ViewerDataReader Function(ViewerEnvironment environment)? readersFor;
+
   /// Overrides the three panes the shell arranges; by default the root picks
   /// the prototype panes, or the real workspace when [readers] is set.
   final WorkspaceBuilder? workspaceBuilder;
@@ -57,6 +68,13 @@ class TasksViewerApp extends StatefulWidget {
   /// Platform close hook, wired by `main.dart` to the window listener.
   final ViewerCloseGuard? closeGuard;
 
+  /// Startup-registration surface; null when this build must not touch the
+  /// real Startup folder (debug, test and `--test-mode` launches).
+  final ViewerStartupController? startup;
+
+  /// Persists a saved draft; a failure is reported in the status region.
+  final Future<void> Function(ViewerSettingsDraft draft)? onSettingsPersist;
+
   @override
   State<TasksViewerApp> createState() => _TasksViewerAppState();
 }
@@ -65,7 +83,10 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
   late final AnnouncementController _announcements =
       widget.announcements ??
       AnnouncementController(clipPlayer: SilentClipPlayer());
+  late ViewerEnvironment _environment = widget.environment;
   late ViewerSettingsDraft _settings = widget.initialSettings;
+  late ViewerDataReader? _readers =
+      widget.readers ?? widget.readersFor?.call(widget.environment);
 
   @override
   void dispose() {
@@ -101,28 +122,75 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
     );
   }
 
+  /// Applies one saved draft: live preferences, a store change, then disk.
+  void _applySettings(ViewerSettingsDraft draft) {
+    final storeChanged = draft.dataRoot != _environment.dataRoot;
+    setState(() {
+      _settings = draft;
+      if (storeChanged) {
+        // The session keeps the launch arguments; only the saved data root
+        // moves, and every cached row belongs to the previous store.
+        _environment = _environment.withDataRoot(draft.dataRoot);
+        final build = widget.readersFor;
+        if (build != null) {
+          _readers = build(_environment);
+        }
+      }
+    });
+    unawaited(_persistSettings(draft));
+    unawaited(_applyStartupPreference(draft));
+  }
+
+  Future<void> _persistSettings(ViewerSettingsDraft draft) async {
+    final persist = widget.onSettingsPersist;
+    if (persist == null) {
+      return;
+    }
+    try {
+      await persist(draft);
+    } on Object catch (error) {
+      _announcements.announceStatus(
+        'Settings could not be saved: $error. They stay in effect for this '
+        'session only.',
+        dynamic: true,
+      );
+    }
+  }
+
+  /// Startup registration is applied only when Settings is saved (spec 3.1).
+  Future<void> _applyStartupPreference(ViewerSettingsDraft draft) async {
+    final startup = widget.startup;
+    if (startup == null) {
+      return;
+    }
+    await startup.applyDesired(draft.startWithWindows);
+  }
+
   Widget _buildShell() {
-    final readers = widget.readers;
+    final readers = _readers;
     final builder =
         widget.workspaceBuilder ??
         (readers == null ? buildPrototypeWorkspace : buildViewerWorkspace);
     if (readers == null) {
       return ViewerShell(
-        environment: widget.environment,
+        environment: _environment,
         announcements: _announcements,
         initialSettings: _settings,
         workspaceBuilder: builder,
-        actions: ViewerShellActions(
-          onSettingsChanged: (draft) => setState(() => _settings = draft),
-        ),
+        startup: widget.startup,
+        actions: ViewerShellActions(onSettingsChanged: _applySettings),
       );
     }
     return ViewerWorkspaceHost(
-      environment: widget.environment,
+      // A new data root rebuilds the workspace, so selection and cached rows
+      // never describe the previous store.
+      key: ValueKey<String>(_environment.dataRoot ?? ''),
+      environment: _environment,
       readers: readers,
       announcements: _announcements,
       initialSettings: _settings,
-      onSettingsChanged: (draft) => setState(() => _settings = draft),
+      onSettingsChanged: _applySettings,
+      startup: widget.startup,
       drafts: widget.drafts,
       closeGuard: widget.closeGuard,
     );

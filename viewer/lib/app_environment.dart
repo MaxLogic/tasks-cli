@@ -7,6 +7,7 @@ library;
 
 import 'dart:io';
 
+import 'data/settings_draft.dart';
 import 'launch_args.dart';
 
 /// Resolved paths and modes for the running viewer process.
@@ -55,4 +56,24 @@ class ViewerEnvironment {
       tasksExe: args.tasksExe,
     );
   }
+
+  /// Same launch with saved settings filling paths no argument named.
+  ///
+  /// Launch arguments win over saved settings (spec.md section 3), so the
+  /// saved values are only a fallback for a plain double-clicked launch.
+  ViewerEnvironment withSavedSettings(ViewerSettingsDraft draft) =>
+      ViewerEnvironment(
+        launchArgs: launchArgs,
+        settingsRoot: settingsRoot,
+        dataRoot: dataRoot ?? draft.dataRoot,
+        tasksExe: tasksExe ?? draft.cliPath,
+      );
+
+  /// Same launch pointed at [newDataRoot], used when Settings changes store.
+  ViewerEnvironment withDataRoot(String? newDataRoot) => ViewerEnvironment(
+    launchArgs: launchArgs,
+    settingsRoot: settingsRoot,
+    dataRoot: newDataRoot,
+    tasksExe: tasksExe,
+  );
 }

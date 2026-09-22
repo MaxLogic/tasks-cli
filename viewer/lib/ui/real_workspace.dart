@@ -16,6 +16,7 @@ import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
 import '../data/settings_store.dart';
 import '../platform/clipboard_text.dart';
+import '../platform/viewer_startup.dart';
 import 'app_shell.dart';
 import 'details_pane.dart';
 import 'projects_pane.dart';
@@ -192,6 +193,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
     this.viewerClipboard,
     this.drafts,
     this.closeGuard,
+    this.startup,
   });
 
   final ViewerEnvironment environment;
@@ -205,6 +207,10 @@ class ViewerWorkspaceHost extends StatelessWidget {
 
   final RecoveryDraftSink? drafts;
   final ViewerCloseGuard? closeGuard;
+
+  /// Startup-registration surface shown by Settings; null when this build must
+  /// not touch the real Startup folder.
+  final ViewerStartupController? startup;
 
   @override
   Widget build(BuildContext context) {
@@ -223,6 +229,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
             announcements: announcements,
             initialSettings: initialSettings,
             workspaceBuilder: buildViewerWorkspace,
+            startup: startup,
             actions: ViewerShellActions(
               onRefresh: () => unawaited(model.refresh()),
               onBack: () {

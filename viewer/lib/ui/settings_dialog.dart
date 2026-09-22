@@ -6,6 +6,7 @@
 /// desired state and says so instead of pretending a shortcut exists.
 library;
 
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -13,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
+import '../platform/viewer_startup.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 
@@ -23,11 +25,16 @@ class SettingsDialog extends StatefulWidget {
     required this.environment,
     required this.announcements,
     required this.initial,
+    this.startup,
   });
 
   final ViewerEnvironment environment;
   final AnnouncementController announcements;
   final ViewerSettingsDraft initial;
+
+  /// Startup registration surface; null when this build must not touch the
+  /// real Startup folder.
+  final ViewerStartupController? startup;
 
   @override
   State<SettingsDialog> createState() => _SettingsDialogState();
@@ -92,6 +99,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _modeNode.dispose();
     _volumeNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final startup = widget.startup;
+    if (startup != null) {
+      unawaited(startup.refresh());
+    }
   }
 
   void _close(ViewerSettingsDraft? result) => Navigator.of(context).pop(result);
@@ -160,6 +176,53 @@ class _SettingsDialogState extends State<SettingsDialog> {
     );
   }
 
+  /// Reports the effective registration separately from the preference.
+  ///
+  /// A conflict, a policy-disabled entry or a failed write keeps the Retry
+  /// action visible until the state is repaired (spec.md section 3.1).
+  Widget _buildStartupStatus(BuildContext context) {
+    final startup = widget.startup;
+    final small = Theme.of(context).textTheme.bodySmall;
+    if (startup == null) {
+      return Text(
+        'Startup registration is applied by the packaged release. Debug and '
+        'test launches never create or remove a shortcut.',
+        style: small,
+      );
+    }
+    return ListenableBuilder(
+      listenable: startup,
+      builder: (context, _) {
+        final failure = startup.failure;
+        final needsAction =
+            failure != null || startup.report?.needsUserAction == true;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(startup.summary, style: small),
+            if (failure != null) ...<Widget>[
+              const SizedBox(height: 4),
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  failure,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            ],
+            if (needsAction)
+              TextButton(
+                onPressed: startup.busy
+                    ? null
+                    : () => unawaited(startup.applyDesired(_startWithWindows)),
+                child: const Text('Retry registration (Alt+G)'),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
   KeyEventResult _onCommand(String id) {
     switch (id) {
       case 'settings.cliPath':
@@ -189,6 +252,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
         _close(null);
       case 'settings.testVoice':
         _testVoice();
+      case 'settings.retryStartup':
+        unawaited(widget.startup?.applyDesired(_startWithWindows));
       case 'settings.resetLayout':
         setState(() {
           _projectsWidth.text = '22';
@@ -368,10 +433,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               setState(() => _startWithWindows = value),
                           title: const Text('Start with Windows (Alt+W)'),
                           subtitle: const Text(
-                            'Registration is applied by the packaged release for '
-                            'this user. Test launches with --test-mode never '
-                            'create or remove a startup shortcut.',
+                            'Applied when Settings is saved. The viewer owns '
+                            'one shortcut and never overwrites another '
+                            'program.',
                           ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.only(left: 16, top: 4),
+                          child: _buildStartupStatus(context),
                         ),
                         const SizedBox(height: 8),
                         DropdownButtonFormField<AnnouncementMode>(
@@ -439,8 +508,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                         const SizedBox(height: 8),
                         Text(
                           'Settings are stored under '
-                          '${widget.environment.settingsRoot}. This build keeps '
-                          'changes for the session only.',
+                          '${widget.environment.settingsRoot} and are applied '
+                          'when you save them.',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                         if (_error != null) ...<Widget>[
