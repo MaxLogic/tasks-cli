@@ -1,13 +1,16 @@
-# Deployment record: 2026-09-21
+# Deployment record: migration 2026-09-21, binaries updated 2026-09-22
 
 ## Executables
 
 - Windows: `F:\CliTools\tasks.exe`
-  - SHA-256: `f7acde2349697d97c560208da729a2ce93909167f8545c9659077a670d7a89d9`
+  - SHA-256: `92793db00a29e723f26d221a6a7e6e29a282c10542b71395b027f81c94a3b3d2`
 - Ubuntu/WSL: `/home/pawel/.local/bin/tasks`
-  - SHA-256: `4e71b0b7d71517e8365b2351fae151249eb4d9789de105ceab7408d34b385125`
-- Both report `tasks 0.1.0 (commit 6e55a3a92a8f)` and were rebuilt from
-  implementation commit `6e55a3a`.
+  - SHA-256: `607d1841e23ba93c2713466606dfcf1973b77a468d4e80e36f195976dcd2848c`
+- Both report `tasks 0.1.0 (commit 8b1dabd9b44c)` and were rebuilt from
+  implementation commit `8b1dabd`.
+- `tasks init --root <project>` creates a missing `.tasks.json`, accepts a
+  matching identity without rewriting it, and refuses malformed or conflicting
+  identities.
 
 `/home/pawel/.profile` exports
 `TASKS_WINDOWS_EXE=/mnt/f/CliTools/tasks.exe`. This makes ordinary WSL commands
