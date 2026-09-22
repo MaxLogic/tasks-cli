@@ -243,7 +243,6 @@ fn init_can_write_an_identity_and_route_with_it() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
-            "--write-identity",
         ])
         .output()
         .expect("tasks executable");
@@ -263,6 +262,12 @@ fn init_can_write_an_identity_and_route_with_it() {
         project.to_string()
     );
 
+    let existing_identity = format!("{{\r\n  \"project_id\": \"{project}\"\r\n}}\r\n");
+    fs::write(
+        workspace.path().join(".tasks.json"),
+        existing_identity.as_bytes(),
+    )
+    .expect("replace identity formatting");
     let second_data = tempfile::tempdir().expect("second data root");
     let rerun = Command::new(env!("CARGO_BIN_EXE_tasks"))
         .args([
@@ -273,7 +278,6 @@ fn init_can_write_an_identity_and_route_with_it() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
-            "--write-identity",
         ])
         .output()
         .expect("tasks executable");
@@ -284,10 +288,14 @@ fn init_can_write_an_identity_and_route_with_it() {
     );
     let reused: Value = serde_json::from_slice(&rerun.stdout).expect("JSON output");
     assert_eq!(reused["project_id"], project.to_string());
+    assert_eq!(
+        fs::read(workspace.path().join(".tasks.json")).expect("preserved identity"),
+        existing_identity.as_bytes()
+    );
 }
 
 #[test]
-fn init_write_identity_refuses_a_conflicting_file_before_initializing() {
+fn init_refuses_a_conflicting_identity_before_initializing() {
     let data = tempfile::tempdir().expect("data root");
     let workspace = tempfile::tempdir().expect("workspace");
     let existing = Uuid::new_v4();
@@ -303,7 +311,6 @@ fn init_write_identity_refuses_a_conflicting_file_before_initializing() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
-            "--write-identity",
         ])
         .output()
         .expect("tasks executable");

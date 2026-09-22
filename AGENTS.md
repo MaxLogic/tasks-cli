@@ -22,7 +22,7 @@ with the real two binaries, not just argument mocks.
   `D:/Pawel/Prompts/skills/_rust/`. Do not edit or delete through those links.
 - This task authorizes scaffolding and synthetic-data verification. It does not
   authorize switching PFM, DelphiAiKit or other live projects to the new store.
-  Migration trials use copies. Never modify their TASKS.md files during tests.
+  Migration trials use copies. Never modify live Markdown task ledgers during tests.
 
 ## Architecture and performance
 

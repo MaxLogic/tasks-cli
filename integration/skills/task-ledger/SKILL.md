@@ -1,6 +1,6 @@
 ---
 name: task-ledger
-description: "Access a project's shared SQLite task backlog with tasks CLI. Use for project identity, selected task queries, versioned mutations, dependency readiness, and task history. Pair with create-task for formulation or resolve-task for execution. Do not bootstrap, migrate, or edit a Markdown ledger implicitly."
+description: "Access a project's shared SQLite task backlog with the MaxLogic tasks-cli executable. Use for project identity, selected task queries, versioned mutations, dependency readiness, and task history. Pair with create-task for formulation or resolve-task for execution. Do not bootstrap, migrate, or edit a Markdown ledger implicitly."
 metadata:
   author: Pawel Piotrowski
   version: "1.0.0"
@@ -10,8 +10,9 @@ metadata:
 
 SQLite is the durable authority for task IDs, bodies, status, priority, labels,
 dependencies, rules, and history. Markdown exports are snapshots, never an
-editable second ledger. This skill requires `tasks` and the sibling skills when
-formulation or execution is needed.
+editable second ledger. In this skill, `tasks` means the MaxLogic tasks-cli
+executable, not a generic task facility. The sibling skills handle formulation
+and execution.
 
 ## Identity before access
 

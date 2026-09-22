@@ -108,9 +108,32 @@ logs and UIA dumps, `nvda/` for speech logs).
   field restores delivery (`drive/B29-b1-summary.json`). Root cause was
   not established.
 
-## Current verification and deployment — 2026-09-21
+## Init defaults and agent-guidance cutover — 2026-09-22
 
-Direct nearest-ancestor `.tasks.json` routing, `init --write-identity`, and
+`tasks init --root <project>` now creates `.tasks.json` when absent, accepts an
+existing matching identity byte-for-byte without rewriting it, and refuses
+malformed or conflicting identities before initialization. The redundant
+`--write-identity` option was removed.
+
+- Windows passed formatting, Clippy with all targets/features and warnings
+  denied, the complete Rust suite (**214 passed**), three feature-enabled bulk
+  rollback tests, six identity integration tests and the release build.
+- Native Ubuntu/WSL passed the corresponding gates in a separate Linux target
+  directory: **218 passed**, plus the three rollback tests, six identity
+  integration tests and the release build.
+- The first Linux integration invocation used a fresh target directory before
+  building its release executable. That ordering failure is retained in
+  `target/evidence/init-default-20260922/linux-first-ordering-failure.log`; the
+  exact release rerun passed. Final Windows and Linux logs are in
+  `target/evidence/init-default-20260922/`.
+- Operative project guidance now invokes the installed `task-ledger`,
+  `create-task`, and `resolve-task` skills explicitly. It no longer describes
+  the CLI using the ambiguous bare word `tasks` or advertises legacy Markdown
+  ledgers as project structure.
+
+## Migration and initial deployment — 2026-09-21
+
+Direct nearest-ancestor `.tasks.json` routing, identity creation by `init`, and
 build-identified `tasks --version` output are implemented. Routing precedence
 is explicit `--project`, `TASKS_PROJECT`, the nearest identity file, then the
 longest registry binding. Invalid nearer identities fail closed. The task-ledger,
