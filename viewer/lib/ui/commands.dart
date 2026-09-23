@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import '../data/models.dart';
 
 /// Where a binding is active. Only the focused scope resolves its access keys.
 enum CommandScope {
@@ -508,6 +509,32 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       shortcutText: 'Enter, Space',
     ),
     // -------------------------------------------------------------- projects
+    for (final state in ProjectStateFilter.values)
+      CommandSpec(
+        id: 'projects.state.${state.wireValue}',
+        scope: CommandScope.projects,
+        group: HelpGroup.projects,
+        label: state.label,
+        description: state == ProjectStateFilter.unavailable
+            ? 'Show projects whose task database is missing or cannot be read.'
+            : 'Show ${state.label.toLowerCase()}.',
+        activators: <ShortcutActivator>[
+          _alt(
+            <LogicalKeyboardKey>[
+              LogicalKeyboardKey.digit1,
+              LogicalKeyboardKey.digit2,
+              LogicalKeyboardKey.digit3,
+              LogicalKeyboardKey.digit4,
+              LogicalKeyboardKey.digit5,
+              LogicalKeyboardKey.digit6,
+              LogicalKeyboardKey.digit7,
+              LogicalKeyboardKey.digit8,
+              LogicalKeyboardKey.digit9,
+            ][state.index],
+          ),
+        ],
+      ),
+
     CommandSpec(
       id: 'projects.clearSearch',
       scope: CommandScope.projects,
@@ -537,7 +564,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       scope: CommandScope.projects,
       group: HelpGroup.projects,
       label: 'Direction',
-      description: 'Focus the ascending/descending control.',
+      description: 'Reverse the sort direction.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyI)],
     ),
     CommandSpec(
@@ -707,7 +734,7 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       scope: CommandScope.tasks,
       group: HelpGroup.tasks,
       label: 'Direction',
-      description: 'Focus the ascending/descending control.',
+      description: 'Reverse the sort direction.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyI)],
     ),
     CommandSpec(

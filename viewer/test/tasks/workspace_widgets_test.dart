@@ -42,6 +42,60 @@ Future<RealViewerHarness> pumpTaskBrowser(
 }
 
 void main() {
+  testWidgets('project row menu exposes compact actions and copies its path', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map<Object?, Object?>)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await pumpRealViewer(tester);
+    expect(find.bySemanticsLabel('Actions for Project 1'), findsOneWidget);
+    await tester.tap(find.byTooltip('Actions for Project 1'));
+    await tester.pumpAndSettle();
+    expect(find.text('Open in Explorer'), findsOneWidget);
+    expect(find.text('Open in Alacritty'), findsOneWidget);
+    expect(find.text('Open in Terminal'), findsOneWidget);
+    expect(find.text('Copy path'), findsOneWidget);
+    expect(find.text('Archive'), findsOneWidget);
+    expect(find.text('Copy project ID'), findsOneWidget);
+    expect(find.text('Enrich clipboard'), findsWidgets);
+
+    await tester.tap(find.text('Copy path'));
+    await tester.pumpAndSettle();
+    expect(copied, testProjectItem(1).roots.first);
+    semantics.dispose();
+  });
+
+  testWidgets('clicking a project row loads its tasks', (tester) async {
+    final harness = await pumpRealViewer(
+      tester,
+      reads: fakeWorkspaceReads(
+        tasks: {
+          firstProjectId: [testTaskItem(7, title: 'Clicked project task')],
+        },
+      ),
+      surface: const Size(1600, 900),
+    );
+    await tester.tap(find.text('Project 1').first);
+    await tester.pumpAndSettle();
+    expect(harness.model.tasks?.projectId, firstProjectId);
+    expect(find.text('Clicked project task'), findsOneWidget);
+  });
+
   group('task rows', () {
     testWidgets('a row speaks its identifying fields and its position', (
       WidgetTester tester,

@@ -413,6 +413,8 @@ class FakeWorkspaceReads
     final stats = item.stats;
     return switch (query.state) {
       ProjectStateFilter.all => true,
+      ProjectStateFilter.active => item.archivedAtMs == null,
+      ProjectStateFilter.archived => item.archivedAtMs != null,
       ProjectStateFilter.hasOpen => stats != null && stats.open > 0,
       ProjectStateFilter.hasBlocked => stats != null && stats.blocked > 0,
       ProjectStateFilter.complete =>

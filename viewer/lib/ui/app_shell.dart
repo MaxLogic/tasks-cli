@@ -26,6 +26,7 @@ import 'keyboard_help_dialog.dart';
 import 'settings_dialog.dart';
 import 'status_bar.dart';
 import 'viewer_controls.dart';
+import 'pane_splitter.dart';
 
 /// Focusable regions cycled by F6.
 enum ViewerRegion { projects, tasks, details, status }
@@ -999,40 +1000,68 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   }
 
   Widget _buildToolbar(BuildContext context) {
-    final buttonStyle = TextButton.styleFrom(
-      minimumSize: const Size(48, 32),
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-    );
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Wrap(
-        crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: 12,
-        runSpacing: 4,
+      child: Row(
         children: <Widget>[
-          Text('Tasks Viewer', style: Theme.of(context).textTheme.titleMedium),
-          Text(
-            _environmentSummary,
-            style: Theme.of(context).textTheme.bodySmall,
+          Expanded(
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              children: [
+                Text(
+                  'Tasks Viewer',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                Text(
+                  _environmentSummary,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
           ),
-          TextButton(
-            style: buttonStyle,
+          IconButton(
+            tooltip: 'Refresh (F5)',
             onPressed: _refresh,
-            child: const Text('Refresh (F5)'),
+            icon: const Icon(Icons.refresh),
           ),
-          TextButton(
-            style: buttonStyle,
+          IconButton(
+            tooltip: 'Settings (Ctrl+,)',
             onPressed: () => unawaited(openSettings()),
-            child: const Text('Settings (Ctrl+,)'),
+            icon: const Icon(Icons.settings_outlined),
           ),
-          TextButton(
-            style: buttonStyle,
+          IconButton(
+            tooltip: 'Hotkey help (F10)',
             onPressed: () => unawaited(openHelp()),
-            child: const Text('Hotkey help (F10)'),
+            icon: const Icon(Icons.help_outline),
           ),
         ],
       ),
     );
+  }
+
+  void _resizePanes(int boundary, double delta, double width) {
+    final weights = [
+      _settings.projectsPanePercent,
+      _settings.tasksPanePercent,
+      _settings.detailsPanePercent,
+    ];
+    final total = weights.reduce((a, b) => a + b);
+    final shift = (delta / width * total).round();
+    final minimum = (260 / width * total).ceil();
+    final right = boundary + 1;
+    final lower = math.min(0, minimum - weights[boundary]);
+    final upper = math.max(0, weights[right] - minimum);
+    final allowed = shift.clamp(lower, upper);
+    if (allowed != 0) {
+      setState(
+        () => _settings = _settings.copyWith(
+          projectsPanePercent: weights[0] + (boundary == 0 ? allowed : 0),
+          tasksPanePercent: weights[1] + (boundary == 0 ? -allowed : allowed),
+          detailsPanePercent: weights[2] - (boundary == 1 ? allowed : 0),
+        ),
+      );
+    }
   }
 
   Widget _buildPanes(
@@ -1045,31 +1074,79 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     final details = _regionPane(ViewerRegion.details, workspace.detailsPane);
     switch (mode) {
       case ViewerLayoutMode.threePane:
-        return Row(
-          children: <Widget>[
-            Expanded(flex: _settings.projectsPanePercent, child: projects),
-            const VerticalDivider(width: 1),
-            Expanded(flex: _settings.tasksPanePercent, child: tasks),
-            const VerticalDivider(width: 1),
-            Expanded(flex: _settings.detailsPanePercent, child: details),
-          ],
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth - 16;
+            return Row(
+              children: [
+                Expanded(flex: _settings.projectsPanePercent, child: projects),
+                PaneSplitter(
+                  label: 'Resize Projects and Tasks',
+                  onResize: (delta) => _resizePanes(0, delta, width),
+                  onResizeEnd: () =>
+                      widget.actions.onSettingsChanged?.call(_settings),
+                ),
+                Expanded(flex: _settings.tasksPanePercent, child: tasks),
+                PaneSplitter(
+                  label: 'Resize Tasks and Task details',
+                  onResize: (delta) => _resizePanes(1, delta, width),
+                  onResizeEnd: () =>
+                      widget.actions.onSettingsChanged?.call(_settings),
+                ),
+                Expanded(flex: _settings.detailsPanePercent, child: details),
+              ],
+            );
+          },
         );
       case ViewerLayoutMode.twoPane:
-        return Row(
-          children: <Widget>[
-            Expanded(flex: _settings.projectsPanePercent, child: projects),
-            const VerticalDivider(width: 1),
-            Expanded(
-              flex: _settings.tasksPanePercent + _settings.detailsPanePercent,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  _slotted(ViewerRegion.tasks, tasks),
-                  _slotted(ViewerRegion.details, details),
-                ],
+        return LayoutBuilder(
+          builder: (context, constraints) => Row(
+            children: <Widget>[
+              Expanded(flex: _settings.projectsPanePercent, child: projects),
+              PaneSplitter(
+                label: 'Resize Projects and Tasks',
+                onResize: (delta) {
+                  final total =
+                      _settings.projectsPanePercent +
+                      _settings.tasksPanePercent +
+                      _settings.detailsPanePercent;
+                  final minimum = (260 / (constraints.maxWidth - 8) * total)
+                      .ceil();
+                  final next =
+                      (_settings.projectsPanePercent +
+                              delta / (constraints.maxWidth - 8) * total)
+                          .round()
+                          .clamp(minimum, total - minimum);
+                  final remaining = total - next;
+                  final task =
+                      (remaining *
+                              _settings.tasksPanePercent /
+                              (_settings.tasksPanePercent +
+                                  _settings.detailsPanePercent))
+                          .round();
+                  setState(
+                    () => _settings = _settings.copyWith(
+                      projectsPanePercent: next,
+                      tasksPanePercent: task,
+                      detailsPanePercent: remaining - task,
+                    ),
+                  );
+                },
+                onResizeEnd: () =>
+                    widget.actions.onSettingsChanged?.call(_settings),
               ),
-            ),
-          ],
+              Expanded(
+                flex: _settings.tasksPanePercent + _settings.detailsPanePercent,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    _slotted(ViewerRegion.tasks, tasks),
+                    _slotted(ViewerRegion.details, details),
+                  ],
+                ),
+              ),
+            ],
+          ),
         );
       case ViewerLayoutMode.singlePane:
         return Column(
@@ -1161,7 +1238,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
                     header: true,
                     child: Text(
                       region.label,
-                      style: Theme.of(context).textTheme.titleMedium,
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
                   ),
                 ),

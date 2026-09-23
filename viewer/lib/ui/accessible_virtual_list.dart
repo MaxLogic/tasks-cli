@@ -102,6 +102,7 @@ class AccessibleVirtualList extends StatefulWidget {
     required this.itemKeyBuilder,
     this.onActivate,
     this.onSelectedIndexChanged,
+    this.excludeRowChildSemantics = true,
     this.isRowReady,
     this.onPendingRowSlow,
     this.cacheExtent,
@@ -130,6 +131,9 @@ class AccessibleVirtualList extends StatefulWidget {
   final ValueChanged<int>? onActivate;
 
   final ValueChanged<int>? onSelectedIndexChanged;
+
+  /// Allow embedded row actions to remain independently accessible.
+  final bool excludeRowChildSemantics;
 
   /// False while the row exists only as a placeholder. Focus waits for the real
   /// row instead of landing on invented content.
@@ -720,13 +724,30 @@ class _VirtualRowState extends State<_VirtualRow> {
       },
       child: Semantics(
         container: true,
-        explicitChildNodes: false,
+        explicitChildNodes: !widget.owner.widget.excludeRowChildSemantics,
         focusable: true,
         focused: _focused,
         selected: widget.selected,
         label: widget.semantics.label,
         value: widget.semantics.value,
-        child: ExcludeSemantics(child: widget.child),
+        onTap: () => widget.owner._requestIndex(
+          widget.index,
+          moveFocus: true,
+          forceFocus: true,
+        ),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          excludeFromSemantics: true,
+          onTap: () => widget.owner._requestIndex(
+            widget.index,
+            moveFocus: true,
+            forceFocus: true,
+          ),
+          child: ExcludeSemantics(
+            excluding: widget.owner.widget.excludeRowChildSemantics,
+            child: widget.child,
+          ),
+        ),
       ),
     );
   }

@@ -431,6 +431,42 @@ void main() {
   });
 
   group('requests', () {
+    test('archive and unarchive send the selected UUID to the CLI', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      launcher.replyWith(
+        '{"schema_version":1,"project_id":"$projectUuid","data":'
+        '{"command":"viewer_archive","protocol_version":1,'
+        '"archived_at_ms":1700000003000}}',
+      );
+
+      expect(
+        await client.setProjectArchived(projectUuid, archived: true),
+        1700000003000,
+      );
+      expect(launcher.launches.last.arguments, <String>[
+        '--data-root',
+        r'C:\store',
+        '--project',
+        projectUuid,
+        '--format',
+        'json',
+        'viewer',
+        'archive',
+      ]);
+
+      launcher.replyWith(
+        '{"schema_version":1,"project_id":"$projectUuid","data":'
+        '{"command":"viewer_archive","protocol_version":1,'
+        '"archived_at_ms":null}}',
+      );
+      expect(
+        await client.setProjectArchived(projectUuid, archived: false),
+        isNull,
+      );
+      expect(launcher.launches.last.arguments.last, '--unarchive');
+    });
+
     test(
       'the request travels as UTF-8 JSON on stdin, which is closed',
       () async {

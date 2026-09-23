@@ -5,9 +5,12 @@ backlog per project through the CLI's `viewer` command group, so the viewer
 never opens a task database itself and never replaces an in-use executable.
 
 The viewer talks to the store only through `tasks.exe`. Reads use the CLI's
-`viewer projects`, `viewer tasks`, `viewer show` and `viewer info` commands;
-writes use `viewer update` with an expected version. Nothing in the viewer
-creates, migrates or repairs a task store.
+`viewer projects`, `viewer tasks`, `viewer show` and `viewer info` commands.
+Writes use `viewer update` with an expected version; project archive dates use
+`viewer archive` and `viewer archive --unarchive`. Nothing in the viewer creates,
+migrates or repairs a task store.
+The CLI keeps project statistics and archive dates in `viewer-cache.sqlite3`
+under the selected task data root. Preserve this file when moving the store.
 
 ## Requirements
 
@@ -58,7 +61,8 @@ Settings pane:
 
 - CLI path with Browse and Test connection.
 - Data root with Browse.
-- Theme (system, light, dark) and text size (100 %, 125 %, 150 %, 175 %, 200 %).
+- Theme (Follow Windows, light, dark, high contrast light, high contrast dark)
+  and text size (100 %, 125 %, 150 %, 175 %, 200 %).
 - Pane widths for Projects, Tasks and Details, plus Reset layout.
 - Start with Windows.
 - Announcement mode and Bella volume, with Test voice.

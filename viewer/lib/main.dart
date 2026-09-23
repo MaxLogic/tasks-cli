@@ -200,6 +200,7 @@ ViewerDataReader buildViewerReaders(
     detail: client,
     update: client,
     clipboard: client,
+    projectArchive: client,
     drafts: drafts,
     probe: client.probe,
   );

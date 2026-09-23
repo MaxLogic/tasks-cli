@@ -20,6 +20,7 @@ import '../controllers/project_controller.dart';
 import '../controllers/task_controller.dart';
 import '../data/editor_models.dart';
 import '../data/models.dart';
+import '../data/project_archive.dart';
 import '../data/settings_store.dart';
 import '../platform/clipboard_text.dart';
 import 'editor_dialogs.dart';
@@ -44,6 +45,7 @@ class ViewerDataReader {
     this.drafts,
     this.probe,
     this.clipboard,
+    this.projectArchive,
   });
 
   final ProjectReader projects;
@@ -63,6 +65,9 @@ class ViewerDataReader {
   /// The one clipboard scope (spec.md section 8); null in a reader bundle that
   /// cannot enrich, which disables both clipboard actions with a reason.
   final ClipboardEnricher? clipboard;
+
+  /// Project archive commands; null for a read-only workspace.
+  final ProjectArchiveWriter? projectArchive;
 }
 
 /// Project catalog, task browser and detail state for one window.
@@ -136,6 +141,20 @@ class ViewerWorkspaceModel extends ChangeNotifier {
 
   /// Project the panes show, or null when the catalog has no selection.
   ProjectItem? get selectedProject => projectList.selectedItem;
+
+  bool get canArchiveProjects => readers.projectArchive != null;
+
+  Future<void> setProjectArchived(
+    ProjectItem project, {
+    required bool archived,
+  }) async {
+    final writer = readers.projectArchive;
+    if (writer == null) {
+      throw StateError('Project archive commands are unavailable.');
+    }
+    await writer.setProjectArchived(project.projectId, archived: archived);
+    await projectList.refresh();
+  }
 
   String? get selectedProjectId => projectList.selectedProjectId;
 

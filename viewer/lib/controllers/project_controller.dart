@@ -200,6 +200,7 @@ class ProjectController extends ChangeNotifier {
       return;
     }
     _sort = value;
+    _direction = value.defaultDirection;
     _notify();
     unawaited(reload());
   }

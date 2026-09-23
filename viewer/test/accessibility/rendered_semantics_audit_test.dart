@@ -80,7 +80,7 @@ void main() {
         expectAccessibleSemantics(tester);
 
         final refresh = tester
-            .getSemantics(find.bySemanticsLabel('Refresh (F5)'))
+            .getSemantics(find.byTooltip('Refresh (F5)'))
             .getSemanticsData();
         expect(refresh.flagsCollection.isButton, isTrue);
         expect(refresh.hasAction(ui.SemanticsAction.tap), isTrue);

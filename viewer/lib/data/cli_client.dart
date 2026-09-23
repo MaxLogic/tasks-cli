@@ -19,6 +19,7 @@ import 'dart:io';
 import '../app_environment.dart';
 import 'editor_models.dart';
 import 'models.dart';
+import 'project_archive.dart';
 import 'settings_draft.dart';
 import 'settings_store.dart' show joinViewerPath;
 
@@ -115,7 +116,8 @@ class ViewerCliClient
         CancellableTaskReader,
         CancellableTaskDetailReader,
         TaskUpdateWriter,
-        ClipboardEnricher {
+        ClipboardEnricher,
+        ProjectArchiveWriter {
   ViewerCliClient({
     required this.environment,
     ViewerSettingsDraftSource? savedSettings,
@@ -237,6 +239,40 @@ class ViewerCliClient
       expectedCommands: const <String>{'viewer_projects'},
     );
     return ProjectPage.fromJson(envelope.data);
+  }
+
+  @override
+  Future<int?> setProjectArchived(
+    String projectId, {
+    required bool archived,
+  }) async {
+    if (!_probePassed) {
+      throw const ViewerProbeRequiredFailure();
+    }
+    final envelope = await _runViewerCommand(
+      scopeKey: 'project-archive',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('changing the project archive state'),
+        '--project',
+        projectId,
+        '--format',
+        'json',
+        'viewer',
+        'archive',
+        if (!archived) '--unarchive',
+      ],
+      request: null,
+      expectedCommands: const <String>{'viewer_archive'},
+    );
+    _requireProjectEcho(envelope, projectId);
+    final value = envelope.data['archived_at_ms'];
+    if (value != null && value is! int) {
+      throw const ViewerMalformedResponseFailure(
+        'viewer archive returned an invalid archived_at_ms',
+      );
+    }
+    return value as int?;
   }
 
   /// Loads one page of the combined task query for [projectId].
