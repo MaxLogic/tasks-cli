@@ -101,12 +101,22 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
     return MaterialApp(
       title: viewerWindowTitle(),
       debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
+      theme: _theme(
+        Brightness.light,
+        highContrast: _settings.themeMode == ViewerThemeMode.highContrastLight,
+      ),
+      darkTheme: _theme(
+        Brightness.dark,
+        highContrast: _settings.themeMode == ViewerThemeMode.highContrastDark,
+      ),
+      highContrastTheme: _theme(Brightness.light, highContrast: true),
+      highContrastDarkTheme: _theme(Brightness.dark, highContrast: true),
       themeMode: switch (_settings.themeMode) {
         ViewerThemeMode.system => ThemeMode.system,
-        ViewerThemeMode.light => ThemeMode.light,
-        ViewerThemeMode.dark => ThemeMode.dark,
+        ViewerThemeMode.light ||
+        ViewerThemeMode.highContrastLight => ThemeMode.light,
+        ViewerThemeMode.dark ||
+        ViewerThemeMode.highContrastDark => ThemeMode.dark,
       },
       home: Builder(
         builder: (context) => MediaQuery(
@@ -204,12 +214,15 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
     );
   }
 
-  ThemeData _theme(Brightness brightness) => ThemeData(
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: Colors.indigo,
-      brightness: brightness,
-    ),
-  );
+  ThemeData _theme(Brightness brightness, {bool highContrast = false}) =>
+      ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+          brightness: brightness,
+          contrastLevel: highContrast ? 1 : 0,
+        ),
+        dividerTheme: DividerThemeData(thickness: highContrast ? 2 : 1),
+      );
 }
 
 /// Applies the in-app text-size choice on top of the platform text scale.

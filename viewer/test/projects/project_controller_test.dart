@@ -136,6 +136,28 @@ class CataloGReader implements CancellableProjectReader {
 
 void main() {
   test(
+    'changing project sort selects useful direction and reversal persists',
+    () async {
+      final controller = ProjectController(
+        reader: RecordingReader(
+          responder: (query) async => syntheticPage(query, total: 5),
+        ),
+      );
+      addTearDown(controller.dispose);
+      controller.setSort(ProjectSort.lastWrite);
+      expect(controller.direction, SortDirection.descending);
+      controller.setDirection(SortDirection.ascending);
+      controller.setSort(ProjectSort.lastWrite);
+      expect(controller.direction, SortDirection.ascending);
+      controller.setSort(ProjectSort.open);
+      expect(controller.direction, SortDirection.descending);
+      controller.setSort(ProjectSort.name);
+      expect(controller.direction, SortDirection.ascending);
+      await pumpEventQueue();
+    },
+  );
+
+  test(
     'the first load publishes rows, an exact count and the sample time',
     () async {
       final reader = RecordingReader(

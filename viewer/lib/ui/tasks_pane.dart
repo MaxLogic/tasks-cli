@@ -174,7 +174,11 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         _sortFocus.requestFocus();
         return KeyEventResult.handled;
       case 'tasks.direction':
-        _directionFocus.requestFocus();
+        _tasks?.setDirection(
+          _tasks?.direction == SortDirection.ascending
+              ? SortDirection.descending
+              : SortDirection.ascending,
+        );
         return KeyEventResult.handled;
       case 'tasks.clearFilters':
         _clearFilters();
@@ -392,7 +396,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
     child: Text(
       'Tasks in ${widget.model.selectedProjectName}',
-      style: Theme.of(context).textTheme.titleSmall,
+      style: Theme.of(context).textTheme.titleLarge,
     ),
   );
 
@@ -598,34 +602,18 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                   },
                 ),
               ),
-              SizedBox(
-                width: 170,
-                child: DropdownButtonFormField<SortDirection>(
-                  initialValue: tasks.direction,
-                  focusNode: _directionFocus,
-                  isDense: true,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Direction (Alt+I)',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                  items: <DropdownMenuItem<SortDirection>>[
-                    for (final value in SortDirection.values)
-                      DropdownMenuItem<SortDirection>(
-                        value: value,
-                        child: Text(
-                          value.label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      tasks.setDirection(value);
-                    }
-                  },
+              IconButton(
+                focusNode: _directionFocus,
+                tooltip: '${tasks.direction.label}; reverse sort (Alt+I)',
+                icon: Icon(
+                  tasks.direction == SortDirection.ascending
+                      ? Icons.arrow_upward
+                      : Icons.arrow_downward,
+                ),
+                onPressed: () => tasks.setDirection(
+                  tasks.direction == SortDirection.ascending
+                      ? SortDirection.descending
+                      : SortDirection.ascending,
                 ),
               ),
               Tooltip(

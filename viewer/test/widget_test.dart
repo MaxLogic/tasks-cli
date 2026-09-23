@@ -28,8 +28,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Tasks Viewer'), findsOneWidget);
-    expect(find.text('Settings (Ctrl+,)'), findsOneWidget);
-    expect(find.text('Hotkey help (F10)'), findsOneWidget);
+    expect(find.byTooltip('Settings (Ctrl+,)'), findsOneWidget);
+    expect(find.byTooltip('Hotkey help (F10)'), findsOneWidget);
     expect(find.textContaining('test mode'), findsOneWidget);
     expect(find.textContaining('Configuration ready'), findsOneWidget);
   });

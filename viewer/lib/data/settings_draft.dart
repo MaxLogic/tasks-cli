@@ -7,7 +7,13 @@ library;
 import '../controllers/announcement_controller.dart';
 
 /// Theme choice for the window.
-enum ViewerThemeMode { system, light, dark }
+enum ViewerThemeMode {
+  system,
+  light,
+  dark,
+  highContrastLight,
+  highContrastDark,
+}
 
 /// Text-size choices offered by Settings (design.md section 3).
 const List<int> viewerTextScalePercentChoices = <int>[100, 125, 150, 175, 200];

@@ -110,6 +110,7 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
           detail: widget.readers.detail,
           update: widget.readers.update,
           clipboard: widget.readers.clipboard,
+          projectArchive: widget.readers.projectArchive,
           drafts: widget.drafts,
           probe: widget.readers.probe,
         );

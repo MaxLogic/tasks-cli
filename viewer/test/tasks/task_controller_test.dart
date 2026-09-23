@@ -158,6 +158,23 @@ Future<TaskPage> Function(String, TaskQuery) catalogResponder(int total) =>
         syntheticPage(total, offset: query.offset, limit: query.limit);
 
 void main() {
+  test(
+    'date sorts show newest first and priority shows highest first',
+    () async {
+      final controller = buildTaskController(
+        FakeTaskReader(catalogResponder(3)),
+      );
+      addTearDown(controller.dispose);
+      controller.setSort(TaskSort.updated);
+      expect(controller.direction, SortDirection.descending);
+      controller.setSort(TaskSort.created);
+      expect(controller.direction, SortDirection.descending);
+      controller.setSort(TaskSort.priority);
+      expect(controller.direction, SortDirection.ascending);
+      await pumpEventQueue();
+    },
+  );
+
   group('parameters', () {
     test(
       'the first load uses open scope, priority ascending and one page',

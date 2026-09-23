@@ -13,6 +13,7 @@ import 'package:flutter/services.dart';
 
 import '../controllers/project_controller.dart';
 import '../data/models.dart';
+import '../platform/project_launch.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'commands.dart';
@@ -45,6 +46,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     debugLabel: 'projects preview enrichment',
   );
   bool _compactRows = false;
+  final ProjectLauncher _projectLauncher = const ProjectLauncher();
   String? _goToRowError;
 
   ProjectController get _projects => widget.model.projectList;
@@ -86,6 +88,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   // ------------------------------------------------------------- commands
 
   KeyEventResult _onScopeCommand(String id) {
+    if (id.startsWith('projects.state.')) {
+      _projects.setState(
+        ProjectStateFilter.fromWire(id.substring('projects.state.'.length)),
+      );
+      return KeyEventResult.handled;
+    }
     switch (id) {
       case 'projects.clearSearch':
         _clearSearch();
@@ -97,7 +105,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         _sortFocus.requestFocus();
         return KeyEventResult.handled;
       case 'projects.direction':
-        _directionFocus.requestFocus();
+        _projects.setDirection(
+          _projects.direction == SortDirection.ascending
+              ? SortDirection.descending
+              : SortDirection.ascending,
+        );
         return KeyEventResult.handled;
       case 'projects.clearFilters':
         _clearFilters();
@@ -315,7 +327,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                       DropdownMenuItem<ProjectStateFilter>(
                         value: value,
                         child: Text(
-                          value.label,
+                          "${value.label} (Alt+${value.index + 1})",
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -358,34 +370,18 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   },
                 ),
               ),
-              SizedBox(
-                width: 170,
-                child: DropdownButtonFormField<SortDirection>(
-                  initialValue: projects.direction,
-                  focusNode: _directionFocus,
-                  isDense: true,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Direction (Alt+I)',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                  items: <DropdownMenuItem<SortDirection>>[
-                    for (final value in SortDirection.values)
-                      DropdownMenuItem<SortDirection>(
-                        value: value,
-                        child: Text(
-                          value.label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      projects.setDirection(value);
-                    }
-                  },
+              IconButton(
+                focusNode: _directionFocus,
+                tooltip: '${projects.direction.label}; reverse sort (Alt+I)',
+                icon: Icon(
+                  projects.direction == SortDirection.ascending
+                      ? Icons.arrow_upward
+                      : Icons.arrow_downward,
+                ),
+                onPressed: () => projects.setDirection(
+                  projects.direction == SortDirection.ascending
+                      ? SortDirection.descending
+                      : SortDirection.ascending,
                 ),
               ),
               Tooltip(
@@ -493,6 +489,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       ),
       onSelectedIndexChanged: _onRowSelected,
       onActivate: _onRowActivated,
+      excludeRowChildSemantics: false,
       rowBuilder: (context, index, selected) {
         final item = projects.itemAt(index);
         if (item == null) {
@@ -502,9 +499,62 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
           item: item,
           selected: selected,
           compact: _compactRows,
+          onAction: (action) =>
+              unawaited(_runProjectAction(item, index, action)),
+          canArchive: widget.model.canArchiveProjects,
         );
       },
     );
+  }
+
+  Future<void> _runProjectAction(
+    ProjectItem item,
+    int index,
+    _ProjectMenuAction action,
+  ) async {
+    final root = item.roots.isEmpty ? null : item.roots.first;
+    try {
+      switch (action) {
+        case _ProjectMenuAction.explorer:
+        case _ProjectMenuAction.alacritty:
+        case _ProjectMenuAction.terminal:
+          if (root == null) return;
+          await _projectLauncher.open(switch (action) {
+            _ProjectMenuAction.explorer => ProjectLaunchTarget.explorer,
+            _ProjectMenuAction.alacritty => ProjectLaunchTarget.alacritty,
+            _ => ProjectLaunchTarget.terminal,
+          }, root);
+          return;
+        case _ProjectMenuAction.copyPath:
+          if (root == null) return;
+          await Clipboard.setData(ClipboardData(text: root));
+          widget.api.announce('Project path copied', dynamic: true);
+          return;
+        case _ProjectMenuAction.archive:
+          await widget.model.setProjectArchived(
+            item,
+            archived: item.archivedAtMs == null,
+          );
+          widget.api.announce(
+            item.archivedAtMs == null
+                ? '${item.name} archived'
+                : '${item.name} unarchived',
+            dynamic: true,
+          );
+          return;
+        case _ProjectMenuAction.copyId:
+          await Clipboard.setData(ClipboardData(text: item.projectId));
+          widget.api.announce('Project ID copied', dynamic: true);
+          return;
+        case _ProjectMenuAction.enrich:
+          if (await widget.model.selectProjectRow(index)) {
+            await widget.model.enrichClipboard();
+          }
+          return;
+      }
+    } on Object catch (error) {
+      widget.api.announce('Project action failed: $error', dynamic: true);
+    }
   }
 
   void _onRowSelected(int index) {
@@ -791,16 +841,30 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
 /// One project row: name with progress, counts with the primary root, and (in
 /// the expanded density) both dates.
+enum _ProjectMenuAction {
+  explorer,
+  alacritty,
+  terminal,
+  copyPath,
+  archive,
+  copyId,
+  enrich,
+}
+
 class _ProjectRowTile extends StatelessWidget {
   const _ProjectRowTile({
     required this.item,
     required this.selected,
     required this.compact,
+    required this.onAction,
+    required this.canArchive,
   });
 
   final ProjectItem item;
   final bool selected;
   final bool compact;
+  final ValueChanged<_ProjectMenuAction> onAction;
+  final bool canArchive;
 
   @override
   Widget build(BuildContext context) {
@@ -826,53 +890,124 @@ class _ProjectRowTile extends StatelessWidget {
           Row(
             children: <Widget>[
               Expanded(
-                child: Text(
-                  item.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium,
+                child: ExcludeSemantics(
+                  child: Text(
+                    item.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
-              Text(progressText, style: theme.textTheme.bodySmall),
+              ExcludeSemantics(
+                child: Text(progressText, style: theme.textTheme.bodySmall),
+              ),
+              SizedBox(
+                width: 24,
+                height: 20,
+                child: PopupMenuButton<_ProjectMenuAction>(
+                  tooltip: 'Actions for ${item.name}',
+                  padding: EdgeInsets.zero,
+                  onSelected: onAction,
+                  itemBuilder: (context) =>
+                      <PopupMenuEntry<_ProjectMenuAction>>[
+                        _menuItem(
+                          _ProjectMenuAction.explorer,
+                          'Open in Explorer',
+                          item.roots.isNotEmpty,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.alacritty,
+                          'Open in Alacritty',
+                          item.roots.isNotEmpty,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.terminal,
+                          'Open in Terminal',
+                          item.roots.isNotEmpty,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.copyPath,
+                          'Copy path',
+                          item.roots.isNotEmpty,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.archive,
+                          item.archivedAtMs == null ? 'Archive' : 'Unarchive',
+                          canArchive,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.copyId,
+                          'Copy project ID',
+                          true,
+                        ),
+                        _menuItem(
+                          _ProjectMenuAction.enrich,
+                          'Enrich clipboard',
+                          item.isAvailable,
+                        ),
+                      ],
+                  child: Semantics(
+                    button: true,
+                    label: 'Actions for ${item.name}',
+                    child: const Icon(Icons.menu, size: 18),
+                  ),
+                ),
+              ),
             ],
           ),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  counts,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall,
+          ExcludeSemantics(
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    counts,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  root,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.right,
-                  style: theme.textTheme.bodySmall,
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    root,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                    style: theme.textTheme.bodySmall,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
           if (!compact)
-            Text(
-              'Started (first task): '
-              '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
-              '   Last task write: '
-              '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall,
+            ExcludeSemantics(
+              child: Text(
+                'Started (first task): '
+                '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
+                '   Last task write: '
+                '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall,
+              ),
             ),
         ],
       ),
     );
   }
+
+  PopupMenuItem<_ProjectMenuAction> _menuItem(
+    _ProjectMenuAction action,
+    String label,
+    bool enabled,
+  ) => PopupMenuItem<_ProjectMenuAction>(
+    value: action,
+    enabled: enabled,
+    height: 36,
+    child: Text(label),
+  );
 }
 
 /// A row the viewer has not fetched yet; it never invents project identity.

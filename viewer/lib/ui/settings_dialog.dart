@@ -537,6 +537,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
                                 value: ViewerThemeMode.dark,
                                 child: Text('Dark'),
                               ),
+                              DropdownMenuItem<ViewerThemeMode>(
+                                value: ViewerThemeMode.highContrastLight,
+                                child: Text('High contrast light'),
+                              ),
+                              DropdownMenuItem<ViewerThemeMode>(
+                                value: ViewerThemeMode.highContrastDark,
+                                child: Text('High contrast dark'),
+                              ),
                             ],
                             onChanged: (value) =>
                                 setState(() => _theme = value ?? _theme),

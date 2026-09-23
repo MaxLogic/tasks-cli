@@ -213,7 +213,9 @@ enum ProjectStateFilter {
   hasBlocked('has-blocked', 'With blocked tasks'),
   complete('complete', 'Complete'),
   empty('empty', 'Empty'),
-  unavailable('unavailable', 'Unavailable');
+  unavailable('unavailable', 'Database unavailable'),
+  active('active', 'Active projects'),
+  archived('archived', 'Archived projects');
 
   const ProjectStateFilter(this.wireValue, this.label);
 
@@ -244,6 +246,10 @@ enum ProjectSort {
 
   final String wireValue;
   final String label;
+
+  SortDirection get defaultDirection => this == ProjectSort.name
+      ? SortDirection.ascending
+      : SortDirection.descending;
 
   static ProjectSort fromWire(String value) {
     for (final candidate in values) {
@@ -435,6 +441,7 @@ final class ProjectStats {
 /// One catalog row: a unique project UUID with every bound root.
 final class ProjectItem {
   const ProjectItem({
+    this.archivedAtMs,
     required this.projectId,
     required this.name,
     required this.roots,
@@ -454,6 +461,8 @@ final class ProjectItem {
   /// Null whenever [availability] is not `available`; never zeros.
   final ProjectStats? stats;
 
+  final int? archivedAtMs;
+
   bool get isAvailable => availability == ProjectAvailability.available;
 
   /// Every bound root, or the label used when the registry has none.
@@ -466,6 +475,9 @@ final class ProjectItem {
     final errorValue = _requiredValue(json, 'error', path);
     final statsValue = _requiredValue(json, 'stats', path);
     return ProjectItem(
+      archivedAtMs: json.containsKey('archived_at_ms')
+          ? _requiredNullableInt(json, 'archived_at_ms', path)
+          : null,
       projectId: _requireString(json, 'project_id', path),
       name: _requireString(json, 'name', path),
       roots: _requireStringList(json, 'roots', path),
@@ -492,6 +504,7 @@ final class ProjectItem {
     'project_id': projectId,
     'name': name,
     'roots': roots,
+    'archived_at_ms': archivedAtMs,
     'availability': availability.wireValue,
     'error': error?.toJson(),
     'sampled_at_ms': sampledAtMs,
@@ -1089,6 +1102,11 @@ enum TaskSort {
 
   final String wireValue;
   final String label;
+
+  SortDirection get defaultDirection =>
+      this == TaskSort.created || this == TaskSort.updated
+      ? SortDirection.descending
+      : SortDirection.ascending;
 
   static TaskSort fromWire(String value) {
     for (final candidate in values) {

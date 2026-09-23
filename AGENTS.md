@@ -64,6 +64,9 @@ with the real two binaries, not just argument mocks.
   default task store, recursively clean a repository, or kill unrelated workers.
 - Preserve unrelated changes. Do not push, migrate a live backlog or replace an
   in-use executable without authorization.
+- For viewer development, you may stop the running application, compile the
+  updated executable, and restart it to verify the new build. Stop only this
+  application's process and preserve its user data.
 - After completing and verifying each task or milestone, create a local Git
   commit for that related batch. Stage only its owned changes, inspect the staged
   diff, and keep unrelated work separate. Commit authority does not authorize push.
