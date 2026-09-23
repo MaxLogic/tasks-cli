@@ -65,7 +65,7 @@ Future<void> main(List<String> arguments) async {
 
   final environment = ViewerEnvironment.fromLaunchArgs(
     launchArgs,
-  ).withSavedSettings(currentSettings);
+  ).withSavedSettings(currentSettings).withDiscoveredDefaults();
 
   // One normal instance per Windows user and settings root. A second launch
   // asks the running window to come forward instead of opening an editor.

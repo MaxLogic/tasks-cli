@@ -242,8 +242,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      _buildGoToRow(context, projects),
-                      const Divider(height: 1),
+                      if (projects.totalCount > 0) ...<Widget>[
+                        _buildGoToRow(context, projects),
+                        const Divider(height: 1),
+                      ],
                       _buildSummary(context, projects),
                     ],
                   ),

@@ -198,76 +198,87 @@ class _KeyboardHelpDialogState extends State<KeyboardHelpDialog> {
       onCommand: _onCommand,
       // The dialog surface itself: it supplies the Material ancestor the
       // search field needs and clamps the list to the current window.
-      child: Dialog(
-        insetPadding: const EdgeInsets.all(24),
-        child: Semantics(
-          container: true,
-          explicitChildNodes: true,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              minWidth: 480,
-              maxWidth: math.min(960, size.width - 48),
-              maxHeight: size.height - 96,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Text(
-                    'Keyboard help',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Reserved app shortcuts are handled before a focused text '
-                    'field sees the key. Every other key stays with the field, '
-                    'including Insert and Caps Lock combinations used by NVDA.',
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _query,
-                    focusNode: _searchNode,
-                    onChanged: _onQueryChanged,
-                    decoration: const InputDecoration(
-                      labelText: 'Search shortcuts (Alt+F)',
-                      helperText:
-                          'Matches key, command, description and group.',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    count == 1 ? '1 shortcut' : '$count shortcuts',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: AccessibleVirtualList(
-                      controller: _list,
-                      itemCount: count,
-                      itemExtent: 84,
-                      listLabel: 'Keyboard shortcuts',
-                      emptyLabel: 'No shortcuts match this search',
-                      rowSemanticsBuilder: (index) => AccessibleRowSemantics(
-                        label: _visible[index].semanticsLabel,
+      child: Semantics(
+        label: 'Keyboard help',
+        namesRoute: true,
+        scopesRoute: true,
+        explicitChildNodes: true,
+        child: Dialog(
+          insetPadding: const EdgeInsets.all(24),
+          child: Semantics(
+            container: true,
+            explicitChildNodes: true,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minWidth: 480,
+                maxWidth: math.min(960, size.width - 48),
+                maxHeight: size.height - 96,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        'Keyboard help',
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
-                      itemKeyBuilder: (index) =>
-                          ValueKey<String>(_visible[index].spec.id),
-                      rowBuilder: (context, index, selected) =>
-                          _HelpRow(entry: _visible[index], selected: selected),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      onPressed: _close,
-                      child: const Text('Close (Alt+C)'),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Reserved app shortcuts are handled before a focused text '
+                      'field sees the key. Every other key stays with the field, '
+                      'including Insert and Caps Lock combinations used by NVDA.',
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _query,
+                      focusNode: _searchNode,
+                      onChanged: _onQueryChanged,
+                      decoration: const InputDecoration(
+                        labelText: 'Search shortcuts (Alt+F)',
+                        helperText:
+                            'Matches key, command, description and group.',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      count == 1 ? '1 shortcut' : '$count shortcuts',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: AccessibleVirtualList(
+                        controller: _list,
+                        itemCount: count,
+                        itemExtent: 84,
+                        listLabel: 'Keyboard shortcuts',
+                        emptyLabel: 'No shortcuts match this search',
+                        rowSemanticsBuilder: (index) => AccessibleRowSemantics(
+                          label: _visible[index].semanticsLabel,
+                        ),
+                        itemKeyBuilder: (index) =>
+                            ValueKey<String>(_visible[index].spec.id),
+                        rowBuilder: (context, index, selected) => _HelpRow(
+                          entry: _visible[index],
+                          selected: selected,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: _close,
+                        child: const Text('Close (Alt+C)'),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
