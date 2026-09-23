@@ -1,8 +1,7 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-Runs every viewer verification gate that needs no human, no live desktop and no
-audio device.
+Runs the automated viewer gates, including external UIA on the packaged release.
 
 .DESCRIPTION
 viewer/spec.md section 11 asks for `verify-windows.ps1`: build the matching CLI,
@@ -10,9 +9,9 @@ run the Flutter gates and exercise the packaged release, keeping Flutter
 test-build evidence apart from packaged-release evidence and failing on a
 missing prerequisite.
 
-This script runs those gates headlessly. It never sends keyboard or pointer
-input, never takes a foreground lease, never drives NVDA and never reads or
-writes the real clipboard, so it is safe on a workstation that is in use:
+The release UIA gate opens one window against a synthetic store. It sends no
+keyboard or pointer input, does not drive NVDA, and does not access the real
+clipboard:
 
   1. records the source commit, the dirty state and the toolchains;
   2. builds the matching `tasks.exe` from the current source and hashes it;
@@ -29,14 +28,13 @@ writes the real clipboard, so it is safe on a workstation that is in use:
      binary;
   7. builds the Windows release and packages it with `package.ps1`, which
      launch-tests the copy from a path with spaces and non-ASCII characters;
-  8. writes `verify-summary.json` and `verify-summary.md` into the evidence
+  8. launches the packaged release and checks its external Windows UIA tree;
+  9. writes `verify-summary.json` and `verify-summary.md` into the evidence
      root, including the V01..V13 rows that stay unavailable without a human.
 
-The windowed `integration_test/viewer_test.dart` entry point and the manual
-rows (NVDA speech, a real sign-in, audible playback, live clipboard) are
-deliberately not run here; `-IncludeWindowedIntegration` opts into the windowed
-run for a session where that is wanted. Every unrun row is reported as
-unavailable, never as passed, so release acceptance stays incomplete.
+The Flutter `integration_test/viewer_test.dart` entry point remains opt-in with
+`-IncludeWindowedIntegration`. Manual rows (NVDA speech, a real sign-in,
+audible playback, live clipboard) remain unavailable.
 
 .EXAMPLE
 pwsh -NoProfile -File viewer/tool/verify-windows.ps1
@@ -64,6 +62,8 @@ param(
 
     [string]$PackageToolPath,
 
+    [string]$UiaProbeToolPath,
+
     [int]$FixtureSeed = 20260922,
 
     [int]$AlphaTaskCount = 28,
@@ -73,6 +73,8 @@ param(
     [int]$FixtureCommandTimeoutSeconds = 120,
 
     [int]$GateTimeoutSeconds = 3600,
+
+    [int]$UiaTimeoutSeconds = 45,
 
     [switch]$KeepFixtureRoot,
 
@@ -900,7 +902,7 @@ function Format-GateLog {
 function Invoke-VerifyWindows {
     <#
     .SYNOPSIS
-    Runs every headless viewer gate and writes one evidence root.
+    Runs the automated viewer gates and writes one evidence root.
 
     .DESCRIPTION
     The gate order matters: the throwaway store is seeded by the plain release
@@ -908,8 +910,9 @@ function Invoke-VerifyWindows {
     `test-hooks` skip), the `test-hooks` build then closes that skip in its own
     focused run, the plain binary is rebuilt and re-checked before the packaged
     release is built, and the end-to-end viewer cases run against the shipped
-    binary. Every log lands in the evidence root and every unrun manual row is
-    reported as unavailable.
+    binary. G11 checks external UIA on the packaged release using a separate
+    synthetic store. Every log lands in the evidence root and every unrun
+    manual row is reported as unavailable.
     #>
     param(
         [Parameter(Mandatory)]
@@ -930,6 +933,8 @@ function Invoke-VerifyWindows {
 
         [string]$PackageToolPath,
 
+        [string]$UiaProbeToolPath,
+
         [int]$FixtureSeed = 20260922,
 
         [int]$AlphaTaskCount = 28,
@@ -939,6 +944,8 @@ function Invoke-VerifyWindows {
         [int]$FixtureCommandTimeoutSeconds = 120,
 
         [int]$GateTimeoutSeconds = 3600,
+
+        [int]$UiaTimeoutSeconds = 45,
 
         [switch]$KeepFixtureRoot,
 
@@ -956,8 +963,14 @@ function Invoke-VerifyWindows {
     if ([string]::IsNullOrWhiteSpace($PackageToolPath)) {
         $PackageToolPath = Join-Path -Path $viewerFull -ChildPath 'tool/package.ps1'
     }
+    if ([string]::IsNullOrWhiteSpace($UiaProbeToolPath)) {
+        $UiaProbeToolPath = Join-Path -Path $viewerFull -ChildPath 'tool/verify-release-uia.ps1'
+    }
     if (-not (Test-Path -LiteralPath $PackageToolPath -PathType Leaf)) {
         throw "The packaging tool '$PackageToolPath' is missing."
+    }
+    if (-not (Test-Path -LiteralPath $UiaProbeToolPath -PathType Leaf)) {
+        throw "The release UIA probe '$UiaProbeToolPath' is missing."
     }
 
     $evidence = Resolve-VerifyEvidenceRoot -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot
@@ -970,11 +983,14 @@ function Invoke-VerifyWindows {
     # cases over rows another gate just mutated.
     $e2eFixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -RepositoryRoot $repositoryFull `
         -FixtureRoot "$fixtureResolved-e2e"
+    $uiaFixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -RepositoryRoot $repositoryFull `
+        -FixtureRoot "$fixtureResolved-uia"
 
     $findings = [System.Collections.Generic.List[string]]::new()
     $gates = [System.Collections.Generic.List[object]]::new()
     $fixture = $null
     $e2eFixture = $null
+    $uiaFixture = $null
     $failure = $null
     $plainCliHash = $null
     $restoredCliHash = $null
@@ -985,6 +1001,8 @@ function Invoke-VerifyWindows {
     $packageHash = $null
     $windowedStatus = 'not-requested'
     $windowedLog = $null
+    $uiaStatus = 'not-run'
+    $uiaLog = $null
     $hookSkipMarker = 'has no TASKS_PRECOMMIT_READY_FILE test hook'
 
     try {
@@ -1245,6 +1263,46 @@ function Invoke-VerifyWindows {
             -Command 'viewer/tool/package.ps1 (with the hash re-check)' -Log $packageLog `
             -Detail "$($packageResult.FileCount) files, $($packageResult.ClipCount) clips, $($packageHash.Checked) hash entries, launch test passed"
 
+        Write-VerifyMessage -Message 'verify: external UI Automation on the packaged Windows release'
+        $uiaFixture = Initialize-ViewerVerifyFixture -FixtureRoot $uiaFixtureResolved `
+            -CliExecutable (Join-Path -Path $packageResult.OutputRoot -ChildPath 'tasks.exe') `
+            -Seed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
+            -CommandTimeoutSeconds $FixtureCommandTimeoutSeconds
+        $fixtureManifest = Get-Content -LiteralPath $uiaFixture.ManifestPath -Raw | ConvertFrom-Json
+        $uiaCommand = (Get-Command -Name 'pwsh' -ErrorAction Stop).Source
+        $uiaArguments = @('-NoProfile', '-File', $UiaProbeToolPath,
+            '-BundleRoot', $packageResult.OutputRoot,
+            '-DataRoot', $uiaFixtureResolved,
+            '-SettingsRoot', $uiaFixture.SettingsRoot,
+            '-ExpectedProjectName', [string]$fixtureManifest.projects[0].name,
+            '-ExpectedOpenCount', [string]$uiaFixture.AlphaOpen,
+            '-ExpectedTotalCount', [string]$uiaFixture.AlphaTotal,
+            '-TimeoutSeconds', [string]$UiaTimeoutSeconds)
+        $uiaResult = Invoke-CapturedProcess -FilePath $uiaCommand -Arguments $uiaArguments `
+            -WorkingDirectory $viewerFull -TimeoutSeconds ($UiaTimeoutSeconds + 15)
+        $uiaLog = Write-GateLog -EvidenceRoot $evidence -Name '12-release-uia.txt' `
+            -Text (Format-GateLog -Command 'pwsh -NoProfile -File viewer/tool/verify-release-uia.ps1 (packaged release)' -Result $uiaResult)
+        if ($uiaResult.TimedOut -or $uiaResult.ExitCode -ne 0) {
+            $uiaStatus = 'failed'
+            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
+                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'External UIA probe failed'
+            throw "The packaged release UIA probe failed (exit $($uiaResult.ExitCode)); see $uiaLog"
+        }
+        $uiaProof = $uiaResult.StdOut | ConvertFrom-Json
+        $builtAppImage = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release/data/app.so'
+        if (-not $uiaProof.Ok -or $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
+            $uiaProof.CliSha256 -ne $packageResult.CliExeSha256 -or
+            $uiaProof.AppSha256 -ne (Get-FileSha256 -Path $builtAppImage)) {
+            $uiaStatus = 'failed'
+            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
+                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'Probe result or packaged hashes disagree'
+            throw "The release UIA probe did not verify the packaged candidate hashes and semantics; see $uiaLog"
+        }
+        $uiaStatus = 'passed'
+        Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'passed' `
+            -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog `
+            -Detail "$($uiaProof.NodeCount) native UIA nodes; project region and row exposed; app.so sha256 $($uiaProof.AppSha256)"
+
         if ($IncludeWindowedIntegration) {
             Write-VerifyMessage -Message 'verify: windowed integration_test/viewer_test.dart -d windows (this opens a real window)'
             $windowedResult = Invoke-FlutterCommand -Launcher $launcher `
@@ -1258,7 +1316,7 @@ function Invoke-VerifyWindows {
                 throw "The windowed integration run failed (+$($windowedCounts.Passed) ~$($windowedCounts.Skipped) -$($windowedCounts.Failed), exit $($windowedResult.ExitCode)); see $windowedLog"
             }
             $windowedStatus = 'passed'
-            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'windowed integration (opt-in)' -Status 'passed' `
+            Add-VerifyGate -Gates $gates -Id 'G12' -Name 'windowed integration (opt-in)' -Status 'passed' `
                 -Command "flutter test integration_test/viewer_test.dart -d windows --dart-define=$fixtureDefine" -Log $windowedLog `
                 -Detail "passed $($windowedCounts.Passed), skipped $($windowedCounts.Skipped); this gate opens a real window and is never part of the default run"
         }
@@ -1270,6 +1328,7 @@ function Invoke-VerifyWindows {
     foreach ($rootEntry in @(
             [pscustomobject]@{ Root = $fixtureResolved; Seeded = ($null -ne $fixture) }
             [pscustomobject]@{ Root = $e2eFixtureResolved; Seeded = ($null -ne $e2eFixture) }
+            [pscustomobject]@{ Root = $uiaFixtureResolved; Seeded = ($null -ne $uiaFixture) }
         )) {
         if (-not $rootEntry.Seeded) {
             continue
@@ -1320,7 +1379,7 @@ function Invoke-VerifyWindows {
     $rows.Add([pscustomobject]@{ Id = 'V05'; Status = 'passed'; Scope = 'Draft and navigation suites in G05: Save/Discard/Cancel per leaving action, restart restore, corrupt settings and write failures, store identity.'; Logs = '05-flutter-test-full.txt' })
     $rows.Add([pscustomobject]@{ Id = 'V06'; Status = 'passed'; Scope = 'Clipboard suites in G05 over the fake clipboard; the real clipboard was never read or written in this run.'; Logs = '05-flutter-test-full.txt' })
     $rows.Add([pscustomobject]@{ Id = 'V07'; Status = 'passed'; Scope = 'Widget, semantics and accessibility suites in G05: control names and roles, focus order and return, disabled reasons, loading announcements, text scaling.'; Logs = '05-flutter-test-full.txt' })
-    $rows.Add([pscustomobject]@{ Id = 'V08'; Status = 'unavailable'; Scope = 'G08 proves the real-store viewer flow headlessly (discover, filter, sort, read, edit, refresh); the packaged-candidate window flows and any UI Automation step need a live desktop.'; Logs = '09-viewer-e2e-headless.txt' })
+    $rows.Add([pscustomobject]@{ Id = 'V08'; Status = 'unavailable'; Scope = "G08 proves the real-store flow headlessly. Packaged release UIA G11 status: $uiaStatus. The full packaged window workflows remain unverified."; Logs = '09-viewer-e2e-headless.txt, 12-release-uia.txt' })
     $rows.Add([pscustomobject]@{ Id = 'V09'; Status = 'unavailable'; Scope = 'Section 10 timings live in viewer/tool/measure.ps1 and its own evidence root: deterministic release fixtures plus release CLI round trips, with the frame, memory and NVDA rows recorded unavailable. This harness runs no timing gate.'; Logs = '' })
     $rows.Add([pscustomobject]@{ Id = 'V10'; Status = 'unavailable'; Scope = 'Manual NVDA walkthroughs need live speech and a real desktop; never driven in this run by direction.'; Logs = '' })
     $rows.Add([pscustomobject]@{ Id = 'V11'; Status = 'passed'; Scope = 'G05 hotkey suites: F1/F2/F3 focus targets, remembered-list Ctrl+F, scoped access keys, modal isolation, Ctrl+D and Ctrl+E routing, the Hotkey help dialog and its focus return.'; Logs = '05-flutter-test-full.txt' })
@@ -1338,6 +1397,7 @@ function Invoke-VerifyWindows {
         evidence_root    = $evidence
         fixture_root     = $fixtureResolved
         e2e_fixture_root = $e2eFixtureResolved
+        uia_fixture_root = $uiaFixtureResolved
         fixture_kept     = [bool]$KeepFixtureRoot
         ok               = $ok
         gates            = @($gates)
@@ -1346,6 +1406,7 @@ function Invoke-VerifyWindows {
             test_hooks    = $hookCounts
             e2e_headless  = $e2eCounts
             windowed_run  = $windowedStatus
+            release_uia   = $uiaStatus
         }
         artifacts       = [ordered]@{
             shipped_cli_sha256        = $restoredCliHash
@@ -1363,7 +1424,7 @@ function Invoke-VerifyWindows {
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding utf8NoBOM
 
     $markdown = [System.Collections.Generic.List[string]]::new()
-    $markdown.Add('# viewer headless verification - verify-windows.ps1')
+    $markdown.Add('# viewer Windows verification - verify-windows.ps1')
     $markdown.Add('')
     $markdown.Add("generated_utc: $($summary.generated_utc)")
     $markdown.Add("repository: $repositoryFull")
@@ -1372,11 +1433,11 @@ function Invoke-VerifyWindows {
     $markdown.Add("evidence_root: $evidence")
     $markdown.Add("fixture_root: $fixtureResolved (kept: $([bool]$KeepFixtureRoot))")
     $markdown.Add("e2e_fixture_root: $e2eFixtureResolved (the end-to-end gate seeds its own store)")
+    $markdown.Add("uia_fixture_root: $uiaFixtureResolved (G11 seeds its own store with the packaged CLI)")
     $markdown.Add('')
-    $markdown.Add('Scope: headless-only viewer verification. No SendInput, no foreground')
-    $markdown.Add('lease, no UI Automation invocation, no live NVDA driving and no real')
-    $markdown.Add('clipboard access. Keys and pointer events exist only inside the Flutter')
-    $markdown.Add('test binding, so the desktop the run started on stays usable.')
+    $markdown.Add('Scope: headless Flutter gates plus an external UIA check of one packaged-release')
+    $markdown.Add('window on a synthetic store. No keyboard or pointer input, NVDA driving or')
+    $markdown.Add('real clipboard access. The UIA gate does not prove NVDA speech.')
     $markdown.Add('')
     $markdown.Add('## Gates')
     $markdown.Add('')
@@ -1401,6 +1462,7 @@ function Invoke-VerifyWindows {
         }
     }
     $markdown.Add("- windowed integration (-d windows): $windowedStatus")
+    $markdown.Add("- packaged release UIA: $uiaStatus (log: $uiaLog)")
     $markdown.Add('')
     $markdown.Add('## Artifacts')
     $markdown.Add('')
@@ -1422,7 +1484,7 @@ function Invoke-VerifyWindows {
     $markdown.Add('- NVDA speech, caret behaviour and real text editing (V10).')
     $markdown.Add('- A real sign-in launch, changed/missing monitors and live DPI (V12).')
     $markdown.Add('- Audible Bella playback on a real device and listening checks (V13).')
-    $markdown.Add('- The packaged window flows and any UI Automation step (V08).')
+    $markdown.Add('- The full packaged window flows (V08); G11 covers only UIA exposure of the initial window.')
     $markdown.Add('- Section 10 performance numbers: run viewer/tool/measure.ps1, which keeps its own evidence root (V09).')
     $markdown.Add('')
     $markdown.Add('## Findings')
@@ -1455,6 +1517,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $toolResult = Invoke-VerifyWindows -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
             -EvidenceRoot $EvidenceRoot -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
             -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath `
+            -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds `
             -FixtureSeed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
             -FixtureCommandTimeoutSeconds $FixtureCommandTimeoutSeconds -GateTimeoutSeconds $GateTimeoutSeconds `
             -KeepFixtureRoot:$KeepFixtureRoot -IncludeWindowedIntegration:$IncludeWindowedIntegration

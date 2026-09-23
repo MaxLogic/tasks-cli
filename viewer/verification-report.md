@@ -1,5 +1,34 @@
 # Tasks Viewer verification report
 
+## 2026-09-23: packaged release UI Automation gate
+
+`viewer/tool/verify-windows.ps1` now runs G11 by default after G10 packaging. It seeds a
+fresh synthetic store with the bundled CLI, launches that exact packaged
+`tasks_viewer.exe` with isolated settings, and reads the external Windows UIA
+tree without keyboard or pointer input. It checks the Projects region, the
+Search projects Edit, the Sort button, and the seeded project row. The gate
+also compares the probed `tasks_viewer.exe`, `tasks.exe` and `data/app.so`
+SHA-256 values with the packaged and built candidate.
+
+The final run at source HEAD `4da96d4` with the gate edits still uncommitted
+(`source_dirty: true`) passed **12/12 gates**. G05 reported 481 passed and one
+documented skip, closed by G06 (3 passed); G08 passed all 5 real-store cases.
+G11 found 62 UIA nodes and passed all four native exposure checks. The probed
+`data/app.so` hash was `0c6aea2ed14773ea98052c937e13eb31ad6d110993ff3cdc6926d61aec362ae0`.
+Evidence: `viewer/target/evidence/viewer/2026-09-23-release-uia-gate-2/`
+(`12-release-uia.txt`, `verify-summary.json`, `verify-summary.md`).
+
+The first complete run at
+`viewer/target/evidence/viewer/2026-09-23-release-uia-gate/` failed G11:
+its UIA snapshot contained only the window and `FLUTTERVIEW` pane. The gate
+did not turn that into a pass. A later focused probe on the same packaged
+release exposed the full tree. G11 now uses its own pristine fixture; the
+complete rerun passed. The first failure remains evidence of intermittent
+UIA exposure, not a proven explanation of its cause. This automated check
+does not complete V08's window workflows or V10's NVDA speech walkthroughs.
+
+## Earlier headless baseline
+
 Candidate: **`823094a`** - `fix(viewer): discover migrated task store on startup`,
 branch `main`, tree clean at every measurement recorded here. Nothing was pushed, no live backlog was
 migrated or modified, no installed executable was replaced, and no real Startup entry or clipboard
