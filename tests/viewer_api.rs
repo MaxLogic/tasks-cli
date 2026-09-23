@@ -400,7 +400,7 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
     assert_eq!(data["protocol_version"], 1);
     assert_eq!(
         data["operations"],
-        json!(["info", "projects", "tasks", "show", "update"])
+        json!(["info", "projects", "tasks", "show", "update", "archive"])
     );
     assert_eq!(
         data["statuses"],
@@ -2581,4 +2581,108 @@ fn viewer_update_validation_errors_write_nothing() {
     assert_eq!(task_version(&project, id), version);
     assert_eq!(task_events(&project, id), events);
     assert_eq!(all_events(&project), all);
+}
+
+#[test]
+fn project_cache_reuses_unchanged_stats_and_archive_reopens_on_new_write() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = add_project(root.path(), "cached");
+    let args = viewer_args(
+        root.path(),
+        None,
+        &["viewer", "projects", "--request-file", "-"],
+    );
+    let first = spawn(&args, Some(b"{}")).data();
+    let second = spawn(&args, Some(b"{}")).data();
+    assert_eq!(
+        first["items"][0]["sampled_at_ms"],
+        second["items"][0]["sampled_at_ms"]
+    );
+    let archive = viewer_args(root.path(), Some(&id.to_string()), &["viewer", "archive"]);
+    let result = spawn(&archive, None).data();
+    let archived = result["archived_at_ms"].as_i64().unwrap();
+    let old_snapshot = first["snapshot"].as_str().unwrap();
+    let stale = json!({"snapshot":old_snapshot}).to_string();
+    spawn(&args, Some(stale.as_bytes())).fails(EXIT_CONFLICT_OR_STALE, "stale_snapshot");
+    let page = spawn(&args, Some(br#"{"state":"archived"}"#)).data();
+    assert_eq!(page["total_count"], 1);
+    assert_eq!(page["items"][0]["archived_at_ms"], archived);
+    let conn = Connection::open(project_db(root.path(), &id)).unwrap();
+    conn.execute("INSERT INTO tasks(id,title,body,status,priority,version,created_ms,updated_ms) VALUES(1,'new','','todo','P2',1,?1,?1)", [archived]).unwrap();
+    let equal = spawn(&args, Some(b"{}")).data();
+    assert_eq!(equal["items"][0]["archived_at_ms"], archived);
+    conn.execute(
+        "UPDATE tasks SET updated_ms=?1 WHERE id=1",
+        [archived + 100],
+    )
+    .unwrap();
+    drop(conn);
+    let page = spawn(&args, Some(b"{}")).data();
+    assert_eq!(page["items"][0]["stats"]["total"], 1);
+    assert!(page["items"][0]["archived_at_ms"].is_null());
+}
+
+#[test]
+fn project_cache_detects_wal_commits_and_manual_unarchive() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = add_project(root.path(), "wal");
+    let conn = Connection::open(project_db(root.path(), &id)).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    let args = viewer_args(
+        root.path(),
+        None,
+        &["viewer", "projects", "--request-file", "-"],
+    );
+    let first = spawn(&args, Some(b"{}")).data();
+    assert_eq!(first["items"][0]["stats"]["total"], 0);
+    conn.execute("INSERT INTO tasks(id,title,body,status,priority,version,created_ms,updated_ms) VALUES(1,'wal','','todo','P2',1,1,1)", []).unwrap();
+    let next = spawn(&args, Some(b"{}")).data();
+    assert_eq!(next["items"][0]["stats"]["total"], 1);
+    let archive = viewer_args(root.path(), Some(&id.to_string()), &["viewer", "archive"]);
+    spawn(&archive, None).data();
+    let unarchive = viewer_args(
+        root.path(),
+        Some(&id.to_string()),
+        &["viewer", "archive", "--unarchive"],
+    );
+    assert!(spawn(&unarchive, None).data()["archived_at_ms"].is_null());
+    let active = spawn(&args, Some(br#"{"state":"active"}"#)).data();
+    assert_eq!(active["total_count"], 1);
+}
+
+#[test]
+fn viewer_query_index_audit() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = add_project(root.path(), "indices");
+    let conn = Connection::open(project_db(root.path(), &id)).unwrap();
+    let queries = [
+        ("status", "SELECT id FROM tasks WHERE status='todo' ORDER BY id LIMIT 100"),
+        ("priority", "SELECT id FROM tasks ORDER BY priority,id LIMIT 100"),
+        ("labels", "SELECT label FROM task_labels WHERE task_id=1 ORDER BY label"),
+        ("dependency", "SELECT depends_on_id FROM dependencies WHERE task_id=1"),
+        ("reverse dependency", "SELECT task_id FROM dependencies WHERE depends_on_id=1"),
+        ("history", "SELECT event_id FROM events WHERE task_id=1 AND event_id>0 ORDER BY event_id LIMIT 100"),
+        ("viewer priority before", "SELECT id FROM tasks ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END,id LIMIT 100"),
+        ("viewer priority after", "SELECT id FROM tasks ORDER BY priority,id LIMIT 100"),
+        ("viewer updated", "SELECT id FROM tasks ORDER BY updated_ms DESC,id LIMIT 100"),
+    ];
+    for (name, sql) in queries {
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plans = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        println!("{name}: {}", plans.join("; "));
+        if name == "viewer priority after" {
+            assert!(!plans.iter().any(|plan| plan.contains("TEMP B-TREE")));
+        }
+        if !name.starts_with("viewer") {
+            assert!(
+                plans.iter().any(|p| p.contains("INDEX")),
+                "{name}: {plans:?}"
+            );
+        }
+    }
 }
