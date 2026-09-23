@@ -497,7 +497,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         }
         return _ProjectRowTile(
           item: item,
-          selected: selected,
           compact: _compactRows,
           onAction: (action) =>
               unawaited(_runProjectAction(item, index, action)),
@@ -854,14 +853,12 @@ enum _ProjectMenuAction {
 class _ProjectRowTile extends StatelessWidget {
   const _ProjectRowTile({
     required this.item,
-    required this.selected,
     required this.compact,
     required this.onAction,
     required this.canArchive,
   });
 
   final ProjectItem item;
-  final bool selected;
   final bool compact;
   final ValueChanged<_ProjectMenuAction> onAction;
   final bool canArchive;
@@ -882,7 +879,6 @@ class _ProjectRowTile extends StatelessWidget {
     final root = item.roots.isEmpty ? 'No bound root' : item.roots.first;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: selected ? theme.colorScheme.primaryContainer : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,

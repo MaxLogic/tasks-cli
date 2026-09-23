@@ -327,6 +327,30 @@ void main() {
     );
 
     test(
+      'All status selects every status and clearing it restores open tasks',
+      () async {
+        final reader = FakeTaskReader(catalogResponder(0));
+        final controller = buildTaskController(reader);
+        addTearDown(controller.dispose);
+
+        expect(controller.scope, TaskScope.open);
+        expect(controller.statuses, isEmpty);
+        controller.setAllStatuses(true);
+        await pumpEventQueue();
+        expect(controller.scope, TaskScope.all);
+        expect(controller.statuses, containsAll(viewerTaskStatuses));
+        expect(reader.requests.last.statuses, containsAll(viewerTaskStatuses));
+
+        controller.setAllStatuses(false);
+        await pumpEventQueue();
+        expect(controller.scope, TaskScope.open);
+        expect(controller.statuses, isEmpty);
+        expect(reader.requests.last.scope, TaskScope.open);
+        expect(reader.requests.last.statuses, isEmpty);
+      },
+    );
+
+    test(
       'clear filters returns the open default while keeping the sort',
       () async {
         final reader = FakeTaskReader(catalogResponder(0));

@@ -300,6 +300,16 @@ class TaskController extends ChangeNotifier {
     return scopeChanged;
   }
 
+  /// Selects every status across both scopes, or restores the open-task default.
+  void setAllStatuses(bool selected) {
+    _scope = selected ? TaskScope.all : TaskScope.open;
+    _statuses
+      ..clear()
+      ..addAll(selected ? viewerTaskStatuses : const <String>[]);
+    _notify();
+    unawaited(reload());
+  }
+
   void togglePriority(String priority) {
     if (!_priorities.remove(priority)) {
       _priorities.add(priority);

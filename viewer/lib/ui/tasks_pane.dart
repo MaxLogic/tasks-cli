@@ -50,6 +50,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     debugLabel: 'tasks active filters',
   );
   final Map<String, FocusNode> _statusNodes = <String, FocusNode>{
+    'all': FocusNode(debugLabel: 'tasks status all'),
     for (final status in viewerTaskStatuses)
       status: FocusNode(debugLabel: 'tasks status $status'),
   };
@@ -201,6 +202,10 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       scope == TaskScope.open ? _scopeOpenFocus : _scopeAllFocus;
 
   FocusNode _firstStatusFocus(TaskController tasks) {
+    if (tasks.statuses.isEmpty ||
+        tasks.statuses.length == viewerTaskStatuses.length) {
+      return _statusNodes['all']!;
+    }
     for (final status in viewerTaskStatuses) {
       if (tasks.statuses.contains(status)) {
         return _statusNodes[status]!;
@@ -394,9 +399,12 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
 
   Widget _buildHeading(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
-    child: Text(
-      'Tasks in ${widget.model.selectedProjectName}',
-      style: Theme.of(context).textTheme.titleLarge,
+    child: Semantics(
+      header: true,
+      child: Text(
+        'Tasks in ${widget.model.selectedProjectName}',
+        style: Theme.of(context).textTheme.titleLarge,
+      ),
     ),
   );
 
@@ -502,11 +510,18 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
           _buildChecklist(
             context,
             title: 'Status (Alt+T)',
-            values: viewerTaskStatuses,
+            values: const <String>['all', ...viewerTaskStatuses],
             nodes: _statusNodes,
-            labelOf: viewerStatusLabel,
-            isSelected: tasks.statuses.contains,
-            onToggle: _toggleStatus,
+            labelOf: (value) =>
+                value == 'all' ? 'All' : viewerStatusLabel(value),
+            isSelected: (value) => value == 'all'
+                ? tasks.statuses.length == viewerTaskStatuses.length
+                : tasks.statuses.contains(value),
+            onToggle: (value) => value == 'all'
+                ? tasks.setAllStatuses(
+                    tasks.statuses.length != viewerTaskStatuses.length,
+                  )
+                : _toggleStatus(value),
           ),
           _buildChecklist(
             context,
@@ -883,7 +898,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         if (item == null) {
           return const _TaskRowPlaceholder();
         }
-        return _TaskRowTile(item: item, selected: selected);
+        return _TaskRowTile(item: item);
       },
     );
   }
@@ -983,10 +998,9 @@ class _ActiveFilterChip extends StatelessWidget {
 /// One task row: ID, priority, status and title, then labels and the
 /// dependency-waiting indicator. The order matches the accessible row name.
 class _TaskRowTile extends StatelessWidget {
-  const _TaskRowTile({required this.item, required this.selected});
+  const _TaskRowTile({required this.item});
 
   final TaskItem item;
-  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -994,7 +1008,6 @@ class _TaskRowTile extends StatelessWidget {
     final waiting = item.waitingDependencyCount;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: selected ? theme.colorScheme.primaryContainer : null,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
