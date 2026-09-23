@@ -188,6 +188,11 @@ pub enum Command {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ViewerCommand {
+    /// Archive a project, or restore it with --unarchive.
+    Archive {
+        #[arg(long)]
+        unarchive: bool,
+    },
     /// Report the protocol version, operations and editable-field limits without opening a store.
     Info,
     /// Page through registry projects with per-project availability and statistics.

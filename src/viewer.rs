@@ -45,7 +45,7 @@ const STATUS_VALUES: [&str; 6] = [
     "cancelled",
 ];
 const PRIORITY_VALUES: [&str; 4] = ["P0", "P1", "P2", "P3"];
-const OPERATIONS: [&str; 5] = ["info", "projects", "tasks", "show", "update"];
+const OPERATIONS: [&str; 6] = ["info", "projects", "tasks", "show", "update", "archive"];
 const EDITABLE_FIELD_NAMES: [&str; 6] = ["title", "body", "status", "priority", "labels", "deps"];
 
 // ---------------------------------------------------------------------------
@@ -119,6 +119,7 @@ pub struct ProjectItem {
     pub availability: &'static str,
     pub error: Option<ProjectError>,
     pub sampled_at_ms: i64,
+    pub archived_at_ms: Option<i64>,
     pub stats: Option<ProjectStats>,
 }
 
@@ -128,7 +129,7 @@ pub struct ProjectError {
     pub message: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectStats {
     pub total: u64,
     pub open: u64,
@@ -751,16 +752,20 @@ enum ProjectState {
     Complete,
     Empty,
     Unavailable,
+    Active,
+    Archived,
 }
 
 impl ProjectState {
-    const VALUES: [&'static str; 6] = [
+    const VALUES: [&'static str; 8] = [
         "all",
         "has-open",
         "has-blocked",
         "complete",
         "empty",
         "unavailable",
+        "active",
+        "archived",
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -771,6 +776,8 @@ impl ProjectState {
             "complete" => Some(Self::Complete),
             "empty" => Some(Self::Empty),
             "unavailable" => Some(Self::Unavailable),
+            "active" => Some(Self::Active),
+            "archived" => Some(Self::Archived),
             _ => None,
         }
     }
@@ -783,6 +790,8 @@ impl ProjectState {
             Self::Complete => "complete",
             Self::Empty => "empty",
             Self::Unavailable => "unavailable",
+            Self::Active => "active",
+            Self::Archived => "archived",
         }
     }
 }
@@ -881,6 +890,7 @@ struct ProjectRecord {
     availability: Availability,
     error: Option<ProjectError>,
     sampled_at_ms: i64,
+    archived_at_ms: Option<i64>,
     stats: Option<ProjectStats>,
 }
 
@@ -893,6 +903,7 @@ impl From<ProjectRecord> for ProjectItem {
             availability: record.availability.as_str(),
             error: record.error,
             sampled_at_ms: record.sampled_at_ms,
+            archived_at_ms: record.archived_at_ms,
             stats: record.stats,
         }
     }
@@ -983,7 +994,7 @@ fn validate_projects_token(
     Ok(())
 }
 
-/// Enumerate the registry once and sample each project database in turn.
+/// Enumerate the registry once and sample only changed project databases.
 pub fn projects(data_root: &Path, request_file: &Path) -> Result<ViewerProjectsPayload, AppError> {
     let request = parse_request(&read_request_bytes(request_file)?)?;
     let query = project_request(request)?;
@@ -1038,7 +1049,7 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             .or_default()
             .push(binding.root.clone());
     }
-    let sampled_at_ms = now_ms();
+    let cache = open_project_cache(&data_root)?;
     let mut records = Vec::with_capacity(bound.len());
     for (project_id, mut roots) in bound {
         roots.sort_by(|left, right| compare_ascii_text(left, right).then_with(|| left.cmp(right)));
@@ -1049,7 +1060,48 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| project_id.clone());
         let db_path = data_root_project_path(&data_root, &project_id);
-        let (availability, error, stats) = sample_project(&db_path, &project_id);
+        let fingerprint = database_fingerprint(&db_path);
+        let cached: Option<(String, String, i64)> = cache.query_row(
+            "SELECT fingerprint,stats_json,sampled_at_ms FROM project_cache WHERE project_id=?1 AND stats_json IS NOT NULL",
+            [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let reused = cached.and_then(|(stored, json, sampled)| {
+            (stored == fingerprint)
+                .then(|| {
+                    serde_json::from_str::<ProjectStats>(&json)
+                        .ok()
+                        .map(|stats| (stats, sampled))
+                })
+                .flatten()
+        });
+        let (availability, error, stats, sampled_at_ms) = if let Some((stats, sampled)) = reused {
+            (Availability::Available, None, Some(stats), sampled)
+        } else {
+            let sampled = now_ms();
+            let (availability, error, stats) = sample_project(&db_path, &project_id);
+            // A concurrent writer makes this sample ineligible for reuse.
+            let stable = fingerprint == database_fingerprint(&db_path);
+            let json = if stable {
+                stats
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|e| AppError::Database(e.to_string()))?
+            } else {
+                None
+            };
+            cache.execute("INSERT INTO project_cache(project_id,fingerprint,stats_json,sampled_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint,stats_json=excluded.stats_json,sampled_at_ms=excluded.sampled_at_ms",
+                rusqlite::params![project_id, fingerprint, json, sampled])?;
+            (availability, error, stats, sampled)
+        };
+        if let Some(last_write) = stats.as_ref().and_then(|stats| stats.last_write_ms) {
+            cache.execute("UPDATE project_cache SET archived_at_ms=NULL WHERE project_id=?1 AND archived_at_ms < ?2", rusqlite::params![project_id, last_write])?;
+        }
+        let archived_at_ms = cache.query_row(
+            "SELECT archived_at_ms FROM project_cache WHERE project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )?;
         records.push(ProjectRecord {
             project_id,
             name,
@@ -1057,6 +1109,7 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             availability,
             error,
             sampled_at_ms,
+            archived_at_ms,
             stats,
         });
     }
@@ -1178,6 +1231,8 @@ fn matches_project_query(record: &ProjectRecord, query: &ProjectQuery) -> bool {
     let stats = record.stats.as_ref();
     match query.state {
         ProjectState::All => true,
+        ProjectState::Active => record.archived_at_ms.is_none(),
+        ProjectState::Archived => record.archived_at_ms.is_some(),
         ProjectState::Unavailable => !available,
         ProjectState::HasOpen => available && stats.is_some_and(|stats| stats.open > 0),
         ProjectState::HasBlocked => available && stats.is_some_and(|stats| stats.blocked > 0),
@@ -1288,6 +1343,7 @@ fn catalog_hash(records: &[ProjectRecord]) -> String {
             "name": record.name,
             "roots": record.roots,
             "availability": record.availability.as_str(),
+            "archived_at_ms": record.archived_at_ms,
             "error_code": record.error.as_ref().map(|error| error.code.as_str()),
             "stats": record.stats.as_ref().map(|stats| serde_json::json!({
                 "total": stats.total,
@@ -1678,9 +1734,9 @@ fn task_order_by(sort: TaskSort, direction: Direction) -> String {
     };
     match sort {
         TaskSort::Id => format!("t.id {way}"),
-        TaskSort::Priority => format!(
-            "CASE t.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END {way}, t.id ASC"
-        ),
+        // Canonical P0..P3 values have the requested lexical order, allowing
+        // SQLite to use the existing priority index for ascending pages.
+        TaskSort::Priority => format!("t.priority {way}, t.id ASC"),
         TaskSort::Status => format!(
             "CASE t.status WHEN 'draft' THEN 0 WHEN 'todo' THEN 1 WHEN 'in-progress' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 WHEN 'cancelled' THEN 5 ELSE 6 END {way}, t.id ASC"
         ),
@@ -2030,5 +2086,72 @@ fn update_request(value: Value) -> Result<UpdateRequest, AppError> {
         id,
         expect_version,
         changes,
+    })
+}
+
+fn open_project_cache(data_root: &Path) -> Result<Connection, AppError> {
+    let path = data_root.join("viewer-cache.sqlite3");
+    validate_storage_path(&path)?;
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS project_cache (
+        project_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL DEFAULT '',
+        stats_json TEXT, sampled_at_ms INTEGER NOT NULL DEFAULT 0, archived_at_ms INTEGER
+    );",
+    )?;
+    Ok(conn)
+}
+
+// Include the WAL and rollback journal: uncheckpointed commits need not change
+// the main database. File identity detects replacements with equal timestamps.
+fn database_fingerprint(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for suffix in ["", "-wal", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let file = std::path::PathBuf::from(name);
+        parts.push(match std::fs::metadata(&file) {
+            Ok(meta) => format!(
+                "{}:{:?}:{}",
+                file_identity(&file),
+                meta.modified(),
+                meta.len()
+            ),
+            Err(error) => format!("{:?}", error.kind()),
+        });
+    }
+    format!("{CURRENT_SCHEMA_VERSION}:{}", parts.join("|"))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ViewerArchivePayload {
+    pub protocol_version: u8,
+    pub archived_at_ms: Option<i64>,
+}
+
+/// Archive is viewer metadata; it never writes the project's task database.
+pub fn archive_project(
+    data_root: &Path,
+    project_id: &str,
+    archived: bool,
+) -> Result<ViewerArchivePayload, AppError> {
+    let data_root = validate_storage_root(data_root)?;
+    let registry = registry::list_bindings(&data_root)?;
+    if !registry
+        .bindings
+        .iter()
+        .any(|binding| binding.project_id == project_id)
+    {
+        return Err(AppError::Usage(format!(
+            "project {project_id} has no registry binding"
+        )));
+    }
+    let cache = open_project_cache(&data_root)?;
+    let archived_at_ms = archived.then(now_ms);
+    cache.execute("INSERT INTO project_cache(project_id,archived_at_ms) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET archived_at_ms=excluded.archived_at_ms", rusqlite::params![project_id, archived_at_ms])?;
+    Ok(ViewerArchivePayload {
+        protocol_version: PROTOCOL_VERSION,
+        archived_at_ms,
     })
 }

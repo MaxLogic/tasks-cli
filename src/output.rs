@@ -3,8 +3,8 @@ use crate::model::{
     HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, TaskDetail, TaskSummary,
 };
 use crate::viewer::{
-    ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload, ViewerTasksPayload,
-    ViewerUpdatePayload,
+    ViewerArchivePayload, ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload,
+    ViewerTasksPayload, ViewerUpdatePayload,
 };
 use serde::Serialize;
 
@@ -109,6 +109,7 @@ pub enum CommandPayload {
         schema_version: i32,
         sqlite_version: String,
     },
+    ViewerArchive(ViewerArchivePayload),
     ViewerInfo(ViewerInfoPayload),
     ViewerProjects(ViewerProjectsPayload),
     ViewerTasks(ViewerTasksPayload),
@@ -451,7 +452,8 @@ impl Envelope {
             ),
             // The viewer protocol is JSON-only; main.rs rejects text mode before
             // dispatch, so this arm exists to keep the renderer exhaustive.
-            CommandPayload::ViewerInfo(_)
+            CommandPayload::ViewerArchive(_)
+            | CommandPayload::ViewerInfo(_)
             | CommandPayload::ViewerProjects(_)
             | CommandPayload::ViewerTasks(_)
             | CommandPayload::ViewerShow(_)
