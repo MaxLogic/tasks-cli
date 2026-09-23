@@ -1,6 +1,6 @@
 # Tasks Viewer verification report
 
-Candidate: **`719ba66`** - `viewer: keep the caret when a guard dialog returns focus`,
+Candidate: **`f8ba86a`** - `test(viewer): audit rendered screen-reader semantics`,
 branch `main`, tree clean at every measurement recorded here. Nothing was pushed, no live backlog was
 migrated or opened, no installed executable was replaced, and no real Startup entry, task store or
 clipboard was touched. Every fixture was synthetic, disposable and rooted outside the repository.
@@ -16,8 +16,8 @@ claimed as passing.
 
 | Area | Result |
 | --- | --- |
-| `viewer/tool/verify-windows.ps1` headless gate run | **passed, 11/11 gates** at `719ba66`, `source_dirty: false` |
-| Flutter gates | format **passed**, analyze **passed**, full suite **468 passed / 1 documented skip**, test-hooks suite **3 passed**, headless end-to-end **5 passed** |
+| `viewer/tool/verify-windows.ps1` headless gate run | **passed, 11/11 gates** at `f8ba86a`, `source_dirty: false` |
+| Flutter gates | format **passed**, analyze **passed**, full suite **475 passed / 1 documented skip**, test-hooks suite **3 passed**, headless end-to-end **5 passed** |
 | Rust gates, Windows x64 | fmt, clippy `--all-targets`, test (**214 passed**, 35 targets), release build - all exit 0 |
 | Rust gates, native Ubuntu/WSL x64 | the same four commands in `target/linux` (**218 passed**, 35 targets) - all exit 0 |
 | Real two-binary WSL delegation smoke | **passed** - delegated `viewer projects/tasks/update` exit 0, native Linux refuses the Windows root |
@@ -31,10 +31,10 @@ All paths are relative to `F:\projects\MaxLogic\tasks-cli`.
 
 | Purpose | Evidence root |
 | --- | --- |
-| Final headless gate run (G00-G10) | `viewer/target/evidence/viewer/2026-09-22-headless-verify-6-caretfix/` |
-| Previous headless gate run (superseded by the caret fix) | `viewer/target/evidence/viewer/2026-09-22-final-headless-verify/` |
-| Windows Rust gates | `target/evidence/viewer/2026-09-22-rust-gates-windows-2/` |
-| Linux Rust gates (final) | `viewer/target/evidence/viewer/2026-09-22-rust-gates-linux-3/` |
+| Final headless gate run (G00-G10) | `viewer/target/evidence/viewer/2026-09-23-headless-verify-8-semantic-audit/` |
+| Previous headless gate run | `viewer/target/evidence/viewer/2026-09-22-headless-verify-6-caretfix/` |
+| Windows Rust gates | `target/evidence/init-default-20260922/windows.log` |
+| Linux Rust gates (final) | `target/evidence/init-default-20260922/linux.log` |
 | Linux Rust gates, delegation-switch first failure | `viewer/target/evidence/viewer/2026-09-22-rust-gates-linux/` (`FINDING.md`) |
 | Two-binary WSL delegation smoke | `viewer/target/evidence/viewer/2026-09-22-wsl-delegation/` |
 | Delegated request-file first failure | `viewer/target/evidence/viewer/2026-09-22-wsl-delegation-request-file-failure/` (`FINDING.md`) |
@@ -69,20 +69,20 @@ monitor at system DPI 96 (100 % scaling), Polish keyboard layout `0415`.
 
 ### 3.1 Final headless gate run
 
-`pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -EvidenceRoot viewer/target/evidence/viewer/2026-09-22-headless-verify-6-caretfix`
+`pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -EvidenceRoot viewer/target/evidence/viewer/2026-09-23-headless-verify-8-semantic-audit`
 
-Generated 2026-09-22T11:08:25Z at `719ba66` with `source_dirty: false`.
+Generated 2026-09-23T08:34:16Z at `f8ba86a` with `source_dirty: false`.
 
 | Id | Gate | Status | Detail |
 | --- | --- | --- | --- |
 | G00 | toolchains | passed | Flutter/Dart/Rust/machine recorded |
-| G01 | release CLI build | passed | first build of `tasks.exe`, sha256 `72e530fd...5d00` |
+| G01 | release CLI build | passed | first build of `tasks.exe`, sha256 `6b54bd18...f500` |
 | G02 | throwaway fixture seed | passed | alpha 28 tasks (27 open), beta 4 tasks |
 | G03 | dart format | passed | `lib test integration_test` unchanged |
 | G04 | flutter analyze | passed | `--fatal-infos` clean |
-| G05 | flutter test (full suite) | passed | 468 passed, 1 skipped (the documented acknowledgement-loss case) |
+| G05 | flutter test (full suite) | passed | 475 passed, 1 skipped (the documented acknowledgement-loss case) |
 | G06 | test-hooks CLI closes the skip | passed | 3 passed, 0 skipped |
-| G07 | shipped CLI restored | passed | rebuilt plain release CLI sha256 `9fa8133c...e9a0` |
+| G07 | shipped CLI restored | passed | rebuilt plain release CLI sha256 `cf57925c...5e31` |
 | G08 | viewer end-to-end (headless, real store) | passed | 5 passed, 0 skipped, own freshly seeded store |
 | G09 | Windows release build | passed | `tasks_viewer.exe` sha256 `b56b1608...190c` |
 | G10 | portable release bundle | passed | 40 files, 20 clips, 39 hash entries re-verified, launch test passed |
@@ -98,14 +98,15 @@ on each.
 
 | Platform | Tests | Targets | Release artifact |
 | --- | ---: | ---: | --- |
-| Windows x64 | 214 passed, 0 failed, 0 ignored | 35 | `target/release/tasks.exe`, 6 022 144 bytes, sha256 `f0f92831f018ada161979df85a768dc1c2892b569585d2272ae528c9a0da04e9` |
-| Ubuntu/WSL x64 | 218 passed, 0 failed, 0 ignored | 35 | `target/linux/release/tasks`, 7 791 856 bytes, sha256 `5c170b0bfa7a3be7046457fa8ffeb2945119de2382bbdc9bc1935f62cea91446` |
+| Windows x64 | 214 passed, 0 failed, 0 ignored | 35 | deployed `F:\CliTools\tasks.exe`, 6 019 584 bytes, sha256 `92793db00a29e723f26d221a6a7e6e29a282c10542b71395b027f81c94a3b3d2` |
+| Ubuntu/WSL x64 | 218 passed, 0 failed, 0 ignored | 35 | deployed `/home/pawel/.local/bin/tasks`, 7 789 488 bytes, sha256 `607d1841e23ba93c2713466606dfcf1973b77a468d4e80e36f195976dcd2848c` |
 
 Linux ran with `CARGO_TARGET_DIR=target/linux` and with `TASKS_WINDOWS_EXE` cleared so the suite
 exercises the native Linux CLI; the switch was set to `/mnt/f/CliTools/tasks.exe` in the login shell
 before the run cleared it, which is recorded in `00-host.txt` of that run.
-Both gate sets ran at `a15a809`; no Rust source changed between `a15a809` and `719ba66` (the caret
-fix is Dart UI plus its test), so this evidence still covers the current candidate.
+Both gate sets ran at `8b1dabd`, the identity-in-init candidate, with the Windows run recording 214
+tests and the native Ubuntu/WSL run recording 218. The current `f8ba86a` changes only viewer Dart UI,
+tests and documentation after those Rust gates, so the Rust evidence remains applicable.
 
 ### 3.3 Real two-binary WSL delegation
 
@@ -145,6 +146,7 @@ explicit rerun. No passing run reuses a failed run's counts.
 | 9 | `2026-09-22-measure-smoke` | the first smoke attempt aborted on a harness bug (`limit` must be between 1 and 200; got 1000); a second, deliberately short 2-iteration smoke run is retained with two rows marked failed, because a p95 over n=2 is not a percentile | fixed; the 30-iteration acceptance runs are the ones this report relies on |
 | 10 | `2026-09-22-measure-acceptance` | 30-iteration run at `380093c` with M06 p95 **10115.4 ms** (max 11 243.1 ms) against a 10 000 ms target | rerun `-clean` at `b56f883` passed at 9928.2 ms p95; both runs are retained - see section 6 |
 | 11 | `2026-09-22-headless-verify-6-caretfix` | clean-tree rerun at `719ba66` after the guard-Cancel caret fix; two new Windows-variant widget tests landed with it | passed 11/11 and became the run this report quotes |
+| 12 | `2026-09-23-headless-verify-8-semantic-audit` | clean-tree rerun at `f8ba86a`; the rendered semantics audit and task-scope labels landed after the previous headless candidate | passed 11/11; this is the current run quoted above |
 
 ## 5. Required test matrix
 
@@ -159,7 +161,7 @@ live or human gate that this run cannot perform by direction.
 | V04 | passed | G05 editor/validation/rollback suites, G06 acknowledgement loss against the real CLI, G08 save plus second-process read-back; the live NVDA walkthrough C steps 1-3 add real-clipboard-free ground truth for one version-checked commit and one conflict refusal |
 | V05 | passed | G05 draft and navigation suites: Save/Discard/Cancel per leaving action, restart restore, corrupt settings, write failures, store identity |
 | V06 | passed | G05 clipboard suites over the fake clipboard (known/unknown/repeated IDs, collisions, already-enriched text, no text, Unicode and newlines, limits, contention, preview never writes); walkthrough D steps D0-D2r were run live before the headless-only direction using synthetic text only |
-| V07 | passed | G05 widget, semantics and accessibility suites: control names/roles/state, focus order and modal focus return, disabled reasons, loading announcements, text scaling and contrast themes |
+| V07 | passed | G05 widget, semantics and accessibility suites: control names/roles/state, focus order and modal focus return, disabled reasons, loading announcements, text scaling, contrast themes and the rendered-tree audit |
 | V08 | unavailable | G08 proves discover/filter/sort/read/edit/refresh headlessly over a real store, but the packaged-candidate window flows and any UI Automation step need a live desktop, which this directive forbids |
 | V09 | passed with 3 unavailable rows | `viewer/tool/measure.ps1` acceptance run: fixtures, percentiles and raw samples recorded; M09-M11 (frame time, peak working set, NVDA on/off) unavailable - section 6 |
 | V10 | unavailable | walkthroughs B and C ran live under NVDA on 2026-09-22 with speech logs and CLI ground truth, and walkthrough D reached D0-D2r live; walkthrough A never ran beyond the blocked attempt, walkthroughs E and F have not run. Walkthrough C's step-4a caret defect is fixed in `719ba66` with a RED/GREEN Windows-variant widget test, but that step still needs a live re-run. This row needs every walkthrough, so it stays unavailable - section 7 |
@@ -175,10 +177,9 @@ details and fixture digests: `viewer/target/evidence/viewer/2026-09-22-measure-a
 (`03-measurements.json`, `measure-summary.json`, `measure-summary.md`).
 
 The two `source_commit` values differ: the accepted `-clean` run measured the `b56f883` build, the
-earlier failing run a dirty `380093c` tree. The final candidate `719ba66` adds the WSL delegation
-path translation in `src/interop.rs`, the verification report itself and the Dart caret fix; none of
-those touches the native Windows CLI rows measured here, but these numbers are not a re-measurement
-of `719ba66`.
+earlier failing run a dirty `380093c` tree. The current candidate `f8ba86a` adds the rendered
+semantics audit, task-scope labels and this report after those measurements; none of those touches
+the native Windows CLI rows measured here, but these numbers are not a re-measurement of `f8ba86a`.
 
 | Id | Row | Target p95 | p50 | p95 | max | Status |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -249,7 +250,7 @@ That is the V13 gap, and it is why V13 stays unavailable.
 Verified: the launch/configuration surface in `viewer/README.md`, startup registration and
 single-instance classification in the G05 suite, and the packaged release's no-window
 `--startup` opt-out and argument handling in the G10 launch test
-(`viewer/target/evidence/viewer/2026-09-22-headless-verify-6-caretfix/11-package.txt`). The launch test
+(`viewer/target/evidence/viewer/2026-09-23-headless-verify-8-semantic-audit/11-package.txt`). The launch test
 runs from a temporary root whose path contains spaces and non-ASCII characters.
 
 Not verified: a real sign-in/sign-out in a disposable Windows account, the "Start with Windows"
@@ -320,25 +321,27 @@ the current candidate, so these rows are the complete distance between it and re
 
 - The verification is single-machine: Windows 11 Home x64 plus Ubuntu 22.04 in WSL2, no other Linux
   distribution, no bare-metal Linux and no ARM target.
-- `tasks.exe` hashes are **not reproducible across rebuilds of identical source**. In the final run
-  itself, the first build hashed `72e530fd...` and the G07 rebuild of the same source hashed
-  `9fa8133c...`; other builds recorded in this report hashed `f0f92831...`, `7617ea6a...`,
+- `tasks.exe` hashes are **not reproducible across rebuilds of identical source**. In the current run
+  itself, the first build hashed `6b54bd18...` and the G07 rebuild of the same source hashed
+  `cf57925c...`; other builds recorded in this report hashed `f0f92831...`, `7617ea6a...`,
   `93abd32a...`, `42514649...`, `1d11efde...` and `7132f27d...`. Treat a hash as identifying one
   build, not one source revision, and re-hash rather than comparing against an older number. The
   viewer stub `tasks_viewer.exe` did stay stable at `b56b1608...` across every build of this
   milestone; the Dart UI it loads lives in `data/app.so`, whose current sealed hash is
-  `f63c75a9...`.
+  `06dbac3b...`.
 - V08, V10, V12 and V13 need a live desktop, a disposable Windows account or a human listener; until
   they run, release acceptance is incomplete no matter how green the automated gates are.
 - M09-M11 (frame time under scroll, peak working set, NVDA on/off) need a windowed profile session;
   the viewer's memory and raster behaviour is therefore unmeasured.
+- The Windows DPI-changing test was intentionally skipped at the user's request. No verification run
+  changed the system display scale or DPI.
 - Performance numbers describe this host and these fixtures, not a promise for arbitrary backlogs.
 - Clipboard coverage is the fake clipboard in the automated suites plus synthetic text in the earlier
   live walkthroughs; the automated clipboard tests never touched the real clipboard.
-- The packaged bundle is built from `719ba66`, the commit every Rust, Flutter and packaging gate in
-  this report ran against, so `target/viewer-release/bundle-metadata.json` records
-  `source_commit 719ba66`, `source_dirty false`, cli `9fa8133c...` and viewer `b56b1608...`; the
-  section 10 timings came from the earlier `b56f883` build.
+- The packaged bundle is built from `f8ba86a`, the current viewer candidate. Its
+  `target/viewer-release/bundle-metadata.json` records `source_commit f8ba86a`, `source_dirty false`,
+  cli `cf57925c...` and viewer `b56b1608...`; the section 10 timings came from the earlier `b56f883`
+  build.
 
 ## 9. Reproducing this run
 
