@@ -465,17 +465,31 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             },
             child: Row(
               children: <Widget>[
-                Radio<TaskScope>(
-                  value: TaskScope.open,
-                  focusNode: _scopeOpenFocus,
+                MergeSemantics(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Radio<TaskScope>(
+                        value: TaskScope.open,
+                        focusNode: _scopeOpenFocus,
+                      ),
+                      const Text('Open tasks'),
+                    ],
+                  ),
                 ),
-                const Text('Open tasks'),
                 const SizedBox(width: 12),
-                Radio<TaskScope>(
-                  value: TaskScope.all,
-                  focusNode: _scopeAllFocus,
+                MergeSemantics(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Radio<TaskScope>(
+                        value: TaskScope.all,
+                        focusNode: _scopeAllFocus,
+                      ),
+                      const Text('All tasks'),
+                    ],
+                  ),
                 ),
-                const Text('All tasks'),
               ],
             ),
           ),

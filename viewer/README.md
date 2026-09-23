@@ -190,6 +190,14 @@ flutter test --reporter expanded
 flutter build windows --release
 ```
 
+`test/accessibility/rendered_semantics_audit_test.dart` combines Flutter's
+`labeledTapTargetGuideline` with a rendered-tree audit for unnamed or
+inoperable controls. It covers the default populated workspace, first-load,
+expanded-dropdown, disabled-editor, Settings, Keyboard Help and first-load
+error states. These headless checks verify the semantics Flutter produces.
+They do not replace the Windows and NVDA walkthroughs required by V10 for
+actual speech, focus order and native bridge behavior.
+
 From the repository root:
 
 ```text
