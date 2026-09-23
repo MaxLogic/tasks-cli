@@ -31,7 +31,7 @@ void main() {
     expect(find.text('Settings (Ctrl+,)'), findsOneWidget);
     expect(find.text('Hotkey help (F10)'), findsOneWidget);
     expect(find.textContaining('test mode'), findsOneWidget);
-    expect(find.textContaining(r'C:\viewer-test\default\data'), findsOneWidget);
+    expect(find.textContaining('Configuration ready'), findsOneWidget);
   });
 
   testWidgets('the in-app text size scales the window', (

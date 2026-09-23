@@ -17,27 +17,39 @@ import '../helpers/semantics_audit.dart';
 import '../support/viewer_test_support.dart';
 
 void main() {
-  testWidgets('the audit reports unnamed and inoperable controls', (
+  testWidgets('the audit reports unnamed and inoperable controls and routes', (
     WidgetTester tester,
   ) async {
     final semantics = tester.ensureSemantics();
     try {
       await tester.pumpWidget(
         MaterialApp(
-          home: Column(
-            children: <Widget>[
-              Semantics(
-                button: true,
-                enabled: true,
-                label: 'Named but broken',
-                child: const SizedBox(width: 48, height: 48),
+          home: Scaffold(
+            body: Semantics(
+              label: 'Audit fixture',
+              namesRoute: true,
+              child: Column(
+                children: <Widget>[
+                  Semantics(
+                    button: true,
+                    enabled: true,
+                    label: 'Named but broken',
+                    child: const SizedBox(width: 48, height: 48),
+                  ),
+                  Semantics(
+                    button: true,
+                    onTap: () {},
+                    child: const SizedBox(width: 48, height: 48),
+                  ),
+                  const TextField(),
+                  Semantics(
+                    scopesRoute: true,
+                    explicitChildNodes: true,
+                    child: const Text('Dialog content without a route name'),
+                  ),
+                ],
               ),
-              Semantics(
-                button: true,
-                onTap: () {},
-                child: const SizedBox(width: 48, height: 48),
-              ),
-            ],
+            ),
           ),
         ),
       );
@@ -50,6 +62,8 @@ void main() {
         problems,
         contains('interactive control has no accessible name or tooltip'),
       );
+      expect(problems, contains('text field has no accessible name'));
+      expect(problems, contains('route scope has no accessible name'));
     } finally {
       semantics.dispose();
     }
@@ -170,6 +184,7 @@ void main() {
       await pressControl(tester, LogicalKeyboardKey.comma);
       await tester.pumpAndSettle();
       expect(find.text('Settings'), findsOneWidget);
+      expect(renderedHasNamedRoute(tester, 'Settings'), isTrue);
       await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
       expectAccessibleSemantics(tester);
 
@@ -178,6 +193,7 @@ void main() {
       await pressKey(tester, LogicalKeyboardKey.f10);
       await tester.pumpAndSettle();
       expect(find.text('Keyboard help'), findsOneWidget);
+      expect(renderedHasNamedRoute(tester, 'Keyboard help'), isTrue);
       await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
       expectAccessibleSemantics(tester);
     } finally {
@@ -205,5 +221,17 @@ void main() {
     } finally {
       semantics.dispose();
     }
+  });
+
+  testWidgets('empty collections do not offer invalid row navigation', (
+    WidgetTester tester,
+  ) async {
+    await pumpRealViewer(
+      tester,
+      reads: fakeWorkspaceReads(projects: const <ProjectItem>[]),
+    );
+
+    expect(find.text('Go to row'), findsNothing);
+    expect(find.text('1 to 0'), findsNothing);
   });
 }

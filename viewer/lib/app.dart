@@ -124,13 +124,18 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
 
   /// Applies one saved draft: live preferences, a store change, then disk.
   void _applySettings(ViewerSettingsDraft draft) {
-    final storeChanged = draft.dataRoot != _environment.dataRoot;
+    final connectionChanged =
+        draft.dataRoot != _environment.dataRoot ||
+        draft.cliPath != _environment.tasksExe;
     setState(() {
       _settings = draft;
-      if (storeChanged) {
-        // The session keeps the launch arguments; only the saved data root
-        // moves, and every cached row belongs to the previous store.
-        _environment = _environment.withDataRoot(draft.dataRoot);
+      if (connectionChanged) {
+        // Every cached row and successful protocol probe belongs to the
+        // previous CLI/store pair.
+        _environment = _environment.withPaths(
+          dataRoot: draft.dataRoot,
+          tasksExe: draft.cliPath,
+        );
         final build = widget.readersFor;
         if (build != null) {
           _readers = build(_environment);
@@ -182,9 +187,12 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
       );
     }
     return ViewerWorkspaceHost(
-      // A new data root rebuilds the workspace, so selection and cached rows
-      // never describe the previous store.
-      key: ValueKey<String>(_environment.dataRoot ?? ''),
+      // A new CLI/store pair rebuilds the workspace, so selection, protocol
+      // state and cached rows never describe the previous connection.
+      key: ValueKey<(String?, String?)>((
+        _environment.dataRoot,
+        _environment.tasksExe,
+      )),
       environment: _environment,
       readers: readers,
       announcements: _announcements,

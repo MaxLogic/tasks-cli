@@ -33,6 +33,7 @@ class ViewerEnvironment {
 
   bool get testMode => launchArgs.testMode;
   bool get startupLaunch => launchArgs.startup;
+  bool get needsSetup => dataRoot == null || tasksExe == null;
 
   static const String defaultSettingsFolderName = 'MaxLogic/tasks-viewer';
 
@@ -47,6 +48,22 @@ class ViewerEnvironment {
     return '$localAppData${Platform.pathSeparator}MaxLogic'
         '${Platform.pathSeparator}tasks-viewer';
   }
+
+  /// Standard task store created by the CLI migration.
+  static String defaultDataRoot() {
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    if (localAppData == null || localAppData.isEmpty) {
+      return '${Directory.systemTemp.path}${Platform.pathSeparator}'
+          'MaxLogic${Platform.pathSeparator}tasks-cli';
+    }
+    return '$localAppData${Platform.pathSeparator}MaxLogic'
+        '${Platform.pathSeparator}tasks-cli';
+  }
+
+  /// Matching CLI packaged beside the running viewer executable.
+  static String bundledTasksExecutable() =>
+      '${File(Platform.resolvedExecutable).parent.path}'
+      '${Platform.pathSeparator}${Platform.isWindows ? 'tasks.exe' : 'tasks'}';
 
   factory ViewerEnvironment.fromLaunchArgs(ViewerLaunchArgs args) {
     return ViewerEnvironment(
@@ -69,11 +86,43 @@ class ViewerEnvironment {
         tasksExe: tasksExe ?? draft.cliPath,
       );
 
-  /// Same launch pointed at [newDataRoot], used when Settings changes store.
-  ViewerEnvironment withDataRoot(String? newDataRoot) => ViewerEnvironment(
-    launchArgs: launchArgs,
-    settingsRoot: settingsRoot,
-    dataRoot: newDataRoot,
-    tasksExe: tasksExe,
-  );
+  /// Fills a plain launch from safe, read-only conventional locations.
+  ///
+  /// Discovery never creates a store. The standard data root is accepted only
+  /// when its registry exists, and the bundled CLI only when the file exists.
+  /// Arguments and saved settings have already won before this method runs.
+  ViewerEnvironment withDiscoveredDefaults({
+    String? standardDataRoot,
+    String? bundledTasksExe,
+    bool Function(String path)? fileExists,
+  }) {
+    if (testMode) {
+      return this;
+    }
+    final exists = fileExists ?? (path) => File(path).existsSync();
+    final candidateRoot = standardDataRoot ?? defaultDataRoot();
+    final candidateCli = bundledTasksExe ?? bundledTasksExecutable();
+    final separator =
+        candidateRoot.endsWith(r'\') || candidateRoot.endsWith('/')
+        ? ''
+        : candidateRoot.contains(r'\')
+        ? r'\'
+        : Platform.pathSeparator;
+    final registryPath = '$candidateRoot${separator}registry.json';
+    return ViewerEnvironment(
+      launchArgs: launchArgs,
+      settingsRoot: settingsRoot,
+      dataRoot: dataRoot ?? (exists(registryPath) ? candidateRoot : null),
+      tasksExe: tasksExe ?? (exists(candidateCli) ? candidateCli : null),
+    );
+  }
+
+  /// Same launch pointed at the paths saved from Settings.
+  ViewerEnvironment withPaths({String? dataRoot, String? tasksExe}) =>
+      ViewerEnvironment(
+        launchArgs: launchArgs,
+        settingsRoot: settingsRoot,
+        dataRoot: dataRoot,
+        tasksExe: tasksExe,
+      );
 }

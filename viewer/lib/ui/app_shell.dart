@@ -364,6 +364,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   int _modalDepth = 0;
   ViewerLayoutMode _layoutMode = ViewerLayoutMode.threePane;
   bool _detailsRequested = false;
+  bool _initialSetupOpened = false;
 
   /// One key per pane, so a layout change *moves* a pane instead of rebuilding
   /// it and losing its selection, filters and scroll position (design.md
@@ -388,7 +389,13 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     // this the first Tab would be the only way into the window and F1..F3 would
     // look dead to a screen-reader user.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
+      if (!mounted) {
+        return;
+      }
+      if (widget.environment.needsSetup && !_initialSetupOpened) {
+        _initialSetupOpened = true;
+        unawaited(_openSettings(firstSetup: true));
+      } else {
         _focusRegion(ViewerRegion.projects);
       }
     });
@@ -839,7 +846,9 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   }
 
   @override
-  Future<void> openSettings() async {
+  Future<void> openSettings() => _openSettings(firstSetup: false);
+
+  Future<void> _openSettings({required bool firstSetup}) async {
     final draft = await showModal<ViewerSettingsDraft>(
       CommandScope.settings,
       (context) => SettingsDialog(
@@ -847,6 +856,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
         announcements: widget.announcements,
         startup: widget.startup,
         initial: _settings,
+        firstSetup: firstSetup,
       ),
     );
     if (draft == null) {
@@ -926,12 +936,14 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   // ------------------------------------------------------------------- build
 
   String get _environmentSummary {
-    final parts = <String>[
-      if (widget.environment.testMode) 'test mode',
-      'data root: ${widget.environment.dataRoot ?? 'not set'}',
-      'CLI: ${widget.environment.tasksExe ?? 'not resolved'}',
+    final missing = <String>[
+      if (widget.environment.dataRoot == null) 'task data root',
+      if (widget.environment.tasksExe == null) 'Tasks CLI',
     ];
-    return parts.join('  |  ');
+    final status = missing.isEmpty
+        ? 'Configuration ready'
+        : 'Setup required: ${missing.join(' and ')}';
+    return widget.environment.testMode ? 'test mode  |  $status' : status;
   }
 
   @override
@@ -952,27 +964,31 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
               _scheduleFocusRepair();
             }
             final workspace = widget.workspaceBuilder(context, this);
-            return Scaffold(
-              body: SafeArea(
-                child: LayoutBuilder(
-                  builder: (context, body) {
-                    final budget = viewerShellBudgetFor(body.maxHeight);
-                    return Column(
-                      children: <Widget>[
-                        ViewerPaneRegion(
-                          maxHeight: budget.toolbar,
-                          child: _buildToolbar(context),
-                        ),
-                        const Divider(height: 1),
-                        Expanded(child: _buildPanes(workspace, mode, budget)),
-                        const Divider(height: 1),
-                        ViewerPaneRegion(
-                          maxHeight: budget.status,
-                          child: _buildStatusRegion(),
-                        ),
-                      ],
-                    );
-                  },
+            return Semantics(
+              label: 'Tasks Viewer',
+              namesRoute: true,
+              child: Scaffold(
+                body: SafeArea(
+                  child: LayoutBuilder(
+                    builder: (context, body) {
+                      final budget = viewerShellBudgetFor(body.maxHeight);
+                      return Column(
+                        children: <Widget>[
+                          ViewerPaneRegion(
+                            maxHeight: budget.toolbar,
+                            child: _buildToolbar(context),
+                          ),
+                          const Divider(height: 1),
+                          Expanded(child: _buildPanes(workspace, mode, budget)),
+                          const Divider(height: 1),
+                          ViewerPaneRegion(
+                            maxHeight: budget.status,
+                            child: _buildStatusRegion(),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
               ),
             );

@@ -941,8 +941,9 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       id: 'settings.browseCli',
       scope: CommandScope.settings,
       group: HelpGroup.dialogs,
-      label: 'Browse CLI',
-      description: 'Browse for the tasks executable.',
+      label: 'Use packaged CLI',
+      description:
+          'Fill the CLI path with the tasks executable beside the viewer.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyB)],
     ),
     CommandSpec(
@@ -957,8 +958,8 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       id: 'settings.browseRoot',
       scope: CommandScope.settings,
       group: HelpGroup.dialogs,
-      label: 'Browse root',
-      description: 'Browse for the task store root.',
+      label: 'Use standard task store',
+      description: 'Fill the data root with the standard local task store.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyO)],
     ),
     CommandSpec(

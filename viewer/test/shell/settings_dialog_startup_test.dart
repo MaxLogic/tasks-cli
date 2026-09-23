@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:tasks_viewer/controllers/announcement_controller.dart';
+import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/platform/startup_registration.dart';
 import 'package:tasks_viewer/platform/viewer_startup.dart';
@@ -90,6 +91,7 @@ void main() {
     WidgetTester tester, {
     ViewerStartupController? startup,
     ViewerSettingsDraft settings = const ViewerSettingsDraft(),
+    SettingsConnectionTester? connectionTester,
   }) async {
     tester.view.physicalSize = const Size(1600, 1000);
     tester.view.devicePixelRatio = 1;
@@ -106,6 +108,7 @@ void main() {
           announcements: announcements,
           initial: settings,
           startup: startup,
+          connectionTester: connectionTester,
         ),
       ),
     );
@@ -218,6 +221,45 @@ void main() {
     expect(find.text('Start with Windows (Alt+W)'), findsOneWidget);
     expect(
       find.textContaining('Applied when Settings is saved'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Test connection runs the protocol probe and reports success', (
+    WidgetTester tester,
+  ) async {
+    String? testedPath;
+    await pumpSettings(
+      tester,
+      connectionTester: (path) async {
+        testedPath = path;
+        return const ViewerInfo(
+          protocolVersion: 1,
+          operations: <String>[],
+          statuses: <String>[],
+          priorities: <String>[],
+          editableFields: <String>[],
+          editableFieldLimits: ViewerEditableFieldLimits(
+            titleMaxChars: 1,
+            bodyMaxUtf8Bytes: 1,
+            statusValues: <String>[],
+            priorityValues: <String>[],
+            labelsMaxCount: 0,
+            labelsItemMaxChars: 1,
+            labelsItemAllowed: '',
+            depsMaxCount: 0,
+          ),
+        );
+      },
+    );
+
+    await tester.ensureVisible(find.text('Test connection (Alt+T)'));
+    await tester.tap(find.text('Test connection (Alt+T)'));
+    await tester.pumpAndSettle();
+
+    expect(testedPath, r'C:\viewer-test\tasks.exe');
+    expect(
+      find.text('Connection succeeded. Protocol version 1.'),
       findsOneWidget,
     );
   });

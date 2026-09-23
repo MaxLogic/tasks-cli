@@ -376,7 +376,9 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 Expanded(child: _buildList(context, tasks)),
                 ViewerPaneRegion(
                   maxHeight: budget.footer,
-                  child: _buildGoToRow(context, tasks),
+                  child: tasks.totalCount > 0
+                      ? _buildGoToRow(context, tasks)
+                      : const SizedBox.shrink(),
                 ),
               ],
             );
