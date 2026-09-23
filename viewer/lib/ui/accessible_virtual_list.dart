@@ -711,6 +711,9 @@ class _VirtualRowState extends State<_VirtualRow> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final stroke = _focused ? 3.0 : (widget.selected ? 2.0 : 0.0);
+    final borderColor = _focused ? colors.onSurface : colors.primary;
     return Focus(
       focusNode: _node,
       includeSemantics: false,
@@ -743,9 +746,28 @@ class _VirtualRowState extends State<_VirtualRow> {
             moveFocus: true,
             forceFocus: true,
           ),
-          child: ExcludeSemantics(
-            excluding: widget.owner.widget.excludeRowChildSemantics,
-            child: widget.child,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(
+                left: stroke > 0
+                    ? BorderSide(color: borderColor, width: stroke)
+                    : BorderSide.none,
+                top: stroke > 0
+                    ? BorderSide(color: borderColor, width: stroke)
+                    : BorderSide.none,
+                right: stroke > 0
+                    ? BorderSide(color: borderColor, width: stroke)
+                    : BorderSide.none,
+                bottom: BorderSide(
+                  color: stroke > 0 ? borderColor : colors.outlineVariant,
+                  width: stroke > 0 ? stroke : 1,
+                ),
+              ),
+            ),
+            child: ExcludeSemantics(
+              excluding: widget.owner.widget.excludeRowChildSemantics,
+              child: widget.child,
+            ),
           ),
         ),
       ),

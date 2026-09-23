@@ -1232,16 +1232,17 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                  child: Semantics(
-                    header: true,
-                    child: Text(
-                      region.label,
-                      style: Theme.of(context).textTheme.titleLarge,
+                if (region != ViewerRegion.tasks)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                    child: Semantics(
+                      header: true,
+                      child: Text(
+                        region.label,
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
                     ),
                   ),
-                ),
                 Expanded(child: child),
               ],
             ),

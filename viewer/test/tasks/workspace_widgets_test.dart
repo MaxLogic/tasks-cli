@@ -9,6 +9,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/data/models.dart';
@@ -42,6 +43,34 @@ Future<RealViewerHarness> pumpTaskBrowser(
 }
 
 void main() {
+  testWidgets(
+    'task heading is contextual and All status toggles every status',
+    (tester) async {
+      final harness = await pumpTaskBrowser(tester);
+      expect(find.text('Tasks'), findsNothing);
+      expect(find.text('Tasks in Project 1'), findsOneWidget);
+      expect(harness.model.tasks!.scope, TaskScope.open);
+      expect(harness.model.tasks!.statuses, isEmpty);
+
+      final allRow = find
+          .ancestor(of: find.text('All'), matching: find.byType(Row))
+          .first;
+      final allCheckbox = find.descendant(
+        of: allRow,
+        matching: find.byType(Checkbox),
+      );
+      await tester.tap(allCheckbox);
+      await tester.pumpAndSettle();
+      expect(harness.model.tasks!.scope, TaskScope.all);
+      expect(harness.model.tasks!.statuses, containsAll(viewerTaskStatuses));
+
+      await tester.tap(allCheckbox);
+      await tester.pumpAndSettle();
+      expect(harness.model.tasks!.scope, TaskScope.open);
+      expect(harness.model.tasks!.statuses, isEmpty);
+    },
+  );
+
   testWidgets('project row menu exposes compact actions and copies its path', (
     tester,
   ) async {
