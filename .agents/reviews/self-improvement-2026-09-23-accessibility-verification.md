@@ -4,7 +4,7 @@ Date: 2026-09-23
 Originating project: `F:\projects\MaxLogic\tasks-cli`
 Original objective: Fix the Tasks Viewer Settings accessibility defect and improve the test that had missed it, while skipping Windows DPI changes.
 Trigger and timing: Manual review after the user challenged whether the UX skill required the full screen-reader test.
-Review outcome: Proposal ready
+Review outcome: Approved, applied, and verified within the focused scenario
 
 ## Evidence and diagnosis
 
@@ -36,7 +36,7 @@ Prior decisions checked: No related review existed in the originating project's 
 
 ## P1: Require layered proof for a reported assistive-technology defect
 
-Status: Proposed, awaiting approval
+Status: Applied and verified
 Target: `D:\Pawel\Prompts\skills\ux-design\SKILL.md`, `reference/platform-and-accessibility.md`, and `evals/evals.json`
 Baseline: canonical skill repository revision `006717cdf0f22a19d3217a9b9794335352e08be2`; skill version 1.1.0
 Cause addressed: Existing guidance named the relevant evidence types but did not make the reported assistive technology's exact-candidate rerun an acceptance requirement.
@@ -44,13 +44,12 @@ Cause addressed: Existing guidance named the relevant evidence types but did not
 ```diff
  For implemented work, exercise the relevant primary task, keyboard/focus path,
  navigation and return, and failure/recovery path with suitable platform tools.
-+When a user reports an assistive-technology failure, require reproduction and
-+an exact-candidate rerun with that technology before calling the defect fixed.
-+Treat source checks, lints, rendered semantics, and platform accessibility-tree
-+inspection as distinct evidence layers, not substitutes for that rerun.
-+If the live layer is unavailable or excluded, report the defect as not yet
-+confirmed fixed. Excluding one check, such as DPI changes, excludes only that
-+check unless the user says otherwise.
++When a user reports an accessibility failure, prefer repeatable automation and
++require evidence that crosses the boundary where it failed. For app-side
++semantics defects, require sensitive framework tests and an exact-candidate
++platform accessibility-API test. Use the reported assistive technology for
++technology-specific behavior or an unresolved mismatch. That run may be
++automated in an isolated session; manual control is not inherently required.
 ```
 
 Add the following supporting requirements to the platform reference:
@@ -61,19 +60,22 @@ Add the following supporting requirements to the platform reference:
    custom audit detects the failure it claims to guard against.
 3. Inspect UI Automation names, control types, patterns, state, order, and focus
    events on the exact Windows candidate.
-4. Reproduce and rerun the affected task with the reported screen reader,
-   checking discovery, announcements, operation, errors, recovery, and focus.
+4. Reproduce and rerun the affected task with the reported screen reader when
+   the claim depends on its speech, browse/caret behavior, announcement timing,
+   custom interaction, or an unresolved mismatch. Prefer unattended execution
+   in an isolated Windows test session.
 
 Add an eval case based on a Windows Flutter Settings dialog whose old green test
 checks only labelled tap targets and basic actions. The expected answer must keep
-UI Automation and NVDA in scope while excluding only DPI changes.
+UI Automation in scope while excluding only DPI changes. It must distinguish an
+app-side platform-contract defect from behavior that specifically requires NVDA.
 
 Expected benefit: Future work will not confuse a stronger widget test with proof that a user-reported NVDA failure is fixed.
 Downside or counterexample: The rule should not require every assistive technology for an unrelated visual correction or when no specific technology reported the defect; those cases still use a scoped matrix.
 Dependencies: None.
-Verification scenario: In a fresh-context eval, ask an agent to fix the described Settings defect while prohibiting DPI changes. It should require the negative control, exact-candidate UI Automation inspection, and NVDA walkthrough, and should keep the issue unconfirmed if the live run is unavailable.
-Checks already run: Candidate version 1.2.0 passed `quick_validate.py`, invocation-policy validation across 76 skills, JSON parsing with five unique eval IDs, and `git diff --check`. The candidate was then reverted because live skill edits require prior approval.
-Checks not yet run: Fresh-context old-versus-new eval and live application UI Automation/NVDA verification. Structural validation does not establish behavioral improvement.
+Verification scenario: In a fresh-context eval, ask an agent to fix the described Settings defect while prohibiting DPI changes. It should require the negative control and exact-candidate UI Automation inspection, require real NVDA only for NVDA-specific behavior or an unresolved mismatch, and prefer unattended execution in an isolated test session.
+Checks already run: Version 1.2.0 passed `quick_validate.py`, invocation-policy validation across 76 skills, JSON parsing with five unique eval IDs and seven expectations in eval 5, and `git diff --check`. In the final fresh-context comparison, both the 1.2.0 candidate and 1.1.0 baseline selected sensitive Flutter semantics plus exact-candidate UI Automation as sufficient for the diagnosed app-side defect, while reserving real NVDA for NVDA-specific behavior or an unresolved mismatch. The candidate met all seven expectations; the tie establishes focused non-regression, not added value.
+Checks not yet run: The Tasks Viewer still has no automated exact-release UI Automation gate. No real NVDA run was performed. These product checks are separate from verification of the skill revision.
 
-User decision: Awaiting approval as of 2026-09-23.
-Implementation and verification: Not applied. Candidate commits `f85604e` and `006717c` preserve the proposed and reverted diffs in local skill-repository history.
+User decision: P1 approved on 2026-09-23. In the same message, the user preferred an automated test over manually controlling their NVDA session; that clarification is incorporated above.
+Implementation and verification: Applied to skill version 1.2.0 in canonical skill-repository commit `b0d79e0`. The deployed skill is linked to that canonical source. Focused validation passed with the limits above.
