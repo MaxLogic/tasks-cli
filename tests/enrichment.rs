@@ -103,3 +103,30 @@ fn refuses_excessive_title_expansion_without_partial_output() {
         .unwrap();
     assert!(enrich::enrich(&store.conn, &"T001 ".repeat(70000)).is_err());
 }
+
+#[test]
+fn enriches_slash_separated_task_references_without_rewriting_paths() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+        .unwrap();
+    for (id, title) in [(226, "NativeWind"), (227, "Zustand"), (228, "Mobile API")] {
+        conn.execute("INSERT INTO tasks(id, title) VALUES (?1, ?2)", (id, title))
+            .unwrap();
+    }
+    let input = "3. **Architecture drift (T-226/T-227/T-228):** spec.md and AGENTS.md say NativeWind, Zustand, and mobile plus API only. The code uses StyleSheet with brand tokens, module-level stores, and also ships a Tauri desktop app. Should the docs change to match the code, or the code to match the docs?";
+    let result = enrich::enrich(&conn, input).unwrap();
+    assert_eq!(result.replacements, 3);
+    assert_eq!(result.unknown_ids, Vec::<u64>::new());
+    assert_eq!(
+        result.text,
+        input.replace(
+            "T-226/T-227/T-228",
+            "T-226 (NativeWind)/T-227 (Zustand)/T-228 (Mobile API)"
+        )
+    );
+
+    let paths = "https://example.test/T-226/T-227 C:\\work\\T-228 /T-226/T-227 T-226/file";
+    let unchanged = enrich::enrich(&conn, paths).unwrap();
+    assert_eq!(unchanged.text, paths);
+    assert_eq!(unchanged.replacements, 0);
+}

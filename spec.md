@@ -263,7 +263,8 @@ including terminal tasks, without inserting task bodies. Unknown IDs are left
 unchanged and reported on stderr (and `unknown_ids` in JSON). Invalid/out-of-range
 numbers remain untouched. Exact existing annotations are skipped, including IDs
 inside that annotation; arbitrary pre-existing prose is not deduplicated. Obvious
-URL/path components are skipped, but this is a plain-text transform, not a
+URL/path components are skipped; slash-separated task references such as
+`T-226/T-227` in prose are enriched. This is a plain-text transform, not a
 Markdown/code parser. Code blocks and link labels may therefore be enriched.
 Read requested ID/title pairs in batches under one read snapshot; release it
 before rendering. Limit input to 16 MiB, distinct valid IDs to 10,000 and output

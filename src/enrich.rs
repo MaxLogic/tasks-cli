@@ -26,8 +26,7 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
     }
     let pattern = Regex::new(r"\bT-?([0-9]+)\b")
         .map_err(|e| AppError::Validation(format!("invalid task-reference pattern: {e}")))?;
-    let mut ids = BTreeSet::new();
-    let mut occurrences = Vec::new();
+    let mut candidates = Vec::new();
     for capture in pattern.captures_iter(text) {
         let Some(found) = capture.get(0) else {
             continue;
@@ -35,22 +34,39 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
         let Some(number) = capture.get(1) else {
             continue;
         };
-        if !eligible(text, found.start(), found.end()) {
-            continue;
-        }
         let Ok(id) = number.as_str().parse::<u64>() else {
             continue;
         };
         if id > 0 && id <= i64::MAX as u64 {
-            occurrences.push((found.start(), found.end(), id));
-            ids.insert(id);
+            candidates.push((found.start(), found.end(), id));
         }
-        if ids.len() > MAX_DISTINCT_IDS {
-            return Err(AppError::Validation(
-                "enrichment input contains more than 10000 distinct task IDs; split the document"
-                    .into(),
-            ));
+    }
+    // Treat adjacent references separated by slashes as one unit when
+    // deciding whether the text is a path. A chain in a URL remains excluded,
+    // while "T-226/T-227" in prose is eligible in its entirety.
+    let mut ids = BTreeSet::new();
+    let mut occurrences = Vec::new();
+    let mut first = 0;
+    while first < candidates.len() {
+        let mut last = first;
+        while last + 1 < candidates.len()
+            && &text[candidates[last].1..candidates[last + 1].0] == "/"
+        {
+            last += 1;
         }
+        if eligible(text, candidates[first].0, candidates[last].1) {
+            for &candidate in &candidates[first..=last] {
+                occurrences.push(candidate);
+                ids.insert(candidate.2);
+            }
+            if ids.len() > MAX_DISTINCT_IDS {
+                return Err(AppError::Validation(
+                    "enrichment input contains more than 10000 distinct task IDs; split the document"
+                        .into(),
+                ));
+            }
+        }
+        first = last + 1;
     }
     if ids.is_empty() {
         return Ok(EnrichedText {
@@ -104,25 +120,16 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
     let mut protected_until = 0;
     let mut replacements = 0;
     let mut output_bytes = text.len();
-    for capture in pattern.captures_iter(text) {
-        let Some(found) = capture.get(0) else {
-            continue;
-        };
-        let Some(number) = capture.get(1) else {
-            continue;
-        };
-        if found.start() < protected_until || !eligible(text, found.start(), found.end()) {
+    for (start, end, id) in occurrences {
+        if start < protected_until {
             continue;
         }
-        let Ok(id) = number.as_str().parse::<u64>() else {
-            continue;
-        };
         let Some(title) = titles.get(&id) else {
             continue;
         };
         let annotation = format!(" ({title})");
-        if text[found.end()..].starts_with(&annotation) {
-            protected_until = found.end() + annotation.len();
+        if text[end..].starts_with(&annotation) {
+            protected_until = end + annotation.len();
             continue;
         }
         output_bytes += annotation.len();
@@ -131,9 +138,9 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
                 "enriched output exceeds 64 MiB; split the document".into(),
             ));
         }
-        output.push_str(&text[copied..found.end()]);
+        output.push_str(&text[copied..end]);
         output.push_str(&annotation);
-        copied = found.end();
+        copied = end;
         replacements += 1;
     }
     output.push_str(&text[copied..]);
