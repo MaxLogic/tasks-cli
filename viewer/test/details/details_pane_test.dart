@@ -66,6 +66,17 @@ TextField bodyField(WidgetTester tester) => tester.widget<TextField>(
 );
 
 void main() {
+  testWidgets('short task body fills the available details height', (
+    tester,
+  ) async {
+    await pumpTaskDetails(tester);
+    final size = tester.getSize(
+      find.byKey(const ValueKey<String>('details-body')),
+    );
+    expect(size.height, greaterThan(300));
+    expect(bodyField(tester).readOnly, isTrue);
+  });
+
   group('tabs', () {
     testWidgets('the tab bar exposes four selectable tabs', (
       WidgetTester tester,
@@ -117,7 +128,7 @@ void main() {
         final body = tester.getSemantics(
           find.byKey(const ValueKey<String>('details-body')),
         );
-        expect(body.parent?.getSemanticsData().role, SemanticsRole.tabPanel);
+        expect(body.getSemanticsData().role, SemanticsRole.tabPanel);
       } finally {
         semantics.dispose();
       }

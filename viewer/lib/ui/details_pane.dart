@@ -1169,6 +1169,8 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   ) {
     return Semantics(
       role: SemanticsRole.tabPanel,
+      container: true,
+      explicitChildNodes: true,
       child: switch (state.tab) {
         TaskDetailTab.details => _buildDetailsPanel(context, state, detail),
         TaskDetailTab.dependencies => _buildDependenciesPanel(context, state),
@@ -1198,7 +1200,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
             ),
             const Divider(height: 1),
             Expanded(
-              child: SingleChildScrollView(
+              child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
                 child: _StoredBodyCopy(
                   body: _bodyText,
@@ -1208,6 +1210,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                     controller: _body,
                     focusNode: _handles.bodyFocus,
                     label: 'Task body (F3)',
+                    expands: true,
                     hint: detail.body.isEmpty
                         ? 'This task has no body text.'
                         : null,
@@ -1303,6 +1306,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     required TextEditingController controller,
     required FocusNode focusNode,
     required String label,
+    bool expands = false,
     String? hint,
     Key? key,
   }) {
@@ -1312,6 +1316,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       focusNode: focusNode,
       readOnly: true,
       maxLines: null,
+      expands: expands,
       keyboardType: TextInputType.multiline,
       textAlignVertical: TextAlignVertical.top,
       decoration: InputDecoration(

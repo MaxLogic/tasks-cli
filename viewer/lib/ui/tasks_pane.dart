@@ -49,6 +49,9 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   final FocusNode _activeFiltersFocus = FocusNode(
     debugLabel: 'tasks active filters',
   );
+  final FocusNode _filtersToggleFocus = FocusNode(
+    debugLabel: 'tasks filters toggle',
+  );
   final Map<String, FocusNode> _statusNodes = <String, FocusNode>{
     'all': FocusNode(debugLabel: 'tasks status all'),
     for (final status in viewerTaskStatuses)
@@ -60,7 +63,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   };
 
   TaskController? _bound;
-  bool _filtersVisible = true;
+  bool _filtersVisible = false;
   String? _goToRowError;
 
   TaskController? get _tasks => widget.model.tasks;
@@ -92,6 +95,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     _directionFocus.dispose();
     _goToRowFocus.dispose();
     _activeFiltersFocus.dispose();
+    _filtersToggleFocus.dispose();
     for (final node in _statusNodes.values) {
       node.dispose();
     }
@@ -147,12 +151,15 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         _scopeFocus(tasks.scope).requestFocus();
         return KeyEventResult.handled;
       case 'tasks.scope':
+        _showFilters();
         _scopeFocus(tasks.scope).requestFocus();
         return KeyEventResult.handled;
       case 'tasks.statusChecklist':
+        _showFilters();
         _firstStatusFocus(tasks).requestFocus();
         return KeyEventResult.handled;
       case 'tasks.priorityChecklist':
+        _showFilters();
         _firstPriorityFocus(tasks).requestFocus();
         return KeyEventResult.handled;
       case 'tasks.labelsField':
@@ -160,6 +167,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         _labelsFocus.requestFocus();
         return KeyEventResult.handled;
       case 'tasks.applyLabels':
+        _showFilters();
         _applyLabels();
         _applyLabelsFocus.requestFocus();
         return KeyEventResult.handled;
@@ -172,6 +180,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         _readinessFocus.requestFocus();
         return KeyEventResult.handled;
       case 'tasks.sort':
+        _showFilters();
         _sortFocus.requestFocus();
         return KeyEventResult.handled;
       case 'tasks.direction':
@@ -227,6 +236,11 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     if (!_filtersVisible) {
       setState(() => _filtersVisible = true);
     }
+  }
+
+  void _toggleFilters(bool visible) {
+    _filtersToggleFocus.requestFocus();
+    setState(() => _filtersVisible = visible);
   }
 
   void _applyLabels() {
@@ -415,18 +429,28 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
       child: Row(
         children: <Widget>[
-          TextButton(
-            onPressed: () => setState(() => _filtersVisible = true),
-            child: Text(
-              tasks.activeFilterCount == 0
-                  ? 'Filters'
-                  : 'Filters (${tasks.activeFilterCount} active)',
+          Expanded(
+            child: TextField(
+              controller: _search,
+              focusNode: _handles.filterFocus,
+              onChanged: tasks.setQuery,
+              onSubmitted: (_) => unawaited(tasks.submitQuery()),
+              decoration: const InputDecoration(
+                labelText: 'Search tasks (Ctrl+F)',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            'Alt+F opens the filter controls',
-            style: Theme.of(context).textTheme.bodySmall,
+          TextButton.icon(
+            focusNode: _filtersToggleFocus,
+            onPressed: () => _toggleFilters(true),
+            icon: const Icon(Icons.tune),
+            label: Text(
+              'Filters (${tasks.scope.label}'
+              '${tasks.activeFilterCount == 0 ? '' : ', ${tasks.activeFilterCount} active'})',
+            ),
           ),
         ],
       ),
@@ -441,6 +465,18 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
+          Align(
+            alignment: Alignment.centerRight,
+            child: Tooltip(
+              message: 'Alt+F',
+              child: TextButton.icon(
+                focusNode: _filtersToggleFocus,
+                onPressed: () => _toggleFilters(false),
+                icon: const Icon(Icons.expand_less),
+                label: const Text('Hide filters'),
+              ),
+            ),
+          ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
@@ -636,13 +672,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 child: TextButton(
                   onPressed: _clearFilters,
                   child: const Text('Clear filters'),
-                ),
-              ),
-              Tooltip(
-                message: 'Alt+F',
-                child: TextButton(
-                  onPressed: () => setState(() => _filtersVisible = false),
-                  child: const Text('Hide filters'),
                 ),
               ),
             ],

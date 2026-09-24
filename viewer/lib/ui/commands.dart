@@ -652,8 +652,8 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       id: 'tasks.filtersPopup',
       scope: CommandScope.tasks,
       group: HelpGroup.tasks,
-      label: 'Filters popup',
-      description: 'Open the task filter popup.',
+      label: 'Task filters',
+      description: 'Expand the task filter controls.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyF)],
     ),
     CommandSpec(

@@ -51,6 +51,8 @@ void main() {
       expect(find.text('Tasks in Project 1'), findsOneWidget);
       expect(harness.model.tasks!.scope, TaskScope.open);
       expect(harness.model.tasks!.statuses, isEmpty);
+      await tester.tap(find.text('Filters (Open tasks)'));
+      await tester.pumpAndSettle();
 
       final allRow = find
           .ancestor(of: find.text('All'), matching: find.byType(Row))
@@ -68,6 +70,34 @@ void main() {
       await tester.pumpAndSettle();
       expect(harness.model.tasks!.scope, TaskScope.open);
       expect(harness.model.tasks!.statuses, isEmpty);
+    },
+  );
+
+  testWidgets(
+    'compact task filters leave search available and reveal shortcuts',
+    (tester) async {
+      final harness = await pumpTaskBrowser(tester);
+      expect(find.text('Filters (Open tasks)'), findsOneWidget);
+      expect(find.text('Search tasks (Ctrl+F)'), findsOneWidget);
+      expect(find.text('Scope (Alt+S)'), findsNothing);
+      await pressKey(tester, LogicalKeyboardKey.f2);
+      await pressAlt(tester, LogicalKeyboardKey.keyT);
+      expect(find.text('Status (Alt+T)'), findsOneWidget);
+      expect(harness.focusedDebugLabel, 'tasks status all');
+      await tester.tap(find.text('Hide filters'));
+      await tester.pumpAndSettle();
+      expect(harness.focusedDebugLabel, 'tasks filters toggle');
+      expect(find.text('Scope (Alt+S)'), findsNothing);
+      expect(find.text('Search tasks (Ctrl+F)'), findsOneWidget);
+      await pressAlt(tester, LogicalKeyboardKey.keyO);
+      expect(
+        find.descendant(
+          of: find.byType(ViewerTasksPane),
+          matching: find.text('Sort (Alt+O)'),
+        ),
+        findsOneWidget,
+      );
+      expect(harness.focusedDebugLabel, 'tasks sort');
     },
   );
 
