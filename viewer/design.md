@@ -34,7 +34,7 @@ Refresh       Last refreshed time          Current operation/error
 
 Divide usable pane width in proportions 22% Projects, 33% Tasks and 45% Task details after subtracting separators and padding. Use all available client height; do not center the app inside a narrow maximum-width container or leave unused ultrawide margins. Persist adjusted pane proportions. Start with 12-pixel panel padding and 8-pixel spacing. This wireframe shows hierarchy, not fixed positions for every control. Filters may wrap onto additional lines. Panel headings and toolbars stay visible when rows scroll.
 
-The top toolbar always contains a text button "Hotkey help (F10)" beside Settings. It stays visible in every pane arrangement, empty state and connection-error state; do not hide it in an overflow menu. Click, keyboard activation and F10 open the same searchable help dialog. Its accessible name is "Hotkey help", with F10 exposed as the shortcut. Group bindings by Global, Projects, Tasks, Task details, Editor and Dialogs, explain scope, and highlight the context active before opening. Generate this content from the same command registry used by the controls so help cannot drift. Close restores the exact control that opened it. From another modal, F10 may open modal help and must return focus to that modal without activating the background window.
+The top toolbar always contains glyph buttons for Refresh, Settings and Hotkey help, with hover hints and screen-reader names that include their shortcuts. They stay visible in every pane arrangement, empty state and connection-error state; do not hide them in an overflow menu. Click, keyboard activation and F10 open the same searchable help dialog. Group bindings by Global, Projects, Tasks, Task details, Editor and Dialogs, explain scope, and highlight the context active before opening. Generate this content from the same command registry used by the controls so help cannot drift. Close restores the exact control that opened it. From another modal, F10 may open modal help and must return focus to that modal without activating the background window.
 
 Above 1280 logical pixels show three panes. At 1000..1279 show Projects and Tasks, with Task details replacing the Tasks pane when explicitly opened. Below 1000 show one pane and a labelled Projects/Tasks/Task details navigation control. Preserve all state across these layout changes. Enter on a project opens Tasks when those panes are not simultaneously visible; Enter on a task opens Task details. F6 continues to move between available regions and reveals the destination pane in reduced layouts. Do not silently hide the only route back.
 
@@ -52,7 +52,7 @@ Task rows use two text lines at normal density; project rows use four in their d
 
 Order: heading, labelled "Search projects" field, state filter, sort controls, Clear filters, result count, list, Go to row, selected-project summary, clipboard buttons.
 
-Search helper text: "Search name, path or project ID". A Clear search button has that exact accessible name. State filter labels map to spec values: All projects, With open tasks, With blocked tasks, Complete, Empty, Unavailable. Default All projects. Sort choices: Name, Open tasks, Total tasks, Blocked tasks, Started, Last task write, Progress. A separate Ascending/Descending control exposes current direction. Clear filters resets query/state only, preserving chosen sort.
+Search helper text: "Search name, path or project ID". A Clear search button has that exact accessible name. State filter labels map to spec values: All projects, With open tasks, With blocked tasks, Complete, Empty, Unavailable. Default With open tasks. Sort choices: Name, Open tasks, Total tasks, Blocked tasks, Started, Last task write, Progress. Default Last task write descending. A separate Ascending/Descending control exposes current direction. Save project filter, sort, and direction as viewer preferences. Clear filters resets query/state only, preserving chosen sort.
 
 Default row presentation:
 
@@ -63,7 +63,7 @@ Started (first task): 12 Sep 2026
 Last task write: 21 Sep 2026, 10:30
 ```
 
-The selected-project summary shows all required statistics, Started (first recorded task), Last task write, sample time, UUID and every bound root. The project list defaults to Expanded rows, showing started and last-write dates in each row so dates can be compared without selecting each project. An optional Compact rows setting hides those two visible lines, while preserving the dates in accessible row names and the selected summary. At larger text sizes use additional stacked lines. The virtual-list extent must account for this setting. A "Copy project ID" button is available in the summary.
+The selected-project summary shows all required statistics, Started (first recorded task), Last task write, sample time, UUID and every bound root. Project rows show started and last-write dates so dates can be compared without selecting each project. At larger text sizes use additional stacked lines. A "Copy project ID" button is available in the summary.
 
 Accessible project row name includes name, open, total, blocked, progress, started and last write, with selected state and row position exposed separately where the Windows bridge supports them. Example content: "Parser tools. 4 open, 10 total, 1 blocked. Progress 50 percent. Started, first recorded task, 12 September 2026. Last task write, 21 September 2026, 10:30." Root and UUID are available in the summary rather than appended to every long announcement; duplicate names include the distinguishing root in their row names.
 
@@ -71,9 +71,13 @@ Dates display using the user's locale and local time, with full timestamp and ti
 
 Selecting a row updates its summary and Tasks. In a full layout, focus remains on the project row. Switching while an editor is dirty first opens the unsaved-changes dialog; Cancel restores the original selected project and focus.
 
+Each project row has a bordered ellipsis action button. Right-click, Menu and Shift+F10 open the same compact menu. E opens Explorer, L opens Alacritty, T opens Terminal, P copies the path, A archives or unarchives, I copies the project ID, and C enriches the clipboard. These letters also work when the project list has focus and a project row is selected.
+
 ## 5. Tasks region
 
 Order: heading including selected project name, search, filter controls, sort, Clear filters, result count, list, Go to row. Helper text: "Search task ID, title or body". Initial filter is Open tasks; initial sort is Priority ascending. Start with the filter controls collapsed so more task rows are visible. Keep search in the compact row. The Filters button reports the scope and active filter count and expands the full controls inline. Display active filters in plain text with individual labelled Remove buttons in that expanded area.
+
+Ctrl+C on a focused task row copies its ID and title. Each row has an ellipsis menu, also reached by right-click, Menu or Shift+F10. I copies ID and title, C copies full content, E edits, D marks done, B blocks, and X cancels. Status changes use the editor's versioned save and dirty-draft guard.
 
 Filter controls:
 
@@ -168,7 +172,7 @@ Every interactive control has a direct shortcut or an access key. Use the follow
 
 | Scope | Control-to-key mapping |
 | --- | --- |
-| Projects | Text filter Ctrl+F; Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Go to row field Alt+G and Go Alt+J; Expanded/Compact rows Alt+W; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
+| Projects | Text filter Ctrl+F; Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Go to row field Alt+G and Go Alt+J; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
 | Tasks | Text filter Ctrl+F; Clear search Alt+X; Expand filters Alt+F; Scope Alt+S; Status checklist Alt+T; Priority checklist Alt+P; Labels field Alt+L; Apply labels Alt+A; Needs human Alt+H; Readiness Alt+R; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Go to row field Alt+G and Go Alt+J; Remove active filter group Alt+M |
 | Task details, read mode | Details tab Alt+1; Dependencies Alt+2; History Alt+3; Project rules Alt+4; Description F3; Edit F4; Mark done Ctrl+D; Copy reference Alt+C; Back Alt+Left; Find in body Ctrl+H; Next match Alt+N; Previous match Alt+P; dependency list Alt+L; Open dependency Alt+O; history list Alt+V; event snapshot Alt+E; rules text Alt+R |
 | Editor | Title Alt+T; Status Alt+S; Priority Alt+P; Labels Alt+L; Dependencies Alt+D; Body F3/Alt+B; Save Ctrl+S; Cancel Alt+C |

@@ -208,6 +208,9 @@ String encodeSettingsDocument(ViewerSettingsDraft draft) {
     'start_with_windows': draft.startWithWindows,
     'announcement_mode': draft.announcementMode.name,
     'bella_volume_percent': draft.bellaVolumePercent,
+    'project_state': draft.projectState.wireValue,
+    'project_sort': draft.projectSort.wireValue,
+    'project_direction': draft.projectDirection.wireValue,
   });
 }
 
@@ -283,6 +286,18 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
     throw FormatException('field "$key" must be a string');
   }
 
+  T wired<T>(String key, List<T> values, T fallback, String Function(T) wire) {
+    final value = document[key];
+    if (value == null) return fallback;
+    if (value is String) {
+      for (final candidate in values) {
+        if (wire(candidate) == value) return candidate;
+      }
+      throw FormatException('field "$key" has unsupported value "$value"');
+    }
+    throw FormatException('field "$key" must be a string');
+  }
+
   const defaults = ViewerSettingsDraft();
   return ViewerSettingsDraft(
     cliPath: optionalPath('cli_path'),
@@ -307,6 +322,24 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
     bellaVolumePercent: percent(
       'bella_volume_percent',
       defaults.bellaVolumePercent,
+    ),
+    projectState: wired(
+      'project_state',
+      ProjectStateFilter.values,
+      defaults.projectState,
+      (value) => value.wireValue,
+    ),
+    projectSort: wired(
+      'project_sort',
+      ProjectSort.values,
+      defaults.projectSort,
+      (value) => value.wireValue,
+    ),
+    projectDirection: wired(
+      'project_direction',
+      SortDirection.values,
+      defaults.projectDirection,
+      (value) => value.wireValue,
     ),
   );
 }

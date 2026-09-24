@@ -31,7 +31,7 @@ void main() {
     expect(find.byTooltip('Settings (Ctrl+,)'), findsOneWidget);
     expect(find.byTooltip('Hotkey help (F10)'), findsOneWidget);
     expect(find.textContaining('test mode'), findsOneWidget);
-    expect(find.textContaining('Configuration ready'), findsOneWidget);
+    expect(find.textContaining('Configuration ready'), findsNothing);
   });
 
   testWidgets('the in-app text size scales the window', (

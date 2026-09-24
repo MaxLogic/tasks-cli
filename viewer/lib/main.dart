@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:screen_retriever/screen_retriever.dart';
@@ -91,6 +92,9 @@ Future<void> main(List<String> arguments) async {
   }
 
   WidgetsFlutterBinding.ensureInitialized();
+  // Keep the Windows accessibility tree available even when the screen reader
+  // attaches after the viewer has already started.
+  SemanticsBinding.instance.ensureSemantics();
   final startup = await _prepareStartupRegistration(
     launchArgs: launchArgs,
     environment: environment,

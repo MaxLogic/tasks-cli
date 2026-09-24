@@ -45,7 +45,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   final FocusNode _previewFocus = FocusNode(
     debugLabel: 'projects preview enrichment',
   );
-  bool _compactRows = false;
   final ProjectLauncher _projectLauncher = const ProjectLauncher();
   String? _goToRowError;
 
@@ -132,9 +131,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       case 'projects.previewEnrichment':
         unawaited(_previewEnrichment());
         return KeyEventResult.handled;
-      case 'projects.rowDensity':
-        _toggleRowDensity();
-        return KeyEventResult.handled;
       default:
         return KeyEventResult.ignored;
     }
@@ -149,17 +145,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   void _clearFilters() {
     _search.clear();
     _projects.clearFilters();
-  }
-
-  void _toggleRowDensity() {
-    setState(() => _compactRows = !_compactRows);
-    widget.api.announce(
-      _compactRows
-          ? 'Compact project rows. Dates stay in the row names and the '
-                'selected summary.'
-          : 'Expanded project rows with started and last-write dates.',
-      dynamic: true,
-    );
   }
 
   /// Validates the typed row number against the reported total; never clamps.
@@ -370,18 +355,23 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   },
                 ),
               ),
-              IconButton(
-                focusNode: _directionFocus,
-                tooltip: '${projects.direction.label}; reverse sort (Alt+I)',
-                icon: Icon(
-                  projects.direction == SortDirection.ascending
-                      ? Icons.arrow_upward
-                      : Icons.arrow_downward,
-                ),
-                onPressed: () => projects.setDirection(
-                  projects.direction == SortDirection.ascending
-                      ? SortDirection.descending
-                      : SortDirection.ascending,
+              Tooltip(
+                message: '${projects.direction.label}; reverse sort (Alt+I)',
+                excludeFromSemantics: true,
+                child: IconButton(
+                  focusNode: _directionFocus,
+                  icon: Icon(
+                    projects.direction == SortDirection.ascending
+                        ? Icons.arrow_upward
+                        : Icons.arrow_downward,
+                    semanticLabel:
+                        '${projects.direction.label}; reverse sort (Alt+I)',
+                  ),
+                  onPressed: () => projects.setDirection(
+                    projects.direction == SortDirection.ascending
+                        ? SortDirection.descending
+                        : SortDirection.ascending,
+                  ),
                 ),
               ),
               Tooltip(
@@ -389,13 +379,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 child: TextButton(
                   onPressed: _clearFilters,
                   child: const Text('Clear filters'),
-                ),
-              ),
-              Tooltip(
-                message: 'Alt+W',
-                child: TextButton(
-                  onPressed: _toggleRowDensity,
-                  child: Text(_compactRows ? 'Expanded rows' : 'Compact rows'),
                 ),
               ),
             ],
@@ -454,56 +437,110 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     final handles = _handles;
     final itemCount = projects.totalCount;
     final duplicates = _duplicateProjectNames(projects);
-    return AccessibleVirtualList(
-      controller: handles.list,
-      itemCount: itemCount,
-      itemExtent: viewerRowExtent(context, textLines: _compactRows ? 2 : 3),
-      listLabel: 'Projects',
-      emptyLabel: projects.isLoading
-          ? 'Loading projects'
-          : 'No projects match these filters',
-      itemKeyBuilder: (index) => ValueKey<String>(
-        projects.itemAt(index)?.projectId ?? 'projects-row-$index',
-      ),
-      rowSemanticsBuilder: (index) {
-        final item = projects.itemAt(index);
-        if (item == null) {
+    return Focus(
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        final index = handles.list.selectedIndex;
+        final item = index == null ? null : projects.itemAt(index);
+        if (item == null) return KeyEventResult.ignored;
+        final keyboard = HardwareKeyboard.instance;
+        if (event.logicalKey == LogicalKeyboardKey.contextMenu ||
+            (event.logicalKey == LogicalKeyboardKey.f10 &&
+                keyboard.isShiftPressed)) {
+          unawaited(_showProjectMenu(context, item, index!));
+          return KeyEventResult.handled;
+        }
+        final action = _projectActionForKey(event);
+        if (action == null ||
+            !_projectActionEnabled(
+              action,
+              item,
+              widget.model.canArchiveProjects,
+            )) {
+          return KeyEventResult.ignored;
+        }
+        unawaited(_runProjectAction(item, index!, action));
+        return KeyEventResult.handled;
+      },
+      child: AccessibleVirtualList(
+        controller: handles.list,
+        itemCount: itemCount,
+        itemExtent: viewerRowExtent(context, textLines: 3),
+        listLabel: 'Projects',
+        emptyLabel: projects.isLoading
+            ? 'Loading projects'
+            : 'No projects match these filters',
+        itemKeyBuilder: (index) => ValueKey<String>(
+          projects.itemAt(index)?.projectId ?? 'projects-row-$index',
+        ),
+        rowSemanticsBuilder: (index) {
+          final item = projects.itemAt(index);
+          if (item == null) {
+            return AccessibleRowSemantics(
+              label: 'Project row ${index + 1} is not loaded yet',
+              value: viewerRowPosition(index, itemCount),
+            );
+          }
           return AccessibleRowSemantics(
-            label: 'Project row ${index + 1} is not loaded yet',
+            label: viewerProjectRowLabel(
+              context,
+              item,
+              includeRoot: duplicates.contains(item.name),
+            ),
             value: viewerRowPosition(index, itemCount),
           );
-        }
-        return AccessibleRowSemantics(
-          label: viewerProjectRowLabel(
-            context,
-            item,
-            includeRoot: duplicates.contains(item.name),
-          ),
-          value: viewerRowPosition(index, itemCount),
-        );
-      },
-      isRowReady: projects.isRowReady,
-      onPendingRowSlow: (index) => widget.api.announceProgress(
-        'Loading row ${index + 1}',
-        clipId: 'loading',
+        },
+        isRowReady: projects.isRowReady,
+        onPendingRowSlow: (index) => widget.api.announceProgress(
+          'Loading row ${index + 1}',
+          clipId: 'loading',
+        ),
+        onSelectedIndexChanged: _onRowSelected,
+        onActivate: _onRowActivated,
+        excludeRowChildSemantics: false,
+        rowBuilder: (context, index, selected) {
+          final item = projects.itemAt(index);
+          if (item == null) {
+            return const _ProjectRowPlaceholder();
+          }
+          return _ProjectRowTile(
+            item: item,
+            compact: false,
+            onMenu: (rowContext) =>
+                unawaited(_showProjectMenu(rowContext, item, index)),
+          );
+        },
       ),
-      onSelectedIndexChanged: _onRowSelected,
-      onActivate: _onRowActivated,
-      excludeRowChildSemantics: false,
-      rowBuilder: (context, index, selected) {
-        final item = projects.itemAt(index);
-        if (item == null) {
-          return const _ProjectRowPlaceholder();
-        }
-        return _ProjectRowTile(
-          item: item,
-          compact: _compactRows,
-          onAction: (action) =>
-              unawaited(_runProjectAction(item, index, action)),
-          canArchive: widget.model.canArchiveProjects,
-        );
-      },
     );
+  }
+
+  Future<void> _showProjectMenu(
+    BuildContext anchor,
+    ProjectItem item,
+    int index,
+  ) async {
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final box = anchor.findRenderObject()! as RenderBox;
+    final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final action = await showMenu<_ProjectMenuAction>(
+      context: context,
+      requestFocus: true,
+      position: RelativeRect.fromRect(
+        origin & Size(box.size.width, 24),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        for (final action in _ProjectMenuAction.values)
+          _ProjectActionMenuItem(
+            action: action,
+            item: item,
+            canArchive: widget.model.canArchiveProjects,
+          ),
+      ],
+    );
+    if (!mounted) return;
+    if (action != null) await _runProjectAction(item, index, action);
   }
 
   Future<void> _runProjectAction(
@@ -854,14 +891,12 @@ class _ProjectRowTile extends StatelessWidget {
   const _ProjectRowTile({
     required this.item,
     required this.compact,
-    required this.onAction,
-    required this.canArchive,
+    required this.onMenu,
   });
 
   final ProjectItem item;
   final bool compact;
-  final ValueChanged<_ProjectMenuAction> onAction;
-  final bool canArchive;
+  final ValueChanged<BuildContext> onMenu;
 
   @override
   Widget build(BuildContext context) {
@@ -877,132 +912,180 @@ class _ProjectRowTile extends StatelessWidget {
         ? (item.error?.message ?? 'Statistics unavailable')
         : '${stats.open} open / ${stats.total} total / ${stats.blocked} blocked';
     final root = item.roots.isEmpty ? 'No bound root' : item.roots.first;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: ExcludeSemantics(
-                  child: Text(
-                    item.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodyMedium,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              ExcludeSemantics(
-                child: Text(progressText, style: theme.textTheme.bodySmall),
-              ),
-              SizedBox(
-                width: 24,
-                height: 20,
-                child: PopupMenuButton<_ProjectMenuAction>(
-                  tooltip: 'Actions for ${item.name}',
-                  padding: EdgeInsets.zero,
-                  onSelected: onAction,
-                  itemBuilder: (context) =>
-                      <PopupMenuEntry<_ProjectMenuAction>>[
-                        _menuItem(
-                          _ProjectMenuAction.explorer,
-                          'Open in Explorer',
-                          item.roots.isNotEmpty,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.alacritty,
-                          'Open in Alacritty',
-                          item.roots.isNotEmpty,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.terminal,
-                          'Open in Terminal',
-                          item.roots.isNotEmpty,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.copyPath,
-                          'Copy path',
-                          item.roots.isNotEmpty,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.archive,
-                          item.archivedAtMs == null ? 'Archive' : 'Unarchive',
-                          canArchive,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.copyId,
-                          'Copy project ID',
-                          true,
-                        ),
-                        _menuItem(
-                          _ProjectMenuAction.enrich,
-                          'Enrich clipboard',
-                          item.isAvailable,
-                        ),
-                      ],
-                  child: Semantics(
-                    button: true,
-                    label: 'Actions for ${item.name}',
-                    child: const Icon(Icons.menu, size: 18),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          ExcludeSemantics(
-            child: Row(
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTap: () => onMenu(context),
+      excludeFromSemantics: true,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            Row(
               children: <Widget>[
                 Expanded(
-                  child: Text(
-                    counts,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall,
+                  child: ExcludeSemantics(
+                    child: Text(
+                      item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    root,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.right,
-                    style: theme.textTheme.bodySmall,
+                ExcludeSemantics(
+                  child: Text(progressText, style: theme.textTheme.bodySmall),
+                ),
+                SizedBox(
+                  width: 28,
+                  height: 20,
+                  child: Tooltip(
+                    message: 'Actions for ${item.name}',
+                    excludeFromSemantics: true,
+                    child: IconButton.outlined(
+                      padding: EdgeInsets.zero,
+                      onPressed: () => onMenu(context),
+                      icon: Icon(
+                        Icons.more_horiz,
+                        size: 18,
+                        semanticLabel: 'Actions for ${item.name}',
+                      ),
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
-          if (!compact)
             ExcludeSemantics(
-              child: Text(
-                'Started (first task): '
-                '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
-                '   Last task write: '
-                '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall,
+              child: Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      counts,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      root,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                ],
               ),
             ),
-        ],
+            if (!compact)
+              ExcludeSemantics(
+                child: Text(
+                  'Started (first task): '
+                  '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
+                  '   Last task write: '
+                  '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
+}
 
-  PopupMenuItem<_ProjectMenuAction> _menuItem(
-    _ProjectMenuAction action,
-    String label,
-    bool enabled,
-  ) => PopupMenuItem<_ProjectMenuAction>(
-    value: action,
-    enabled: enabled,
-    height: 36,
-    child: Text(label),
+_ProjectMenuAction? _projectActionForKey(KeyEvent event) {
+  final keyboard = HardwareKeyboard.instance;
+  if (event is! KeyDownEvent ||
+      keyboard.isControlPressed ||
+      keyboard.isAltPressed ||
+      keyboard.isMetaPressed ||
+      keyboard.isShiftPressed) {
+    return null;
+  }
+  return switch (event.logicalKey) {
+    LogicalKeyboardKey.keyE => _ProjectMenuAction.explorer,
+    LogicalKeyboardKey.keyL => _ProjectMenuAction.alacritty,
+    LogicalKeyboardKey.keyT => _ProjectMenuAction.terminal,
+    LogicalKeyboardKey.keyP => _ProjectMenuAction.copyPath,
+    LogicalKeyboardKey.keyA => _ProjectMenuAction.archive,
+    LogicalKeyboardKey.keyI => _ProjectMenuAction.copyId,
+    LogicalKeyboardKey.keyC => _ProjectMenuAction.enrich,
+    _ => null,
+  };
+}
+
+bool _projectActionEnabled(
+  _ProjectMenuAction action,
+  ProjectItem item,
+  bool canArchive,
+) => switch (action) {
+  _ProjectMenuAction.explorer ||
+  _ProjectMenuAction.alacritty ||
+  _ProjectMenuAction.terminal ||
+  _ProjectMenuAction.copyPath => item.roots.isNotEmpty,
+  _ProjectMenuAction.archive => canArchive,
+  _ProjectMenuAction.copyId => true,
+  _ProjectMenuAction.enrich => item.isAvailable,
+};
+
+class _ProjectActionMenuItem extends PopupMenuItem<_ProjectMenuAction> {
+  _ProjectActionMenuItem({
+    required this.action,
+    required this.item,
+    required this.canArchive,
+  }) : super(
+         value: action,
+         enabled: _projectActionEnabled(action, item, canArchive),
+         height: 36,
+         child: Text(switch (action) {
+           _ProjectMenuAction.explorer => 'Open in Explorer (E)',
+           _ProjectMenuAction.alacritty => 'Open in Alacritty (L)',
+           _ProjectMenuAction.terminal => 'Open in Terminal (T)',
+           _ProjectMenuAction.copyPath => 'Copy path (P)',
+           _ProjectMenuAction.archive =>
+             item.archivedAtMs == null ? 'Archive (A)' : 'Unarchive (A)',
+           _ProjectMenuAction.copyId => 'Copy project ID (I)',
+           _ProjectMenuAction.enrich => 'Enrich clipboard (C)',
+         }),
+       );
+  final _ProjectMenuAction action;
+  final ProjectItem item;
+  final bool canArchive;
+
+  @override
+  PopupMenuItemState<_ProjectMenuAction, _ProjectActionMenuItem>
+  createState() => _ProjectActionMenuItemState();
+}
+
+class _ProjectActionMenuItemState
+    extends PopupMenuItemState<_ProjectMenuAction, _ProjectActionMenuItem> {
+  @override
+  Widget build(BuildContext context) => Focus(
+    autofocus: widget.action == _ProjectMenuAction.explorer,
+    skipTraversal: true,
+    onKeyEvent: (node, event) {
+      final activateInitial =
+          node.hasPrimaryFocus &&
+          event is KeyDownEvent &&
+          (event.logicalKey == LogicalKeyboardKey.enter ||
+              event.logicalKey == LogicalKeyboardKey.space);
+      final action = activateInitial
+          ? widget.action
+          : _projectActionForKey(event);
+      if (action == null) return KeyEventResult.ignored;
+      if (_projectActionEnabled(action, widget.item, widget.canArchive)) {
+        Navigator.of(context).pop(action);
+      }
+      return KeyEventResult.handled;
+    },
+    child: super.build(context),
   );
 }
 

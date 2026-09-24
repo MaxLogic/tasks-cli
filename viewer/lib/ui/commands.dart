@@ -593,16 +593,6 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyJ)],
     ),
     CommandSpec(
-      id: 'projects.rowDensity',
-      scope: CommandScope.projects,
-      group: HelpGroup.projects,
-      label: 'Expanded or compact rows',
-      description:
-          'Switch between expanded rows with dates and compact rows. Dates '
-          'stay in the accessible row names and the selected summary.',
-      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyW)],
-    ),
-    CommandSpec(
       id: 'projects.copyProjectId',
       scope: CommandScope.projects,
       group: HelpGroup.projects,

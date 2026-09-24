@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../controllers/task_controller.dart';
 import '../data/models.dart';
@@ -653,18 +654,23 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                   },
                 ),
               ),
-              IconButton(
-                focusNode: _directionFocus,
-                tooltip: '${tasks.direction.label}; reverse sort (Alt+I)',
-                icon: Icon(
-                  tasks.direction == SortDirection.ascending
-                      ? Icons.arrow_upward
-                      : Icons.arrow_downward,
-                ),
-                onPressed: () => tasks.setDirection(
-                  tasks.direction == SortDirection.ascending
-                      ? SortDirection.descending
-                      : SortDirection.ascending,
+              Tooltip(
+                message: '${tasks.direction.label}; reverse sort (Alt+I)',
+                excludeFromSemantics: true,
+                child: IconButton(
+                  focusNode: _directionFocus,
+                  icon: Icon(
+                    tasks.direction == SortDirection.ascending
+                        ? Icons.arrow_upward
+                        : Icons.arrow_downward,
+                    semanticLabel:
+                        '${tasks.direction.label}; reverse sort (Alt+I)',
+                  ),
+                  onPressed: () => tasks.setDirection(
+                    tasks.direction == SortDirection.ascending
+                        ? SortDirection.descending
+                        : SortDirection.ascending,
+                  ),
                 ),
               ),
               Tooltip(
@@ -891,45 +897,177 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     releaseFailureViewRegionFocus();
     final handles = _handles;
     final itemCount = tasks.totalCount;
-    return AccessibleVirtualList(
-      controller: handles.list,
-      itemCount: itemCount,
-      itemExtent: viewerRowExtent(context),
-      listLabel: 'Tasks in ${widget.model.selectedProjectName}',
-      emptyLabel: tasks.isLoading
-          ? 'Loading tasks'
-          : 'No tasks match these filters',
-      itemKeyBuilder: (index) => ValueKey<String>(
-        tasks.itemAt(index)?.canonicalId ?? 'tasks-row-$index',
-      ),
-      rowSemanticsBuilder: (index) {
-        final item = tasks.itemAt(index);
-        if (item == null) {
+    return Focus(
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent || !handles.list.hasListFocus) {
+          return KeyEventResult.ignored;
+        }
+        final index = handles.list.focusedRowIndex;
+        final item = index == null ? null : tasks.itemAt(index);
+        if (item == null) return KeyEventResult.ignored;
+        final keyboard = HardwareKeyboard.instance;
+        if (event.logicalKey == LogicalKeyboardKey.keyC &&
+            keyboard.isControlPressed &&
+            !keyboard.isAltPressed &&
+            !keyboard.isShiftPressed) {
+          unawaited(_runTaskAction(item, index!, _TaskMenuAction.copySummary));
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.contextMenu ||
+            (event.logicalKey == LogicalKeyboardKey.f10 &&
+                keyboard.isShiftPressed)) {
+          unawaited(_showTaskMenu(item, index!));
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: AccessibleVirtualList(
+        controller: handles.list,
+        itemCount: itemCount,
+        itemExtent: viewerRowExtent(context),
+        listLabel: 'Tasks in ${widget.model.selectedProjectName}',
+        emptyLabel: tasks.isLoading
+            ? 'Loading tasks'
+            : 'No tasks match these filters',
+        itemKeyBuilder: (index) => ValueKey<String>(
+          tasks.itemAt(index)?.canonicalId ?? 'tasks-row-$index',
+        ),
+        rowSemanticsBuilder: (index) {
+          final item = tasks.itemAt(index);
+          if (item == null) {
+            return AccessibleRowSemantics(
+              label: 'Task row ${index + 1} is not loaded yet',
+              value: viewerRowPosition(index, itemCount),
+            );
+          }
           return AccessibleRowSemantics(
-            label: 'Task row ${index + 1} is not loaded yet',
+            label: viewerTaskRowLabel(item),
             value: viewerRowPosition(index, itemCount),
           );
-        }
-        return AccessibleRowSemantics(
-          label: viewerTaskRowLabel(item),
-          value: viewerRowPosition(index, itemCount),
-        );
-      },
-      isRowReady: tasks.isRowReady,
-      onPendingRowSlow: (index) => widget.api.announceProgress(
-        'Loading row ${index + 1}',
-        clipId: 'loading',
+        },
+        isRowReady: tasks.isRowReady,
+        onPendingRowSlow: (index) => widget.api.announceProgress(
+          'Loading row ${index + 1}',
+          clipId: 'loading',
+        ),
+        onSelectedIndexChanged: _onRowSelected,
+        onActivate: _onRowActivated,
+        excludeRowChildSemantics: false,
+        rowBuilder: (context, index, selected) {
+          final item = tasks.itemAt(index);
+          if (item == null) {
+            return const _TaskRowPlaceholder();
+          }
+          return GestureDetector(
+            excludeFromSemantics: true,
+            onSecondaryTapDown: (event) =>
+                unawaited(_showTaskMenu(item, index, event.globalPosition)),
+            child: Row(
+              children: [
+                Expanded(
+                  child: ExcludeSemantics(child: _TaskRowTile(item: item)),
+                ),
+                Tooltip(
+                  message: 'Actions for ${item.canonicalId}',
+                  excludeFromSemantics: true,
+                  child: IconButton(
+                    icon: Icon(
+                      Icons.more_horiz,
+                      semanticLabel: 'Actions for ${item.canonicalId}',
+                    ),
+                    onPressed: () => unawaited(_showTaskMenu(item, index)),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
-      onSelectedIndexChanged: _onRowSelected,
-      onActivate: _onRowActivated,
-      rowBuilder: (context, index, selected) {
-        final item = tasks.itemAt(index);
-        if (item == null) {
-          return const _TaskRowPlaceholder();
-        }
-        return _TaskRowTile(item: item);
-      },
     );
+  }
+
+  Future<void> _showTaskMenu(
+    TaskItem item,
+    int index, [
+    Offset? position,
+  ]) async {
+    final openedTasks = _tasks;
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final origin =
+        position ??
+        (context.findRenderObject()! as RenderBox).localToGlobal(
+          const Offset(24, 100),
+        );
+    final canWrite =
+        widget.model.editor.canWrite && !widget.model.editor.isSaving;
+    final action = await showMenu<_TaskMenuAction>(
+      context: context,
+      requestFocus: true,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(origin.dx, origin.dy, 1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        for (final action in _TaskMenuAction.values)
+          _TaskActionMenuItem(action: action, item: item, canWrite: canWrite),
+      ],
+    );
+    if (!mounted) return;
+    _handles.list.focusRegion();
+    if (action != null && identical(openedTasks, _tasks)) {
+      await _runTaskAction(item, index, action);
+    }
+  }
+
+  Future<void> _runTaskAction(
+    TaskItem item,
+    int index,
+    _TaskMenuAction action,
+  ) async {
+    try {
+      if (action == _TaskMenuAction.copySummary) {
+        await Clipboard.setData(
+          ClipboardData(text: '${item.canonicalId} ${item.title}'),
+        );
+        widget.api.announce('Task ID and title copied', dynamic: true);
+        return;
+      }
+      final model = widget.model;
+      final tasks = model.tasks;
+      if (tasks?.itemAt(index)?.id != item.id ||
+          !await model.selectTaskRow(index)) {
+        return;
+      }
+      await model.openTaskIndex(index);
+      if (!mounted ||
+          !identical(tasks, model.tasks) ||
+          model.detail?.detail?.id != item.id) {
+        return;
+      }
+      switch (action) {
+        case _TaskMenuAction.copySummary:
+          break;
+        case _TaskMenuAction.copyContent:
+          final detail = model.detail!.detail!;
+          await Clipboard.setData(
+            ClipboardData(
+              text: '${detail.canonicalId} ${detail.title}\n\n${detail.body}',
+            ),
+          );
+          widget.api.announce('Task content copied', dynamic: true);
+        case _TaskMenuAction.edit:
+          await model.beginEditTask();
+        case _TaskMenuAction.done:
+          await model.markDoneTask();
+        case _TaskMenuAction.block:
+          await model.changeTaskStatus('blocked');
+        case _TaskMenuAction.cancel:
+          await model.changeTaskStatus('cancelled');
+      }
+    } on Object catch (error) {
+      widget.api.announce('Task action failed: $error', dynamic: true);
+    }
   }
 
   // ------------------------------------------------------------- go to row
@@ -1026,6 +1164,8 @@ class _ActiveFilterChip extends StatelessWidget {
 
 /// One task row: ID, priority, status and title, then labels and the
 /// dependency-waiting indicator. The order matches the accessible row name.
+enum _TaskMenuAction { copySummary, copyContent, edit, done, block, cancel }
+
 class _TaskRowTile extends StatelessWidget {
   const _TaskRowTile({required this.item});
 
@@ -1106,4 +1246,78 @@ class _TaskRowPlaceholder extends StatelessWidget {
       ),
     );
   }
+}
+
+bool _taskActionEnabled(_TaskMenuAction action, TaskItem item, bool canWrite) =>
+    switch (action) {
+      _TaskMenuAction.copySummary || _TaskMenuAction.copyContent => true,
+      _TaskMenuAction.edit => canWrite,
+      _TaskMenuAction.done => canWrite && item.status != 'done',
+      _TaskMenuAction.block => canWrite && item.status != 'blocked',
+      _TaskMenuAction.cancel => canWrite && item.status != 'cancelled',
+    };
+
+class _TaskActionMenuItem extends PopupMenuItem<_TaskMenuAction> {
+  _TaskActionMenuItem({
+    required this.action,
+    required this.item,
+    required this.canWrite,
+  }) : super(
+         value: action,
+         enabled: _taskActionEnabled(action, item, canWrite),
+         child: Text(switch (action) {
+           _TaskMenuAction.copySummary => 'Copy ID and title (I)',
+           _TaskMenuAction.copyContent => 'Copy content (C)',
+           _TaskMenuAction.edit => 'Edit task (E)',
+           _TaskMenuAction.done => 'Mark done (D)',
+           _TaskMenuAction.block => 'Block task (B)',
+           _TaskMenuAction.cancel => 'Cancel task (X)',
+         }),
+       );
+  final _TaskMenuAction action;
+  final TaskItem item;
+  final bool canWrite;
+  @override
+  PopupMenuItemState<_TaskMenuAction, _TaskActionMenuItem> createState() =>
+      _TaskActionMenuItemState();
+}
+
+class _TaskActionMenuItemState
+    extends PopupMenuItemState<_TaskMenuAction, _TaskActionMenuItem> {
+  @override
+  Widget build(BuildContext context) => Focus(
+    autofocus: widget.action == _TaskMenuAction.copySummary,
+    skipTraversal: true,
+    onKeyEvent: (node, event) {
+      final keys = HardwareKeyboard.instance;
+      if (event is! KeyDownEvent ||
+          keys.isControlPressed ||
+          keys.isAltPressed ||
+          keys.isShiftPressed ||
+          keys.isMetaPressed) {
+        return KeyEventResult.ignored;
+      }
+      if (node.hasPrimaryFocus &&
+          (event.logicalKey == LogicalKeyboardKey.enter ||
+              event.logicalKey == LogicalKeyboardKey.space)) {
+        if (widget.enabled) Navigator.of(context).pop(widget.action);
+        return KeyEventResult.handled;
+      }
+      final action = switch (event.logicalKey) {
+        LogicalKeyboardKey.keyI => _TaskMenuAction.copySummary,
+        LogicalKeyboardKey.keyC => _TaskMenuAction.copyContent,
+        LogicalKeyboardKey.keyE => _TaskMenuAction.edit,
+        LogicalKeyboardKey.keyD => _TaskMenuAction.done,
+        LogicalKeyboardKey.keyB => _TaskMenuAction.block,
+        LogicalKeyboardKey.keyX => _TaskMenuAction.cancel,
+        _ => null,
+      };
+      if (action == null) return KeyEventResult.ignored;
+      if (_taskActionEnabled(action, widget.item, widget.canWrite)) {
+        Navigator.of(context).pop(action);
+      }
+      return KeyEventResult.handled;
+    },
+    child: super.build(context),
+  );
 }

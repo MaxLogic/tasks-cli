@@ -135,6 +135,18 @@ class CataloGReader implements CancellableProjectReader {
 }
 
 void main() {
+  test('project list starts with open tasks and newest task write first', () async {
+    final reader = RecordingReader(
+      responder: (query) async => syntheticPage(query, total: 5),
+    );
+    final controller = ProjectController(reader: reader);
+    addTearDown(controller.dispose);
+    await controller.reload();
+    expect(reader.lastRequest.state, ProjectStateFilter.hasOpen);
+    expect(reader.lastRequest.sort, ProjectSort.lastWrite);
+    expect(reader.lastRequest.direction, SortDirection.descending);
+  });
+
   test(
     'changing project sort selects useful direction and reversal persists',
     () async {
