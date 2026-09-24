@@ -89,7 +89,14 @@ class _EditorDialogFrame extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: <Widget>[
-              Text(title, style: Theme.of(context).textTheme.titleLarge),
+              Semantics(
+                namesRoute: true,
+                header: true,
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ),
               const SizedBox(height: 8),
               Flexible(
                 child: SingleChildScrollView(
@@ -297,11 +304,14 @@ class _ConflictFieldBlock extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: 2),
       child: MergeSemantics(
-        child: Focus(
-          focusNode: node,
-          child: SelectableText(
-            '$label: ${value.isEmpty ? '(empty)' : value}',
-            style: theme.textTheme.bodySmall,
+        child: Semantics(
+          label: '${field.label}: $label',
+          child: Focus(
+            focusNode: node,
+            child: SelectableText(
+              '$label: ${value.isEmpty ? '(empty)' : value}',
+              style: theme.textTheme.bodySmall,
+            ),
           ),
         ),
       ),

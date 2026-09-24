@@ -1290,7 +1290,8 @@ function Invoke-VerifyWindows {
         }
         $uiaProof = $uiaResult.StdOut | ConvertFrom-Json
         $builtAppImage = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release/data/app.so'
-        if (-not $uiaProof.Ok -or $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
+        if (-not $uiaProof.Ok -or -not $uiaProof.SettingsChecks.Ok -or
+            $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
             $uiaProof.CliSha256 -ne $packageResult.CliExeSha256 -or
             $uiaProof.AppSha256 -ne (Get-FileSha256 -Path $builtAppImage)) {
             $uiaStatus = 'failed'
@@ -1301,7 +1302,7 @@ function Invoke-VerifyWindows {
         $uiaStatus = 'passed'
         Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'passed' `
             -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog `
-            -Detail "$($uiaProof.NodeCount) native UIA nodes; project region and row exposed; app.so sha256 $($uiaProof.AppSha256)"
+            -Detail "$($uiaProof.NodeCount) native $($uiaProof.AccessibilityBackend) nodes; project region and Settings exposed; app.so sha256 $($uiaProof.AppSha256)"
 
         if ($IncludeWindowedIntegration) {
             Write-VerifyMessage -Message 'verify: windowed integration_test/viewer_test.dart -d windows (this opens a real window)'
@@ -1435,9 +1436,9 @@ function Invoke-VerifyWindows {
     $markdown.Add("e2e_fixture_root: $e2eFixtureResolved (the end-to-end gate seeds its own store)")
     $markdown.Add("uia_fixture_root: $uiaFixtureResolved (G11 seeds its own store with the packaged CLI)")
     $markdown.Add('')
-    $markdown.Add('Scope: headless Flutter gates plus an external UIA check of one packaged-release')
-    $markdown.Add('window on a synthetic store. No keyboard or pointer input, NVDA driving or')
-    $markdown.Add('real clipboard access. The UIA gate does not prove NVDA speech.')
+    $markdown.Add('Scope: headless Flutter gates plus an external UIA or MSAA check of one packaged-release')
+    $markdown.Add('window and its Settings dialog on a synthetic store. No keyboard or pointer input,')
+    $markdown.Add('NVDA driving or real clipboard access. Native exposure does not prove NVDA speech.')
     $markdown.Add('')
     $markdown.Add('## Gates')
     $markdown.Add('')
@@ -1484,7 +1485,7 @@ function Invoke-VerifyWindows {
     $markdown.Add('- NVDA speech, caret behaviour and real text editing (V10).')
     $markdown.Add('- A real sign-in launch, changed/missing monitors and live DPI (V12).')
     $markdown.Add('- Audible Bella playback on a real device and listening checks (V13).')
-    $markdown.Add('- The full packaged window flows (V08); G11 covers only UIA exposure of the initial window.')
+    $markdown.Add('- The full packaged window flows (V08); G11 covers native exposure of the workspace and Settings.')
     $markdown.Add('- Section 10 performance numbers: run viewer/tool/measure.ps1, which keeps its own evidence root (V09).')
     $markdown.Add('')
     $markdown.Add('## Findings')

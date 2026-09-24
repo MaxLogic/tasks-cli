@@ -3,6 +3,25 @@ import 'dart:ui' as ui;
 import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// Actual exposed nodes, excluding clipped and merged descendants.
+List<SemanticsNode> visibleSemanticsNodes(WidgetTester tester) {
+  final nodes = <SemanticsNode>[];
+  void visit(SemanticsNode node) {
+    if (node.getSemanticsData().flagsCollection.isHidden) return;
+    if (!node.isMergedIntoParent) nodes.add(node);
+    node.visitChildren((child) {
+      visit(child);
+      return true;
+    });
+  }
+
+  for (final view in tester.binding.renderViews) {
+    final root = view.owner?.semanticsOwner?.rootSemanticsNode;
+    if (root != null) visit(root);
+  }
+  return nodes;
+}
+
 /// One screen-reader accessibility defect found in the rendered semantics tree.
 final class SemanticsAuditFailure {
   const SemanticsAuditFailure({
