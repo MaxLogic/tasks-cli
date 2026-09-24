@@ -76,86 +76,94 @@ class _ViewerEnrichmentPreviewDialogState
     return DialogCommandHost(
       scope: CommandScope.enrichmentPreview,
       onCommand: _onCommand,
-      child: Dialog(
-        insetPadding: const EdgeInsets.all(24),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            minWidth: size.width < 360 ? size.width - 32 : 360,
-            maxWidth: 720,
-            maxHeight: size.height - 48,
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Focus(
-                  focusNode: _heading,
-                  autofocus: true,
-                  child: Semantics(
-                    header: true,
-                    child: Text(
-                      'Enrichment preview',
-                      style: theme.textTheme.titleLarge,
+      child: Semantics(
+        label: 'Enrichment preview',
+        namesRoute: true,
+        scopesRoute: true,
+        explicitChildNodes: true,
+        child: Dialog(
+          insetPadding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minWidth: size.width < 360 ? size.width - 32 : 360,
+              maxWidth: 720,
+              maxHeight: size.height - 48,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Focus(
+                    focusNode: _heading,
+                    autofocus: true,
+                    child: Semantics(
+                      header: true,
+                      child: Text(
+                        'Enrichment preview',
+                        style: theme.textTheme.titleLarge,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text('Project: ${preview.projectName} (${preview.projectId})'),
-                Text(
-                  'Replacements: ${preview.enrichment.replacements}. '
-                  'Unknown IDs: ${unknown.length}.',
-                ),
-                if (unknown.isNotEmpty)
+                  const SizedBox(height: 8),
                   Text(
-                    clipboardUnknownIdsText(unknown),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.error,
+                    'Project: ${preview.projectName} (${preview.projectId})',
+                  ),
+                  Text(
+                    'Replacements: ${preview.enrichment.replacements}. '
+                    'Unknown IDs: ${unknown.length}.',
+                  ),
+                  if (unknown.isNotEmpty)
+                    Text(
+                      clipboardUnknownIdsText(unknown),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.error,
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          _buildText(
+                            key: const ValueKey<String>(
+                              'enrichment-preview-original',
+                            ),
+                            controller: _original,
+                            focusNode: _originalFocus,
+                            label: 'Original clipboard text (Alt+O)',
+                          ),
+                          const SizedBox(height: 8),
+                          _buildText(
+                            key: const ValueKey<String>(
+                              'enrichment-preview-result',
+                            ),
+                            controller: _result,
+                            focusNode: _resultFocus,
+                            label: 'Enriched text (Alt+R)',
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                const SizedBox(height: 8),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        _buildText(
-                          key: const ValueKey<String>(
-                            'enrichment-preview-original',
-                          ),
-                          controller: _original,
-                          focusNode: _originalFocus,
-                          label: 'Original clipboard text (Alt+O)',
-                        ),
-                        const SizedBox(height: 8),
-                        _buildText(
-                          key: const ValueKey<String>(
-                            'enrichment-preview-result',
-                          ),
-                          controller: _result,
-                          focusNode: _resultFocus,
-                          label: 'Enriched text (Alt+R)',
-                        ),
-                      ],
+                  const SizedBox(height: 8),
+                  Text(
+                    'Preview only. The clipboard keeps its current contents; '
+                    'Enrich clipboard is the action that replaces it.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: FilledButton(
+                      onPressed: _close,
+                      child: const Text('Close (Alt+C)'),
                     ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Preview only. The clipboard keeps its current contents; '
-                  'Enrich clipboard is the action that replaces it.',
-                  style: theme.textTheme.bodySmall,
-                ),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    onPressed: _close,
-                    child: const Text('Close (Alt+C)'),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),

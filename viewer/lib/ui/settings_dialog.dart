@@ -9,7 +9,9 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/cupertino.dart' show CupertinoSlider;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
@@ -326,6 +328,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
         );
       },
     );
+  }
+
+  void _setVolume(int volume) {
+    final next = volume.clamp(0, 100);
+    if (next == _volume) return;
+    setState(() => _volume = next);
+    widget.announcements.setVolume(next / 100);
   }
 
   KeyEventResult _onCommand(String id) {
@@ -688,18 +697,69 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           ),
                           const SizedBox(height: 12),
                           Text('Bella volume (Alt+V): $_volume%'),
-                          Slider(
+                          Focus(
                             focusNode: _volumeNode,
-                            value: _volume.toDouble(),
-                            min: 0,
-                            max: 100,
-                            divisions: 10,
-                            label: '$_volume%',
-                            onChanged: (value) {
-                              final stepped = (value / 10).round() * 10;
-                              setState(() => _volume = stepped);
-                              widget.announcements.setVolume(stepped / 100);
+                            includeSemantics: false,
+                            onFocusChange: (_) => setState(() {}),
+                            onKeyEvent: (_, event) {
+                              if (event is! KeyDownEvent) {
+                                return KeyEventResult.ignored;
+                              }
+                              final delta = switch (event.logicalKey) {
+                                LogicalKeyboardKey.arrowLeft ||
+                                LogicalKeyboardKey.arrowDown => -10,
+                                LogicalKeyboardKey.arrowRight ||
+                                LogicalKeyboardKey.arrowUp => 10,
+                                _ => 0,
+                              };
+                              if (delta == 0) return KeyEventResult.ignored;
+                              _setVolume(_volume + delta);
+                              return KeyEventResult.handled;
                             },
+                            child: Semantics(
+                              slider: true,
+                              focusable: true,
+                              focused: _volumeNode.hasFocus,
+                              label: 'Bella volume (Alt+V)',
+                              value: '$_volume%',
+                              increasedValue:
+                                  '${(_volume + 10).clamp(0, 100)}%',
+                              decreasedValue:
+                                  '${(_volume - 10).clamp(0, 100)}%',
+                              onIncrease: () => _setVolume(_volume + 10),
+                              onDecrease: () => _setVolume(_volume - 10),
+                              child: ExcludeSemantics(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                      color: _volumeNode.hasFocus
+                                          ? Theme.of(
+                                              context,
+                                            ).colorScheme.primary
+                                          : Colors.transparent,
+                                      width: 3,
+                                    ),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  // Material Slider's value-indicator portal
+                                  // breaks the Windows AXTree as this dialog opens.
+                                  child: CupertinoSlider(
+                                    value: _volume.toDouble(),
+                                    min: 0,
+                                    max: 100,
+                                    divisions: 10,
+                                    activeColor: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    thumbColor: Theme.of(
+                                      context,
+                                    ).colorScheme.onPrimary,
+                                    onChanged: (value) =>
+                                        _setVolume((value / 10).round() * 10),
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
                           Align(
                             alignment: Alignment.centerLeft,

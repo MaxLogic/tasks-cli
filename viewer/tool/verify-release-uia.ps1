@@ -1,11 +1,11 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-Checks the external UI Automation tree of the packaged Windows release.
+Checks native accessibility of the packaged Windows release through UIA or MSAA.
 
 .DESCRIPTION
 Launches one packaged viewer against an isolated synthetic store and settings
-root. Reads UIA through the Windows client API; sends no keyboard or pointer
+root. Reads UIA with an MSAA fallback through Windows client APIs; sends no keyboard or pointer
 input and never inspects another process's window. The caller owns the store.
 #>
 [CmdletBinding()]
@@ -26,7 +26,7 @@ function Get-ReleaseUiaNode {
     param(
         [Parameter(Mandatory)][System.Windows.Automation.AutomationElement]$Window,
         [int]$MaxNodes = 600,
-        [int]$MaxDepth = 12
+        [int]$MaxDepth = 24
     )
 
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -56,6 +56,130 @@ function Get-ReleaseUiaNode {
         }
     }
     return @($nodes)
+}
+
+function Initialize-ReleaseMsaa {
+    if ('ReleaseMsaa' -as [type]) { return }
+    Add-Type -AssemblyName Accessibility
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ReleaseMsaa {
+    [DllImport("oleacc.dll")]
+    public static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint id, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out object result);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+}
+"@
+}
+
+function Get-ReleaseMsaaNode {
+    param([Parameter(Mandatory)][intptr]$WindowHandle, [switch]$IncludeElement)
+    Initialize-ReleaseMsaa
+    $childWindow = [ReleaseMsaa]::GetWindow($WindowHandle, 5)
+    if ($childWindow -eq [intptr]::Zero) { return }
+    $iid = [guid]'618736e0-3c3d-11cf-810c-00aa00389b71'
+    $accessible = $null
+    $hr = [ReleaseMsaa]::AccessibleObjectFromWindow($childWindow, [uint32]4294967292,
+        [ref]$iid, [ref]$accessible)
+    if ($hr -ne 0 -or $null -eq $accessible) { return }
+    $queue = [collections.generic.queue[object]]::new()
+    $queue.Enqueue(@{ Element = $accessible; Child = 0; Depth = 0 })
+    $visited = 0
+    while ($queue.Count -gt 0 -and $visited -lt 600) {
+        $entry = $queue.Dequeue()
+        $visited++
+        $element = $entry.Element
+        # Flutter's native root can reject accName while its children are valid.
+        try {
+            $name = [string]$element.accName($entry.Child)
+            $role = [int]$element.accRole($entry.Child)
+            $type = switch ($role) {
+                18 { 'ControlType.Dialog' }
+                20 { 'ControlType.Custom' }
+                41 { 'ControlType.Text' }
+                42 { 'ControlType.Edit' }
+                43 { 'ControlType.Button' }
+                46 { 'ControlType.ComboBox' }
+                51 { 'ControlType.Slider' }
+                default { "MSAA.Role.$role" }
+            }
+            $node = [pscustomobject]@{
+                Name = $name; Type = $type; NativeRole = $role; Depth = $entry.Depth
+            }
+            if ($IncludeElement) {
+                $node | Add-Member -NotePropertyName Element -NotePropertyValue $element
+                $node | Add-Member -NotePropertyName Child -NotePropertyValue $entry.Child
+            }
+            $node
+        }
+        catch { Write-Verbose "MSAA name/role unavailable at depth $($entry.Depth): $($_.Exception.Message)" }
+        if ($entry.Child -ne 0 -or $entry.Depth -ge 24) { continue }
+        try { $count = [int]$element.accChildCount } catch { continue }
+        for ($i = 1; $i -le $count -and ($visited + $queue.Count) -lt 600; $i++) {
+            try { $child = $element.accChild($i) } catch { $child = $null }
+            if ($null -ne $child) {
+                $queue.Enqueue(@{ Element = $child; Child = 0; Depth = $entry.Depth + 1 })
+            }
+            else {
+                $queue.Enqueue(@{ Element = $element; Child = $i; Depth = $entry.Depth + 1 })
+            }
+        }
+    }
+}
+
+function Find-ReleaseUiaElement {
+    param(
+        [Parameter(Mandatory)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][System.Windows.Automation.ControlType]$ControlType
+    )
+
+    $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+    $queue = [System.Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue([pscustomobject]@{ Element = $Window; Depth = 0 })
+    while ($queue.Count -gt 0) {
+        $entry = $queue.Dequeue()
+        try {
+            $current = $entry.Element.Current
+            if ($current.Name -like $Name -and $current.ControlType -eq $ControlType) {
+                return $entry.Element
+            }
+            if ($entry.Depth -ge 24) { continue }
+            $child = $walker.GetFirstChild($entry.Element)
+            while ($null -ne $child) {
+                $queue.Enqueue([pscustomobject]@{ Element = $child; Depth = $entry.Depth + 1 })
+                $child = $walker.GetNextSibling($child)
+            }
+        }
+        catch [System.Windows.Automation.ElementNotAvailableException] {
+            continue
+        }
+    }
+    return $null
+}
+
+function Test-ReleaseUiaSettingsSnapshot {
+    param([Parameter(Mandatory)][object[]]$Nodes)
+
+    $required = @(
+        @{ Name = 'Settings'; Types = @('ControlType.Dialog', 'ControlType.Custom') },
+        @{ Name = 'Tasks CLI path (Alt+E)'; Types = @('ControlType.Edit') },
+        @{ Name = 'Data root (Alt+D)'; Types = @('ControlType.Edit') },
+        @{ Name = 'Theme (Alt+H)*'; Types = @('ControlType.ComboBox', 'ControlType.Button') },
+        @{ Name = 'Text size (Alt+Z)*'; Types = @('ControlType.ComboBox', 'ControlType.Button') },
+        @{ Name = 'Bella volume (Alt+V)'; Types = @('ControlType.Slider') },
+        @{ Name = 'Cancel (Alt+C)'; Types = @('ControlType.Button') },
+        @{ Name = 'Save (Ctrl+S)'; Types = @('ControlType.Button') }
+    )
+    $findings = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in $required) {
+        if (@($Nodes | Where-Object { $_.Name -like $item.Name -and $_.Type -in $item.Types }).Count -eq 0) {
+            $findings.Add("Settings did not expose '$($item.Name)' as $($item.Types -join ' or ').")
+        }
+    }
+    return [pscustomobject]@{ Ok = $findings.Count -eq 0; Findings = @($findings) }
 }
 
 function Test-ReleaseUiaSnapshot {
@@ -144,9 +268,51 @@ function Invoke-ReleaseUiaProbe {
                 $lastNodes = @(Get-ReleaseUiaNode -Window $window)
                 $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
                     -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
+                $backend = 'UIA'
+                if (-not $lastCheck.Ok) {
+                    $lastNodes = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
+                    if ($lastNodes.Count -eq 0) { continue }
+                    $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
+                        -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
+                    $backend = 'MSAA'
+                }
                 if ($lastCheck.Ok) {
+                    if ($backend -eq 'MSAA') {
+                        $settingsButton = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle -IncludeElement |
+                            Where-Object { $_.Name -like 'Settings*' -and $_.Type -eq 'ControlType.Button' })
+                        if ($settingsButton.Count -ne 1) { throw 'Expected exactly one accessible Settings button.' }
+                        $settingsButton[0].Element.accDoDefaultAction($settingsButton[0].Child)
+                    }
+                    else {
+                        $settingsButton = Find-ReleaseUiaElement -Window $window -Name 'Settings*' `
+                            -ControlType ([System.Windows.Automation.ControlType]::Button)
+                        if ($null -eq $settingsButton) {
+                            throw 'Settings is absent from the packaged release UIA tree.'
+                        }
+                        $invoke = $settingsButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                        if ($null -eq $invoke) {
+                            throw 'Settings has no native UIA Invoke action.'
+                        }
+                        $invoke.Invoke()
+                    }
+                    $settingsCheck = $null
+                    $settingsNodes = @()
+                    do {
+                        if ($process.HasExited) { throw 'The packaged viewer exited while opening Settings.' }
+                        $settingsNodes = if ($backend -eq 'MSAA') {
+                            @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
+                        } else { @(Get-ReleaseUiaNode -Window $window) }
+                        $settingsCheck = Test-ReleaseUiaSettingsSnapshot -Nodes $settingsNodes
+                        if ($settingsCheck.Ok) { break }
+                        Start-Sleep -Milliseconds 200
+                    } while ([datetime]::UtcNow -lt $deadline)
+                    if (-not $settingsCheck.Ok) {
+                        $sample = ($settingsNodes | Select-Object -First 80 | ConvertTo-Json -Compress -Depth 3)
+                        throw "Settings was not accessible through $backend (app.so sha256: $appHash): $($settingsCheck.Findings -join ' ') Snapshot: $sample"
+                    }
                     return [pscustomobject]@{
                         Ok = $true
+                        AccessibilityBackend = $backend
                         ViewerExe = $viewerExe
                         ViewerSha256 = $viewerHash
                         CliSha256 = $cliHash
@@ -156,6 +322,8 @@ function Invoke-ReleaseUiaProbe {
                         NodeCount = $lastNodes.Count
                         Checks = $lastCheck
                         Nodes = $lastNodes
+                        SettingsChecks = $settingsCheck
+                        SettingsNodes = $settingsNodes
                     }
                 }
             }

@@ -50,3 +50,48 @@ Describe 'packaged release UIA snapshot' {
         $result.MatchingRows | Should -Be 0
     }
 }
+
+Describe 'packaged release Settings UIA snapshot' {
+    It 'requires a named dialog and its first interactive controls' {
+        $nodes = @(
+            [pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Dialog' }
+            [pscustomobject]@{ Name = 'Tasks CLI path (Alt+E)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Data root (Alt+D)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Theme (Alt+H)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Text size (Alt+Z)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Bella volume (Alt+V)'; Type = 'ControlType.Slider' }
+            [pscustomobject]@{ Name = 'Cancel (Alt+C)'; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'Save (Ctrl+S)'; Type = 'ControlType.Button' }
+        )
+        (Test-ReleaseUiaSettingsSnapshot -Nodes $nodes).Ok | Should -BeTrue
+        (Test-ReleaseUiaSettingsSnapshot -Nodes @($nodes | Where-Object Name -ne 'Theme (Alt+H)')).Ok | Should -BeFalse
+    }
+
+    It 'accepts the native Flutter MSAA roles and dropdown values' {
+        $nodes = @(
+            [pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Custom' }
+            [pscustomobject]@{ Name = 'Tasks CLI path (Alt+E)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Data root (Alt+D)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = "Theme (Alt+H)`nFollow Windows"; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = "Text size (Alt+Z)`n100%"; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'Bella volume (Alt+V)'; Type = 'ControlType.Slider' }
+            [pscustomobject]@{ Name = 'Cancel (Alt+C)'; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'Save (Ctrl+S)'; Type = 'ControlType.Button' }
+        )
+        (Test-ReleaseUiaSettingsSnapshot -Nodes $nodes).Ok | Should -BeTrue
+    }
+}
+
+Describe 'native modal transition regression' {
+    It 'rejects a stale workspace after invoking Settings through MSAA' {
+        $nodes = @(
+            [pscustomobject]@{ Name = 'Tasks Viewer'; Type = 'ControlType.Custom'; NativeRole = 20 }
+            [pscustomobject]@{ Name = 'Settings (Ctrl+,)'; Type = 'ControlType.Button'; NativeRole = 43 }
+            [pscustomobject]@{ Name = 'Projects'; Type = 'ControlType.Custom'; NativeRole = 20 }
+            [pscustomobject]@{ Name = 'Search projects (Ctrl+F)'; Type = 'ControlType.Edit'; NativeRole = 42 }
+        )
+        $result = Test-ReleaseUiaSettingsSnapshot -Nodes $nodes
+        $result.Ok | Should -BeFalse
+        @($result.Findings).Count | Should -Be 8
+    }
+}
