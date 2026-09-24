@@ -50,7 +50,7 @@ Task rows use two text lines at normal density; project rows use four in their d
 
 ## 4. Projects region
 
-Order: heading, labelled "Search projects" field, state filter, sort controls, Clear filters, result count, list, Go to row, selected-project summary, clipboard buttons.
+Order: heading, labelled "Search projects" field, state filter, sort controls, Clear filters, result count, list, selected-project summary, clipboard buttons.
 
 Search helper text: "Search name, path or project ID". A Clear search button has that exact accessible name. State filter labels map to spec values: All projects, With open tasks, With blocked tasks, Complete, Empty, Unavailable. Default With open tasks. Sort choices: Name, Open tasks, Total tasks, Blocked tasks, Started, Last task write, Progress. Default Last task write descending. A separate Ascending/Descending control exposes current direction. Save project filter, sort, and direction as viewer preferences. Clear filters resets query/state only, preserving chosen sort.
 
@@ -71,13 +71,13 @@ Dates display using the user's locale and local time, with full timestamp and ti
 
 Selecting a row updates its summary and Tasks. In a full layout, focus remains on the project row. Switching while an editor is dirty first opens the unsaved-changes dialog; Cancel restores the original selected project and focus.
 
-Each project row has a bordered ellipsis action button. Right-click, Menu and Shift+F10 open the same compact menu. E opens Explorer, L opens Alacritty, T opens Terminal, P copies the path, A archives or unarchives, I copies the project ID, and C enriches the clipboard. These letters also work when the project list has focus and a project row is selected.
+Each project row has a bordered ellipsis action button. Right-click, Menu and Shift+F10 open the same compact menu. E opens Explorer, R opens Alacritty, T opens Terminal, F copies the path, A archives or unarchives, D copies the project ID, and C enriches the clipboard. These letters also work when the project list has focus and a project row is selected.
 
 ## 5. Tasks region
 
-Order: heading including selected project name, search, filter controls, sort, Clear filters, result count, list, Go to row. Helper text: "Search task ID, title or body". Initial filter is Open tasks; initial sort is Priority ascending. Start with the filter controls collapsed so more task rows are visible. Keep search in the compact row. The Filters button reports the scope and active filter count and expands the full controls inline. Display active filters in plain text with individual labelled Remove buttons in that expanded area.
+Order: heading including selected project name, search, filter controls, sort, Clear filters, result count, list. Helper text: "Search task ID, title or body". Initial filter is Open tasks; initial sort is Priority ascending. Start with the filter controls collapsed so more task rows are visible. Keep search in the compact row. The Filters button reports the scope and active filter count and expands the full controls inline. Display active filters in plain text with individual labelled Remove buttons in that expanded area.
 
-Ctrl+C on a focused task row copies its ID and title. Each row has an ellipsis menu, also reached by right-click, Menu or Shift+F10. I copies ID and title, C copies full content, E edits, D marks done, B blocks, and X cancels. Status changes use the editor's versioned save and dirty-draft guard.
+Ctrl+C or C on a focused task row copies its ID and name. Each row has an ellipsis menu, also reached by right-click, Menu or Shift+F10. C copies ID and name, V copies full content, E edits, D marks done, B blocks, and X cancels. These letters also work when the task list has focus and a task row is selected. Status changes use the editor's versioned save and dirty-draft guard.
 
 Filter controls:
 
@@ -100,7 +100,7 @@ Tab enters the collection at its selected row, or the first row if none is selec
 
 Keep the focused row mounted until the pending target row has been fetched and made focusable. During an unloaded jump, focus remains in the list region, with a pending target index. Once data arrives, scroll and focus exactly that row. Do not momentarily send focus to the window root. Key repeats may replace the pending target; obsolete loads must not steal focus. Failed page load retains the last real selection and offers Retry in the region.
 
-The list itself is one traversal stop, but row semantics must remain discoverable using NVDA navigation/review. Use stable item identity and correct total count/index semantics. Do not keep every visited row alive merely to preserve focus. Do not use a permanent "Loading" row as a substitute for the fetched item's semantics. The spec's End and Go to row tests must prove that unbuilt rows are reachable.
+The list itself is one traversal stop, but row semantics must remain discoverable using NVDA navigation/review. Use stable item identity and correct total count/index semantics. Do not keep every visited row alive merely to preserve focus. Do not use a permanent "Loading" row as a substitute for the fetched item's semantics. The spec's End tests must prove that unbuilt rows are reachable.
 
 Changing a filter/sort keeps focus on the initiating control. Clear a selection that no longer belongs to the result set, except the spec's post-save retained detail case. Announce the final matching count once after debounce. Arrow selection changes do not announce the whole detail body or move to its tabs.
 
@@ -172,8 +172,8 @@ Every interactive control has a direct shortcut or an access key. Use the follow
 
 | Scope | Control-to-key mapping |
 | --- | --- |
-| Projects | Text filter Ctrl+F; Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Go to row field Alt+G and Go Alt+J; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
-| Tasks | Text filter Ctrl+F; Clear search Alt+X; Expand filters Alt+F; Scope Alt+S; Status checklist Alt+T; Priority checklist Alt+P; Labels field Alt+L; Apply labels Alt+A; Needs human Alt+H; Readiness Alt+R; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Go to row field Alt+G and Go Alt+J; Remove active filter group Alt+M |
+| Projects | Text filter Ctrl+F; Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
+| Tasks | Text filter Ctrl+F; Clear search Alt+X; Expand filters Alt+F; Scope Alt+S; Status checklist Alt+T; Priority checklist Alt+P; Labels field Alt+L; Apply labels Alt+A; Needs human Alt+H; Readiness Alt+R; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Remove active filter group Alt+M |
 | Task details, read mode | Details tab Alt+1; Dependencies Alt+2; History Alt+3; Project rules Alt+4; Description F3; Edit F4; Mark done Ctrl+D; Copy reference Alt+C; Back Alt+Left; Find in body Ctrl+H; Next match Alt+N; Previous match Alt+P; dependency list Alt+L; Open dependency Alt+O; history list Alt+V; event snapshot Alt+E; rules text Alt+R |
 | Editor | Title Alt+T; Status Alt+S; Priority Alt+P; Labels Alt+L; Dependencies Alt+D; Body F3/Alt+B; Save Ctrl+S; Cancel Alt+C |
 | Settings | CLI path Alt+E; Browse CLI Alt+B; Data root Alt+D; Browse root Alt+O; Test connection Alt+T; Theme Alt+H; Text size Alt+Z; Projects width Alt+P; Tasks width Alt+K; Details width Alt+I; Reset layout Alt+R; Start with Windows Alt+W; Announcement mode Alt+A; Bella volume Alt+V; Test voice Alt+Y; Save Ctrl+S; Cancel Alt+C |
@@ -205,7 +205,7 @@ Use only a synthetic fixture store and synthetic clipboard text. Record Windows,
 
 1. Launch the build with NVDA already running. Hear window identity and first focused control without a mouse click or special accessibility enable button.
 2. Search a project by path, filter With open tasks, sort Open tasks descending. Hear labels, state and final result count. Tab into the list and identify its selected row and statistics.
-3. Navigate with arrows and Page Down across at least two page boundaries. Use End and Go to row to reach task row 100,000. Hear the correct actual task ID, selected state and position; no blank/unreachable row or focus loss.
+3. Navigate with arrows and Page Down across at least two page boundaries. Use End to reach task row 100,000. Hear the correct actual task ID, selected state and position; no blank/unreachable row or focus loss.
 4. Reverse direction, change sort, clear filters and open a task. Verify body loading does not interrupt row reading. F6 moves predictably among regions; Shift+F6 reverses it.
 5. Repeat with a 1000-project fixture and expanded project rows. Verify all requested statistics are readable and project selection routes to the correct UUID.
 

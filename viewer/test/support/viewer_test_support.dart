@@ -24,7 +24,6 @@ import 'package:tasks_viewer/ui/accessible_virtual_list.dart';
 import 'package:tasks_viewer/ui/app_shell.dart';
 import 'package:tasks_viewer/ui/prototype_workspace.dart';
 import 'package:tasks_viewer/ui/real_workspace.dart';
-import 'package:tasks_viewer/ui/tasks_pane.dart';
 import 'package:tasks_viewer/ui/workspace_model.dart';
 
 /// One playback request recorded by [RecordingClipPlayer].
@@ -472,17 +471,6 @@ Finder textFieldWithLabel(String label, {Finder? within}) {
   );
   return within == null ? field : find.descendant(of: within, matching: field);
 }
-
-/// The Tasks pane's "Go to row" field. The Projects pane has an identically
-/// labelled field, so a bare label search matches two widgets.
-Finder tasksGoToRowField() =>
-    textFieldWithLabel('Go to row', within: find.byType(ViewerTasksPane));
-
-/// The Tasks pane's "Go" button, scoped past the Projects pane's twin.
-Finder tasksGoButton() => find.descendant(
-  of: find.byType(ViewerTasksPane),
-  matching: find.widgetWithText(TextButton, 'Go'),
-);
 
 // ------------------------------------------------ real workspace harness
 

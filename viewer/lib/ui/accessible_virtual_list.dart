@@ -21,7 +21,7 @@ class AccessibleRowSemantics {
   final String? value;
 }
 
-/// Imperative handle used by region shortcut handlers (F1/F2), End, Go to row
+/// Imperative handle used by region shortcut handlers (F1/F2), End
 /// and post-save selection retention.
 class VirtualListController extends ChangeNotifier {
   _AccessibleVirtualListState? _state;
@@ -45,7 +45,7 @@ class VirtualListController extends ChangeNotifier {
   /// selected yet, or the list container when the list is empty.
   void focusRegion() => _state?._focusRegion();
 
-  /// Move selection and focus to [index] (End, Go to row, programmatic jump).
+  /// Move selection and focus to [index] (End or a programmatic jump).
   void goToIndex(int index) => _state?._requestIndex(index, moveFocus: true);
 
   /// Change the selection without moving keyboard focus.
