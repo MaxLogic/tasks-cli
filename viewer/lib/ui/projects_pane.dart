@@ -3,7 +3,7 @@
 ///
 /// Contract: viewer/spec.md sections 4.2 and 5 with viewer/design.md sections
 /// 4 and 6. The pane renders [ViewerWorkspaceModel] and owns only the local
-/// control state a rendering layer needs (focus nodes and the Go to row text).
+/// control state a rendering layer needs (focus nodes and search text).
 library;
 
 import 'dart:async';
@@ -36,17 +36,14 @@ class ViewerProjectsPane extends StatefulWidget {
 class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     with FailureViewRegionFocus<ViewerProjectsPane> {
   final TextEditingController _search = TextEditingController();
-  final TextEditingController _goToRow = TextEditingController();
   final FocusNode _stateFocus = FocusNode(debugLabel: 'projects state filter');
   final FocusNode _sortFocus = FocusNode(debugLabel: 'projects sort');
   final FocusNode _directionFocus = FocusNode(debugLabel: 'projects direction');
-  final FocusNode _goToRowFocus = FocusNode(debugLabel: 'projects go to row');
   final FocusNode _summaryFocus = FocusNode(debugLabel: 'projects summary');
   final FocusNode _previewFocus = FocusNode(
     debugLabel: 'projects preview enrichment',
   );
   final ProjectLauncher _projectLauncher = const ProjectLauncher();
-  String? _goToRowError;
 
   ProjectController get _projects => widget.model.projectList;
 
@@ -66,11 +63,9 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     widget.api.registerScopeCommands(CommandScope.projects, null);
     _projects.removeListener(_syncExternalQuery);
     _search.dispose();
-    _goToRow.dispose();
     _stateFocus.dispose();
     _sortFocus.dispose();
     _directionFocus.dispose();
-    _goToRowFocus.dispose();
     _summaryFocus.dispose();
     _previewFocus.dispose();
     super.dispose();
@@ -113,12 +108,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       case 'projects.clearFilters':
         _clearFilters();
         return KeyEventResult.handled;
-      case 'projects.goToRowField':
-        _goToRowFocus.requestFocus();
-        return KeyEventResult.handled;
-      case 'projects.goToRow':
-        _goToSelectedRow();
-        return KeyEventResult.handled;
       case 'projects.summary':
         _summaryFocus.requestFocus();
         return KeyEventResult.handled;
@@ -145,29 +134,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   void _clearFilters() {
     _search.clear();
     _projects.clearFilters();
-  }
-
-  /// Validates the typed row number against the reported total; never clamps.
-  void _goToSelectedRow() {
-    final total = _projects.totalCount;
-    final typed = _goToRow.text.trim();
-    final row = int.tryParse(typed);
-    if (total == 0) {
-      _reportGoToRow('There are no project rows to jump to.');
-      return;
-    }
-    if (row == null || row < 1 || row > total) {
-      _reportGoToRow('Enter a row number from 1 to $total. Nothing moved.');
-      return;
-    }
-    setState(() => _goToRowError = null);
-    _handles.list.goToIndex(row - 1);
-    unawaited(_ensureRow(row - 1));
-  }
-
-  void _reportGoToRow(String message) {
-    setState(() => _goToRowError = message);
-    widget.api.announce(message, dynamic: true);
   }
 
   /// Fetches the page that owns [index] and settles the pending row focus.
@@ -239,10 +205,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      if (projects.totalCount > 0) ...<Widget>[
-                        _buildGoToRow(context, projects),
-                        const Divider(height: 1),
-                      ],
+                      if (projects.totalCount > 0) const Divider(height: 1),
                       _buildSummary(context, projects),
                     ],
                   ),
@@ -663,59 +626,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     };
   }
 
-  // ------------------------------------------------------------- go to row
-
-  Widget _buildGoToRow(BuildContext context, ProjectController projects) {
-    final theme = Theme.of(context);
-    final error = _goToRowError;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 2, 12, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          // A Wrap keeps the row count reachable in a narrow pane instead of
-          // overflowing the row (design.md section 2, 800x600 minimum).
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: <Widget>[
-              SizedBox(
-                width: 130,
-                child: TextField(
-                  controller: _goToRow,
-                  focusNode: _goToRowFocus,
-                  keyboardType: TextInputType.number,
-                  onSubmitted: (_) => _goToSelectedRow(),
-                  decoration: const InputDecoration(
-                    labelText: 'Go to row',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              TextButton(onPressed: _goToSelectedRow, child: const Text('Go')),
-              Text(
-                '1 to ${projects.totalCount}',
-                style: theme.textTheme.bodySmall,
-              ),
-            ],
-          ),
-          if (error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                error,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
   // -------------------------------------------------------------- summary
 
   Widget _buildSummary(BuildContext context, ProjectController projects) {
@@ -1011,11 +921,11 @@ _ProjectMenuAction? _projectActionForKey(KeyEvent event) {
   }
   return switch (event.logicalKey) {
     LogicalKeyboardKey.keyE => _ProjectMenuAction.explorer,
-    LogicalKeyboardKey.keyL => _ProjectMenuAction.alacritty,
+    LogicalKeyboardKey.keyR => _ProjectMenuAction.alacritty,
     LogicalKeyboardKey.keyT => _ProjectMenuAction.terminal,
-    LogicalKeyboardKey.keyP => _ProjectMenuAction.copyPath,
+    LogicalKeyboardKey.keyF => _ProjectMenuAction.copyPath,
     LogicalKeyboardKey.keyA => _ProjectMenuAction.archive,
-    LogicalKeyboardKey.keyI => _ProjectMenuAction.copyId,
+    LogicalKeyboardKey.keyD => _ProjectMenuAction.copyId,
     LogicalKeyboardKey.keyC => _ProjectMenuAction.enrich,
     _ => null,
   };
@@ -1046,12 +956,12 @@ class _ProjectActionMenuItem extends PopupMenuItem<_ProjectMenuAction> {
          height: 36,
          child: Text(switch (action) {
            _ProjectMenuAction.explorer => 'Open in Explorer (E)',
-           _ProjectMenuAction.alacritty => 'Open in Alacritty (L)',
+           _ProjectMenuAction.alacritty => 'Open in Alacritty (R)',
            _ProjectMenuAction.terminal => 'Open in Terminal (T)',
-           _ProjectMenuAction.copyPath => 'Copy path (P)',
+           _ProjectMenuAction.copyPath => 'Copy path (F)',
            _ProjectMenuAction.archive =>
              item.archivedAtMs == null ? 'Archive (A)' : 'Unarchive (A)',
-           _ProjectMenuAction.copyId => 'Copy project ID (I)',
+           _ProjectMenuAction.copyId => 'Copy project ID (D)',
            _ProjectMenuAction.enrich => 'Enrich clipboard (C)',
          }),
        );

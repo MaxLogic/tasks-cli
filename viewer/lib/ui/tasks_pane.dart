@@ -1,5 +1,5 @@
 /// Tasks region of the real workspace: the combined query, its filters, the
-/// virtual task list and the direct row jump.
+/// virtual task list and its filters.
 ///
 /// Contract: viewer/spec.md sections 4.3, 5 and 6 with viewer/design.md
 /// sections 5 and 6. Filters are delegated to the workspace model, whose task
@@ -35,7 +35,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     with FailureViewRegionFocus<ViewerTasksPane> {
   final TextEditingController _search = TextEditingController();
   final TextEditingController _labels = TextEditingController();
-  final TextEditingController _goToRow = TextEditingController();
   final FocusNode _scopeOpenFocus = FocusNode(debugLabel: 'tasks scope open');
   final FocusNode _scopeAllFocus = FocusNode(debugLabel: 'tasks scope all');
   final FocusNode _labelsFocus = FocusNode(debugLabel: 'tasks labels');
@@ -46,7 +45,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   final FocusNode _readinessFocus = FocusNode(debugLabel: 'tasks readiness');
   final FocusNode _sortFocus = FocusNode(debugLabel: 'tasks sort');
   final FocusNode _directionFocus = FocusNode(debugLabel: 'tasks direction');
-  final FocusNode _goToRowFocus = FocusNode(debugLabel: 'tasks go to row');
   final FocusNode _activeFiltersFocus = FocusNode(
     debugLabel: 'tasks active filters',
   );
@@ -65,7 +63,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
 
   TaskController? _bound;
   bool _filtersVisible = false;
-  String? _goToRowError;
 
   TaskController? get _tasks => widget.model.tasks;
 
@@ -85,7 +82,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     widget.model.removeListener(_syncExternalControls);
     _search.dispose();
     _labels.dispose();
-    _goToRow.dispose();
     _scopeOpenFocus.dispose();
     _scopeAllFocus.dispose();
     _labelsFocus.dispose();
@@ -94,7 +90,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     _readinessFocus.dispose();
     _sortFocus.dispose();
     _directionFocus.dispose();
-    _goToRowFocus.dispose();
     _activeFiltersFocus.dispose();
     _filtersToggleFocus.dispose();
     for (final node in _statusNodes.values) {
@@ -194,12 +189,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       case 'tasks.clearFilters':
         _clearFilters();
         return KeyEventResult.handled;
-      case 'tasks.goToRowField':
-        _goToRowFocus.requestFocus();
-        return KeyEventResult.handled;
-      case 'tasks.goToRow':
-        _goToSelectedRow();
-        return KeyEventResult.handled;
       case 'tasks.removeActiveFilterGroup':
         _activeFiltersFocus.requestFocus();
         return KeyEventResult.handled;
@@ -267,32 +256,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         dynamic: true,
       );
     }
-  }
-
-  /// Validates the typed row number against the reported total; never clamps.
-  void _goToSelectedRow() {
-    final tasks = _tasks;
-    if (tasks == null) {
-      return;
-    }
-    final total = tasks.totalCount;
-    final row = int.tryParse(_goToRow.text.trim());
-    if (total == 0) {
-      _reportGoToRow('There are no task rows to jump to.');
-      return;
-    }
-    if (row == null || row < 1 || row > total) {
-      _reportGoToRow('Enter a row number from 1 to $total. Nothing moved.');
-      return;
-    }
-    setState(() => _goToRowError = null);
-    _handles.list.goToIndex(row - 1);
-    unawaited(_ensureRow(row - 1));
-  }
-
-  void _reportGoToRow(String message) {
-    setState(() => _goToRowError = message);
-    widget.api.announce(message, dynamic: true);
   }
 
   /// Fetches the page that owns [index] and settles the pending row focus.
@@ -398,12 +361,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                   child: _buildStatusLine(context, tasks),
                 ),
                 Expanded(child: _buildList(context, tasks)),
-                ViewerPaneRegion(
-                  maxHeight: budget.footer,
-                  child: tasks.totalCount > 0
-                      ? _buildGoToRow(context, tasks)
-                      : const SizedBox.shrink(),
-                ),
               ],
             );
           },
@@ -919,6 +876,16 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
           unawaited(_showTaskMenu(item, index!));
           return KeyEventResult.handled;
         }
+        final action = _taskActionForKey(event);
+        if (action != null &&
+            _taskActionEnabled(
+              action,
+              item,
+              widget.model.editor.canWrite && !widget.model.editor.isSaving,
+            )) {
+          unawaited(_runTaskAction(item, index!, action));
+          return KeyEventResult.handled;
+        }
         return KeyEventResult.ignored;
       },
       child: AccessibleVirtualList(
@@ -1030,7 +997,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         await Clipboard.setData(
           ClipboardData(text: '${item.canonicalId} ${item.title}'),
         );
-        widget.api.announce('Task ID and title copied', dynamic: true);
+        widget.api.announce('Task ID and name copied', dynamic: true);
         return;
       }
       final model = widget.model;
@@ -1068,59 +1035,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     } on Object catch (error) {
       widget.api.announce('Task action failed: $error', dynamic: true);
     }
-  }
-
-  // ------------------------------------------------------------- go to row
-
-  Widget _buildGoToRow(BuildContext context, TaskController tasks) {
-    final theme = Theme.of(context);
-    final error = _goToRowError;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 2, 12, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          // A Wrap keeps the row count reachable in a narrow pane instead of
-          // overflowing the row (design.md section 2, 800x600 minimum).
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: <Widget>[
-              SizedBox(
-                width: 130,
-                child: TextField(
-                  controller: _goToRow,
-                  focusNode: _goToRowFocus,
-                  keyboardType: TextInputType.number,
-                  onSubmitted: (_) => _goToSelectedRow(),
-                  decoration: const InputDecoration(
-                    labelText: 'Go to row',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              TextButton(onPressed: _goToSelectedRow, child: const Text('Go')),
-              Text(
-                '1 to ${tasks.totalCount}',
-                style: theme.textTheme.bodySmall,
-              ),
-            ],
-          ),
-          if (error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                error,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.error,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
 
@@ -1257,6 +1171,26 @@ bool _taskActionEnabled(_TaskMenuAction action, TaskItem item, bool canWrite) =>
       _TaskMenuAction.cancel => canWrite && item.status != 'cancelled',
     };
 
+_TaskMenuAction? _taskActionForKey(KeyEvent event) {
+  final keyboard = HardwareKeyboard.instance;
+  if (event is! KeyDownEvent ||
+      keyboard.isControlPressed ||
+      keyboard.isAltPressed ||
+      keyboard.isShiftPressed ||
+      keyboard.isMetaPressed) {
+    return null;
+  }
+  return switch (event.logicalKey) {
+    LogicalKeyboardKey.keyC => _TaskMenuAction.copySummary,
+    LogicalKeyboardKey.keyV => _TaskMenuAction.copyContent,
+    LogicalKeyboardKey.keyE => _TaskMenuAction.edit,
+    LogicalKeyboardKey.keyD => _TaskMenuAction.done,
+    LogicalKeyboardKey.keyB => _TaskMenuAction.block,
+    LogicalKeyboardKey.keyX => _TaskMenuAction.cancel,
+    _ => null,
+  };
+}
+
 class _TaskActionMenuItem extends PopupMenuItem<_TaskMenuAction> {
   _TaskActionMenuItem({
     required this.action,
@@ -1266,8 +1200,8 @@ class _TaskActionMenuItem extends PopupMenuItem<_TaskMenuAction> {
          value: action,
          enabled: _taskActionEnabled(action, item, canWrite),
          child: Text(switch (action) {
-           _TaskMenuAction.copySummary => 'Copy ID and title (I)',
-           _TaskMenuAction.copyContent => 'Copy content (C)',
+           _TaskMenuAction.copySummary => 'Copy ID and name (C)',
+           _TaskMenuAction.copyContent => 'Copy content (V)',
            _TaskMenuAction.edit => 'Edit task (E)',
            _TaskMenuAction.done => 'Mark done (D)',
            _TaskMenuAction.block => 'Block task (B)',
@@ -1303,15 +1237,7 @@ class _TaskActionMenuItemState
         if (widget.enabled) Navigator.of(context).pop(widget.action);
         return KeyEventResult.handled;
       }
-      final action = switch (event.logicalKey) {
-        LogicalKeyboardKey.keyI => _TaskMenuAction.copySummary,
-        LogicalKeyboardKey.keyC => _TaskMenuAction.copyContent,
-        LogicalKeyboardKey.keyE => _TaskMenuAction.edit,
-        LogicalKeyboardKey.keyD => _TaskMenuAction.done,
-        LogicalKeyboardKey.keyB => _TaskMenuAction.block,
-        LogicalKeyboardKey.keyX => _TaskMenuAction.cancel,
-        _ => null,
-      };
+      final action = _taskActionForKey(event);
       if (action == null) return KeyEventResult.ignored;
       if (_taskActionEnabled(action, widget.item, widget.canWrite)) {
         Navigator.of(context).pop(action);

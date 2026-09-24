@@ -41,11 +41,11 @@ void main() {
       await tester.pumpAndSettle();
       await pressKey(tester, LogicalKeyboardKey.f2);
       await pressKey(tester, LogicalKeyboardKey.contextMenu);
-      expect(find.text('Copy ID and title (I)'), findsOneWidget);
+      expect(find.text('Copy ID and name (C)'), findsOneWidget);
       expectAccessibleSemantics(tester);
       expect(
-        tester.getSemantics(find.text('Copy ID and title (I)')).label,
-        'Copy ID and title (I)',
+        tester.getSemantics(find.text('Copy ID and name (C)')).label,
+        'Copy ID and name (C)',
       );
       await pressKey(tester, LogicalKeyboardKey.escape);
 

@@ -90,14 +90,18 @@ void main() {
     await pressKey(tester, LogicalKeyboardKey.f2);
     await pressControl(tester, LogicalKeyboardKey.keyC);
     expect(copied, 'T-001 First task');
+    copied = null;
+    await pressKey(tester, LogicalKeyboardKey.keyC);
+    expect(copied, 'T-001 First task');
     await pressKey(tester, LogicalKeyboardKey.contextMenu);
-    expect(find.text('Copy content (C)'), findsOneWidget);
+    expect(find.text('Copy ID and name (C)'), findsOneWidget);
+    expect(find.text('Copy content (V)'), findsOneWidget);
     expect(find.text('Block task (B)'), findsOneWidget);
     expect(find.text('Cancel task (X)'), findsOneWidget);
     await pressKey(tester, LogicalKeyboardKey.escape);
     await tester.tap(find.byTooltip('Actions for T-002'));
     await tester.pumpAndSettle();
-    await pressKey(tester, LogicalKeyboardKey.keyI);
+    await pressKey(tester, LogicalKeyboardKey.keyC);
     await tester.pumpAndSettle();
     expect(copied, 'T-002 Second task');
   });
@@ -185,26 +189,26 @@ void main() {
     await tester.tap(find.byTooltip('Actions for Project 1'));
     await tester.pumpAndSettle();
     expect(find.text('Open in Explorer (E)'), findsOneWidget);
-    expect(find.text('Open in Alacritty (L)'), findsOneWidget);
+    expect(find.text('Open in Alacritty (R)'), findsOneWidget);
     expect(find.text('Open in Terminal (T)'), findsOneWidget);
-    expect(find.text('Copy path (P)'), findsOneWidget);
+    expect(find.text('Copy path (F)'), findsOneWidget);
     expect(find.text('Archive (A)'), findsOneWidget);
-    expect(find.text('Copy project ID (I)'), findsOneWidget);
+    expect(find.text('Copy project ID (D)'), findsOneWidget);
     expect(find.text('Enrich clipboard (C)'), findsWidgets);
 
-    await pressKey(tester, LogicalKeyboardKey.keyP);
+    await pressKey(tester, LogicalKeyboardKey.keyF);
     await tester.pumpAndSettle();
     expect(copied, testProjectItem(1).roots.first);
     copied = null;
     await pressKey(tester, LogicalKeyboardKey.f1);
-    await pressKey(tester, LogicalKeyboardKey.keyI);
+    await pressKey(tester, LogicalKeyboardKey.keyD);
     expect(copied, firstProjectId);
     await pressKey(tester, LogicalKeyboardKey.contextMenu);
     expect(find.text('Archive (A)'), findsOneWidget);
     await pressKey(tester, LogicalKeyboardKey.escape);
     await tester.tap(find.text('Project 1').first, buttons: 2);
     await tester.pumpAndSettle();
-    expect(find.text('Copy path (P)'), findsOneWidget);
+    expect(find.text('Copy path (F)'), findsOneWidget);
     await pressKey(tester, LogicalKeyboardKey.escape);
     await pressKey(tester, LogicalKeyboardKey.f1);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
@@ -274,94 +278,6 @@ void main() {
       } finally {
         semantics.dispose();
       }
-    });
-
-    testWidgets('a cross-page jump loads and focuses the row it names', (
-      WidgetTester tester,
-    ) async {
-      final semantics = tester.ensureSemantics();
-      try {
-        final reads = fakeWorkspaceReads(
-          tasks: {firstProjectId: _taskRange(250)},
-        );
-        final harness = await pumpTaskBrowser(tester, reads: reads);
-        expect(harness.model.tasks!.totalCount, 250);
-
-        await tester.enterText(tasksGoToRowField(), '200');
-        await tester.tap(tasksGoButton());
-        await tester.pumpAndSettle();
-
-        final list = harness.list(ViewerRegion.tasks);
-        expect(list.selectedIndex, 199);
-        expect(list.focusedRowIndex, 199);
-        final row = find.bySemanticsLabel(RegExp(r'^T-200,'));
-        expect(row, findsOneWidget);
-        expect(tester.getSemantics(row).value, 'row 200 of 250');
-        expect(
-          reads.taskRequests.map((query) => query.offset),
-          containsAll(<int>[0, 100, 200]),
-          reason: 'the jump reads the page that owns row 200',
-        );
-      } finally {
-        semantics.dispose();
-      }
-    });
-
-    testWidgets('a row number outside the list is refused without moving', (
-      WidgetTester tester,
-    ) async {
-      final harness = await pumpTaskBrowser(tester);
-      final before = harness.list(ViewerRegion.tasks).selectedIndex;
-
-      await tester.enterText(tasksGoToRowField(), '900');
-      await tester.tap(tasksGoButton());
-      await tester.pumpAndSettle();
-
-      const message = 'Enter a row number from 1 to 3. Nothing moved.';
-      expect(
-        find.descendant(
-          of: find.byType(ViewerTasksPane),
-          matching: find.text(message),
-        ),
-        findsOneWidget,
-        reason: 'the refusal stays visible next to the Go to row control',
-      );
-      expect(harness.liveText, message);
-      expect(harness.list(ViewerRegion.tasks).selectedIndex, before);
-      expect(harness.model.tasks!.selectedTaskId, isNull);
-    });
-
-    testWidgets('a refused row reaches the engine announce channel', (
-      WidgetTester tester,
-    ) async {
-      final log = <Map<dynamic, dynamic>>[];
-      tester.binding.defaultBinaryMessenger
-          .setMockDecodedMessageHandler<dynamic>(SystemChannels.accessibility, (
-            dynamic message,
-          ) async {
-            log.add(message as Map<dynamic, dynamic>);
-          });
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger
-            .setMockDecodedMessageHandler<dynamic>(
-              SystemChannels.accessibility,
-              null,
-            ),
-      );
-
-      await pumpTaskBrowser(tester);
-      await tester.enterText(tasksGoToRowField(), '900');
-      await tester.tap(tasksGoButton());
-      await tester.pumpAndSettle();
-
-      // The Windows bridge drops SemanticsFlag.isLiveRegion, so the status
-      // message must leave through the engine announce channel once.
-      const message = 'Enter a row number from 1 to 3. Nothing moved.';
-      final announced = log
-          .where((entry) => entry['type'] == 'announce')
-          .map((entry) => (entry['data'] as Map<dynamic, dynamic>)['message'])
-          .where((text) => text == message);
-      expect(announced, hasLength(1));
     });
   });
 
@@ -447,40 +363,6 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('body text'), findsOneWidget);
-    });
-
-    testWidgets('a slow row jump announces the row it waits for', (
-      WidgetTester tester,
-    ) async {
-      final reads = fakeWorkspaceReads(
-        tasks: {firstProjectId: _taskRange(250)},
-        latency: const Duration(milliseconds: 1500),
-      );
-      final harness = await pumpRealViewer(tester, reads: reads, settle: false);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 1500));
-      harness.model.selectProjectIndex(0);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 1500));
-      expect(harness.model.tasks!.totalCount, 250);
-
-      await tester.enterText(tasksGoToRowField(), '200');
-      await tester.tap(tasksGoButton());
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(harness.statusText, 'Loading row 200');
-      expect(
-        harness.liveText,
-        isNull,
-        reason: 'progress is coalesced behind the announcement delay',
-      );
-
-      await tester.pump(const Duration(milliseconds: 600));
-      expect(harness.liveText, 'Loading row 200');
-      expect(harness.list(ViewerRegion.tasks).hasPendingTarget, isTrue);
-
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.pumpAndSettle();
-      expect(harness.list(ViewerRegion.tasks).focusedRowIndex, 199);
     });
 
     testWidgets('End reaches the last row after its page loads', (

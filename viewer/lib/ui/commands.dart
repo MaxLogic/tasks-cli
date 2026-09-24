@@ -577,22 +577,6 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyC)],
     ),
     CommandSpec(
-      id: 'projects.goToRowField',
-      scope: CommandScope.projects,
-      group: HelpGroup.projects,
-      label: 'Go to row field',
-      description: 'Focus the Go to row number field.',
-      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyG)],
-    ),
-    CommandSpec(
-      id: 'projects.goToRow',
-      scope: CommandScope.projects,
-      group: HelpGroup.projects,
-      label: 'Go to row',
-      description: 'Jump to the row typed in the Go to row field.',
-      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyJ)],
-    ),
-    CommandSpec(
       id: 'projects.copyProjectId',
       scope: CommandScope.projects,
       group: HelpGroup.projects,
@@ -736,22 +720,6 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Return to Open scope with no statuses, priorities, labels or '
           'readiness filter and an empty query, keeping the chosen sort.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyC)],
-    ),
-    CommandSpec(
-      id: 'tasks.goToRowField',
-      scope: CommandScope.tasks,
-      group: HelpGroup.tasks,
-      label: 'Go to row field',
-      description: 'Focus the Go to row number field.',
-      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyG)],
-    ),
-    CommandSpec(
-      id: 'tasks.goToRow',
-      scope: CommandScope.tasks,
-      group: HelpGroup.tasks,
-      label: 'Go to row',
-      description: 'Jump to the row typed in the Go to row field.',
-      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyJ)],
     ),
     CommandSpec(
       id: 'tasks.removeActiveFilterGroup',
