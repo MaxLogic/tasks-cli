@@ -150,7 +150,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
 
   bool get canArchiveProjects => readers.projectArchive != null;
 
-  Future<void> setProjectArchived(
+  Future<bool> setProjectArchived(
     ProjectItem project, {
     required bool archived,
   }) async {
@@ -158,8 +158,22 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     if (writer == null) {
       throw StateError('Project archive commands are unavailable.');
     }
+    final selectionWillDisappear =
+        selectedProjectId == project.projectId &&
+        (archived
+            ? projectList.stateFilter != ProjectStateFilter.archived
+            : projectList.stateFilter == ProjectStateFilter.archived);
+    if (selectionWillDisappear &&
+        !await requestLeave(EditorLeaveReason.projectSwitch)) {
+      return false;
+    }
     await writer.setProjectArchived(project.projectId, archived: archived);
+    if (selectionWillDisappear && selectedProjectId == project.projectId) {
+      editor.exitEdit();
+      projectList.selectProjectId(null);
+    }
     await projectList.refresh();
+    return true;
   }
 
   String? get selectedProjectId => projectList.selectedProjectId;

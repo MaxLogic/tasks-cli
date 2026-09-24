@@ -530,10 +530,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
           widget.api.announce('Project path copied', dynamic: true);
           return;
         case _ProjectMenuAction.archive:
-          await widget.model.setProjectArchived(
+          final changed = await widget.model.setProjectArchived(
             item,
             archived: item.archivedAtMs == null,
           );
+          if (!changed) return;
           widget.api.announce(
             item.archivedAtMs == null
                 ? '${item.name} archived'

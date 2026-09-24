@@ -207,8 +207,8 @@ live or human gate that this run cannot perform by direction.
 | V09 | passed with 3 unavailable rows | `viewer/tool/measure.ps1` acceptance run: fixtures, percentiles and raw samples recorded; M09-M11 (frame time, peak working set, NVDA on/off) unavailable - section 6 |
 | V10 | unavailable | walkthroughs B and C ran live under NVDA on 2026-09-22 with speech logs and CLI ground truth, and walkthrough D reached D0-D2r live; walkthrough A never ran beyond the blocked attempt, walkthroughs E and F have not run. Walkthrough C's step-4a caret defect is fixed in `719ba66` with a RED/GREEN Windows-variant widget test, but that step still needs a live re-run. This row needs every walkthrough, so it stays unavailable - section 7 |
 | V11 | passed | G05 hotkey suites: F1/F2/F3 focus targets, remembered-list Ctrl+F, scoped access keys, modal isolation, key-repeat suppression, Ctrl+D and Ctrl+E routing, the permanently visible Hotkey help button/F10 with focus return |
-| V12 | unavailable | startup registration and single-instance classification pass in G05 and the packaged launch test covers the no-window opt-out path, but a real sign-in proof in a disposable Windows account and the changed/missing-monitor and live-DPI checks need a live session |
-| V13 | unavailable | generation, manifest/hash integrity, packaged clips, offline verification and package rejection are proven; audible listening and the real-listening checks need a human - section 7 |
+| V12 | unavailable | startup registration and single-instance classification pass in G05 and the packaged launch test covers the no-window opt-out path, but a real sign-in proof in a disposable Windows account and the changed/missing-monitor checks need a live session. High-DPI change testing is skipped at the user's request. |
+| V13 | unavailable | generation, manifest/hash integrity, packaged clips, offline verification and package rejection are proven. On 2026-09-24 the user confirmed hearing Bella speak the Test voice clip in the running viewer. Full clip listening and other playback-behavior checks remain open - section 7. |
 
 ## 6. Section 10 performance and correctness evidence
 
@@ -283,8 +283,9 @@ and `viewer/assets/announcements/manifest.json`. Generation and integrity eviden
 speech-to-text round trip matched 20/20 transcripts. No API key, task text or private data is in any
 committed file, and `package.ps1` scans the bundle for credentials before it will ship it.
 
-What is **not** verified: a human listening check of the clips, and audible playback on a device.
-That is the V13 gap, and it is why V13 stays unavailable.
+On 2026-09-24 the user confirmed hearing Bella speak the Test voice clip in the running viewer.
+This confirms that clip's audible playback. Offline playback, the other clips and the
+playback-behavior cases remain open, so V13 stays unavailable.
 
 ### Windows startup and sign-in
 
@@ -296,7 +297,8 @@ runs from a temporary root whose path contains spaces and non-ASCII characters.
 
 Not verified: a real sign-in/sign-out in a disposable Windows account, the "Start with Windows"
 shortcut pointing at an installed bundle, a moved bundle, a policy-disabled startup entry, and
-monitor/DPI changes including a disconnected monitor. Deliberately, no real Startup entry was
+monitor changes including a disconnected monitor. High-DPI change testing is skipped at the user's
+request. Deliberately, no real Startup entry was
 created, changed or removed by any run.
 
 ### Live NVDA walkthroughs
@@ -352,8 +354,8 @@ options rather than queued work.
 | V08 | Authorize one bounded live windowed session of the packaged candidate (window flows plus UI Automation), with synthetic-only clipboard text placed by the tester | packaged launch, cross virtual boundary, second-writer conflict, clipboard preview/enrichment, restart-with-draft and unavailable-store recovery |
 | V09 rows M09-M11 | Authorize the bounded windowed profiling run, with NVDA running for M11 | 60-second scroll frame time, release peak working set, frame/memory with NVDA on and off |
 | V10 | Run NVDA with the Speech Viewer open in a bounded live session, or perform the remaining walkthroughs by hand: A (its `NVDA+N`, `T`, `S` unblock note is in `target/evidence/viewer/2026-09-21-nvda-walkthrough-a/README.md`), C step 4a against the caret fix, E and F | every design.md walkthrough with speech evidence and real text editing |
-| V12 | Create or authorize a disposable local Windows account and one bounded monitor/DPI change | real sign-in launch, default-on registration across sign-out/in, changed/missing monitor and live-DPI checks |
-| V13 | One human listening pass over the 20 bundled clips, with the packaged offline playback | audible Bella playback, volume and Test-voice modes, rapid-event cancellation and playback-failure fallback |
+| V12 | Create or authorize a disposable local Windows account and one bounded monitor change at the current display scale | real sign-in launch, default-on registration across sign-out/in, changed/missing monitor checks; high-DPI changes are skipped |
+| V13 | One human listening pass over the remaining bundled clips, with the packaged offline playback | remaining clip content, volume and announcement modes, rapid-event cancellation and playback-failure fallback; Bella's Test voice was heard |
 
 V01-V07, V11 and the catalog rows of V09 pass headlessly, and the portable bundle re-verifies against
 the current candidate, so these rows are the complete distance between it and release acceptance.
@@ -374,8 +376,8 @@ the current candidate, so these rows are the complete distance between it and re
   they run, release acceptance is incomplete no matter how green the automated gates are.
 - M09-M11 (frame time under scroll, peak working set, NVDA on/off) need a windowed profile session;
   the viewer's memory and raster behaviour is therefore unmeasured.
-- The Windows DPI-changing test was intentionally skipped at the user's request. No verification run
-  changed the system display scale or DPI.
+- High-DPI change tests are skipped at the user's request. No verification run changed the system
+  display scale or DPI.
 - Performance numbers describe this host and these fixtures, not a promise for arbitrary backlogs.
 - Clipboard coverage is the fake clipboard in the automated suites plus synthetic text in the earlier
   live walkthroughs; the automated clipboard tests never touched the real clipboard.

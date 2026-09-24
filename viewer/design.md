@@ -52,7 +52,7 @@ Task rows use two text lines at normal density; project rows use four in their d
 
 Order: heading, labelled "Search projects" field, state filter, sort controls, Clear filters, result count, list, selected-project summary, clipboard buttons.
 
-Search helper text: "Search name, path or project ID". A Clear search button has that exact accessible name. State filter labels map to spec values: All projects, With open tasks, With blocked tasks, Complete, Empty, Unavailable. Default With open tasks. Sort choices: Name, Open tasks, Total tasks, Blocked tasks, Started, Last task write, Progress. Default Last task write descending. A separate Ascending/Descending control exposes current direction. Save project filter, sort, and direction as viewer preferences. Clear filters resets query/state only, preserving chosen sort.
+Search helper text: "Search name, path or project ID". A Clear search button has that exact accessible name. State filter labels map to spec values: All projects, With open tasks, With blocked tasks, Complete, Empty, Unavailable, Active, Archived. Only Archived shows archived projects; every other state excludes them. Default With open tasks. Sort choices: Name, Open tasks, Total tasks, Blocked tasks, Started, Last task write, Progress. Default Last task write descending. A separate Ascending/Descending control exposes current direction. Save project filter, sort, and direction as viewer preferences. Clear filters resets query/state only, preserving chosen sort.
 
 Default row presentation:
 

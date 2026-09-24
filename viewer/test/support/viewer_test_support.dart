@@ -15,6 +15,7 @@ import 'package:tasks_viewer/app_environment.dart';
 import 'package:tasks_viewer/controllers/announcement_catalog.dart';
 import 'package:tasks_viewer/controllers/announcement_controller.dart';
 import 'package:tasks_viewer/data/models.dart';
+import 'package:tasks_viewer/data/project_archive.dart';
 import 'package:tasks_viewer/data/editor_models.dart';
 import 'package:tasks_viewer/data/settings_store.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
@@ -410,6 +411,10 @@ class FakeWorkspaceReads
       return false;
     }
     final stats = item.stats;
+    if (query.state != ProjectStateFilter.archived &&
+        item.archivedAtMs != null) {
+      return false;
+    }
     return switch (query.state) {
       ProjectStateFilter.all => true,
       ProjectStateFilter.active => item.archivedAtMs == null,
@@ -518,6 +523,7 @@ Future<RealViewerHarness> pumpRealViewer(
   Size surface = const Size(1600, 900),
   AnnouncementMode mode = AnnouncementMode.nvdaOnly,
   TaskUpdateWriter? update,
+  ProjectArchiveWriter? projectArchive,
   ClipboardEnricher? enricher,
   ViewerClipboard? clipboard,
   RecoveryDraftSink? drafts,
@@ -547,6 +553,7 @@ Future<RealViewerHarness> pumpRealViewer(
           detail: backend,
           probe: backend.probe,
           update: update,
+          projectArchive: projectArchive,
           clipboard: enricher,
           drafts: drafts,
         ),
@@ -619,7 +626,9 @@ ProjectItem testProjectItem(
   int open = 3,
   int blocked = 0,
   bool unavailable = false,
+  int? archivedAtMs,
 }) => ProjectItem(
+  archivedAtMs: archivedAtMs,
   projectId:
       projectId ??
       '00000000-0000-4000-8000-${index.toString().padLeft(12, '0')}',
