@@ -2584,6 +2584,77 @@ fn viewer_update_validation_errors_write_nothing() {
 }
 
 #[test]
+fn archived_projects_only_appear_in_the_explicit_archived_filter() {
+    let root = tempfile::tempdir().unwrap();
+    let mut active_ids = Vec::new();
+    let mut archived_ids = Vec::new();
+    for kind in ["blocked", "done", "empty", "missing", "error"] {
+        for archived in [false, true] {
+            let (id, _) = add_project(root.path(), &format!("{kind}-{archived}"));
+            if matches!(kind, "blocked" | "done") {
+                let conn = Connection::open(project_db(root.path(), &id)).unwrap();
+                conn.execute(
+                    "INSERT INTO tasks(id,title,body,status,priority,version,created_ms,updated_ms) VALUES(1,'task','',?1,'P2',1,1,1)",
+                    [kind],
+                ).unwrap();
+            } else if kind == "missing" {
+                fs::remove_file(project_db(root.path(), &id)).unwrap();
+            } else if kind == "error" {
+                fs::write(project_db(root.path(), &id), b"not a database").unwrap();
+            }
+            if archived {
+                let args = viewer_args(root.path(), Some(&id.to_string()), &["viewer", "archive"]);
+                spawn(&args, None).data();
+                archived_ids.push(id.to_string());
+            } else {
+                active_ids.push(id.to_string());
+            }
+        }
+    }
+    for state in [
+        "all",
+        "active",
+        "has-open",
+        "has-blocked",
+        "complete",
+        "empty",
+        "unavailable",
+    ] {
+        let page = projects(root.path(), json!({"state": state})).data();
+        let expected_indices: &[usize] = match state {
+            "has-open" | "has-blocked" => &[0],
+            "complete" => &[1],
+            "empty" => &[2],
+            "unavailable" => &[3, 4],
+            _ => &[0, 1, 2, 3, 4],
+        };
+        let mut expected: Vec<_> = expected_indices
+            .iter()
+            .map(|&i| active_ids[i].clone())
+            .collect();
+        expected.sort();
+        assert_eq!(sorted_project_ids(&page), expected, "state {state}");
+        assert_eq!(page["total_count"], expected.len(), "state {state}");
+    }
+    active_ids.sort();
+    assert_eq!(
+        sorted_project_ids(&projects(root.path(), json!({})).data()),
+        active_ids
+    );
+    archived_ids.sort();
+    let archived = projects(root.path(), json!({"state": "archived"})).data();
+    assert_eq!(sorted_project_ids(&archived), archived_ids);
+    let searched = projects(root.path(), json!({"query": "-true"})).data();
+    assert_eq!(searched["total_count"], 0);
+    let searched_archived = projects(
+        root.path(),
+        json!({"state": "archived", "query": "blocked"}),
+    )
+    .data();
+    assert_eq!(searched_archived["total_count"], 1);
+}
+
+#[test]
 fn project_cache_reuses_unchanged_stats_and_archive_reopens_on_new_write() {
     let root = tempfile::tempdir().unwrap();
     let (id, _) = add_project(root.path(), "cached");
@@ -2609,7 +2680,7 @@ fn project_cache_reuses_unchanged_stats_and_archive_reopens_on_new_write() {
     assert_eq!(page["items"][0]["archived_at_ms"], archived);
     let conn = Connection::open(project_db(root.path(), &id)).unwrap();
     conn.execute("INSERT INTO tasks(id,title,body,status,priority,version,created_ms,updated_ms) VALUES(1,'new','','todo','P2',1,?1,?1)", [archived]).unwrap();
-    let equal = spawn(&args, Some(b"{}")).data();
+    let equal = spawn(&args, Some(br#"{"state":"archived"}"#)).data();
     assert_eq!(equal["items"][0]["archived_at_ms"], archived);
     conn.execute(
         "UPDATE tasks SET updated_ms=?1 WHERE id=1",

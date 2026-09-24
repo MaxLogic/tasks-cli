@@ -1217,6 +1217,9 @@ fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats
 }
 
 fn matches_project_query(record: &ProjectRecord, query: &ProjectQuery) -> bool {
+    if record.archived_at_ms.is_some() && query.state != ProjectState::Archived {
+        return false;
+    }
     if !query.query.is_empty() {
         let needle = query.query.to_ascii_lowercase();
         let matched = std::iter::once(record.name.as_str())
