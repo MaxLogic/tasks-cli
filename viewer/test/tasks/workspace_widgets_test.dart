@@ -43,6 +43,65 @@ Future<RealViewerHarness> pumpTaskBrowser(
 }
 
 void main() {
+  for (final entry in {
+    'blocked': LogicalKeyboardKey.keyB,
+    'cancelled': LogicalKeyboardKey.keyX,
+  }.entries) {
+    testWidgets(
+      'task menu changes status to ${entry.key} with a versioned write',
+      (tester) async {
+        final writer = FakeTaskWriter()..nextStatus = entry.key;
+        final harness = await pumpRealViewer(tester, update: writer);
+        harness.model.selectProjectIndex(0);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Actions for T-002'));
+        await tester.pumpAndSettle();
+        await pressKey(tester, entry.value);
+        await tester.pumpAndSettle();
+        expect(writer.requests, hasLength(1));
+        expect(writer.lastRequest.id, 2);
+        expect(writer.lastRequest.expectVersion, 1);
+        expect(writer.lastRequest.changes.status, entry.key);
+        expect(writer.lastRequest.changes.title, isNull);
+      },
+    );
+  }
+
+  testWidgets('task row copies summary and exposes keyboard context actions', (
+    tester,
+  ) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    await pumpTaskBrowser(tester);
+    await pressKey(tester, LogicalKeyboardKey.f2);
+    await pressControl(tester, LogicalKeyboardKey.keyC);
+    expect(copied, 'T-001 First task');
+    await pressKey(tester, LogicalKeyboardKey.contextMenu);
+    expect(find.text('Copy content (C)'), findsOneWidget);
+    expect(find.text('Block task (B)'), findsOneWidget);
+    expect(find.text('Cancel task (X)'), findsOneWidget);
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    await tester.tap(find.byTooltip('Actions for T-002'));
+    await tester.pumpAndSettle();
+    await pressKey(tester, LogicalKeyboardKey.keyI);
+    await tester.pumpAndSettle();
+    expect(copied, 'T-002 Second task');
+  });
+
   testWidgets(
     'task heading is contextual and All status toggles every status',
     (tester) async {
@@ -125,16 +184,38 @@ void main() {
     expect(find.bySemanticsLabel('Actions for Project 1'), findsOneWidget);
     await tester.tap(find.byTooltip('Actions for Project 1'));
     await tester.pumpAndSettle();
-    expect(find.text('Open in Explorer'), findsOneWidget);
-    expect(find.text('Open in Alacritty'), findsOneWidget);
-    expect(find.text('Open in Terminal'), findsOneWidget);
-    expect(find.text('Copy path'), findsOneWidget);
-    expect(find.text('Archive'), findsOneWidget);
-    expect(find.text('Copy project ID'), findsOneWidget);
-    expect(find.text('Enrich clipboard'), findsWidgets);
+    expect(find.text('Open in Explorer (E)'), findsOneWidget);
+    expect(find.text('Open in Alacritty (L)'), findsOneWidget);
+    expect(find.text('Open in Terminal (T)'), findsOneWidget);
+    expect(find.text('Copy path (P)'), findsOneWidget);
+    expect(find.text('Archive (A)'), findsOneWidget);
+    expect(find.text('Copy project ID (I)'), findsOneWidget);
+    expect(find.text('Enrich clipboard (C)'), findsWidgets);
 
-    await tester.tap(find.text('Copy path'));
+    await pressKey(tester, LogicalKeyboardKey.keyP);
     await tester.pumpAndSettle();
+    expect(copied, testProjectItem(1).roots.first);
+    copied = null;
+    await pressKey(tester, LogicalKeyboardKey.f1);
+    await pressKey(tester, LogicalKeyboardKey.keyI);
+    expect(copied, firstProjectId);
+    await pressKey(tester, LogicalKeyboardKey.contextMenu);
+    expect(find.text('Archive (A)'), findsOneWidget);
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    await tester.tap(find.text('Project 1').first, buttons: 2);
+    await tester.pumpAndSettle();
+    expect(find.text('Copy path (P)'), findsOneWidget);
+    await pressKey(tester, LogicalKeyboardKey.escape);
+    await pressKey(tester, LogicalKeyboardKey.f1);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await pressKey(tester, LogicalKeyboardKey.f10);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    expect(find.text('Archive (A)'), findsOneWidget);
+    copied = null;
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    await pressKey(tester, LogicalKeyboardKey.arrowDown);
+    await pressKey(tester, LogicalKeyboardKey.enter);
     expect(copied, testProjectItem(1).roots.first);
     semantics.dispose();
   });

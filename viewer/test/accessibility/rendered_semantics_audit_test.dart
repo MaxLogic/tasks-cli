@@ -39,6 +39,13 @@ void main() {
                   Semantics(
                     button: true,
                     onTap: () {},
+                    tooltip: 'Tooltip without a name',
+                    child: const SizedBox(width: 48, height: 48),
+                  ),
+                  Semantics(
+                    button: true,
+                    enabled: false,
+                    tooltip: 'Disabled tooltip without a name',
                     child: const SizedBox(width: 48, height: 48),
                   ),
                   const TextField(),
@@ -58,9 +65,12 @@ void main() {
         tester,
       ).map((failure) => failure.problem).toList();
       expect(problems, contains('enabled button or link has no tap action'));
+      expect(problems, contains('interactive control has no accessible name'));
       expect(
-        problems,
-        contains('interactive control has no accessible name or tooltip'),
+        problems.where(
+          (problem) => problem == 'interactive control has no accessible name',
+        ),
+        hasLength(3), // Two buttons plus the unnamed editable field.
       );
       expect(problems, contains('text field has no accessible name'));
       expect(problems, contains('route scope has no accessible name'));
@@ -79,11 +89,24 @@ void main() {
         await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
         expectAccessibleSemantics(tester);
 
-        final refresh = tester
-            .getSemantics(find.byTooltip('Refresh (F5)'))
-            .getSemanticsData();
-        expect(refresh.flagsCollection.isButton, isTrue);
-        expect(refresh.hasAction(ui.SemanticsAction.tap), isTrue);
+        for (final label in <String>[
+          'Refresh (F5)',
+          'Settings (Ctrl+,)',
+          'Hotkey help (F10)',
+        ]) {
+          final button = tester
+              .getSemantics(
+                find.descendant(
+                  of: find.byTooltip(label),
+                  matching: find.byType(IconButton),
+                ),
+              )
+              .getSemanticsData();
+          expect(button.label, label);
+          expect(button.flagsCollection.isButton, isTrue);
+          expect(button.flagsCollection.isFocused, isNot(ui.Tristate.none));
+          expect(button.hasAction(ui.SemanticsAction.tap), isTrue);
+        }
 
         final project = tester.getSemantics(
           find.bySemanticsLabel(RegExp(r'^Project 1\.')),
@@ -127,6 +150,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Filters (Open tasks)'));
       await tester.pumpAndSettle();
+      expectAccessibleSemantics(tester);
 
       final readiness = find.descendant(
         of: find.byType(ViewerTasksPane),
@@ -183,7 +207,16 @@ void main() {
     try {
       await pumpRealViewer(tester);
 
-      await pressControl(tester, LogicalKeyboardKey.comma);
+      final settings = tester.getSemantics(
+        find.descendant(
+          of: find.byTooltip('Settings (Ctrl+,)'),
+          matching: find.byType(IconButton),
+        ),
+      );
+      tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+        settings.id,
+        ui.SemanticsAction.tap,
+      );
       await tester.pumpAndSettle();
       expect(find.text('Settings'), findsOneWidget);
       expect(renderedHasNamedRoute(tester, 'Settings'), isTrue);
@@ -192,7 +225,16 @@ void main() {
 
       await pressKey(tester, LogicalKeyboardKey.escape);
       await tester.pumpAndSettle();
-      await pressKey(tester, LogicalKeyboardKey.f10);
+      final help = tester.getSemantics(
+        find.descendant(
+          of: find.byTooltip('Hotkey help (F10)'),
+          matching: find.byType(IconButton),
+        ),
+      );
+      tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+        help.id,
+        ui.SemanticsAction.tap,
+      );
       await tester.pumpAndSettle();
       expect(find.text('Keyboard help'), findsOneWidget);
       expect(renderedHasNamedRoute(tester, 'Keyboard help'), isTrue);

@@ -5,6 +5,7 @@
 library;
 
 import '../controllers/announcement_controller.dart';
+import 'models.dart';
 
 /// Theme choice for the window.
 enum ViewerThemeMode {
@@ -31,6 +32,9 @@ class ViewerSettingsDraft {
     this.startWithWindows = true,
     this.announcementMode = AnnouncementMode.bella,
     this.bellaVolumePercent = 70,
+    this.projectState = ProjectStateFilter.hasOpen,
+    this.projectSort = ProjectSort.lastWrite,
+    this.projectDirection = SortDirection.descending,
   });
 
   /// Absolute path of the tasks executable, or null when unresolved.
@@ -50,6 +54,9 @@ class ViewerSettingsDraft {
 
   final AnnouncementMode announcementMode;
   final int bellaVolumePercent;
+  final ProjectStateFilter projectState;
+  final ProjectSort projectSort;
+  final SortDirection projectDirection;
 
   ViewerSettingsDraft copyWith({
     String? cliPath,
@@ -64,6 +71,9 @@ class ViewerSettingsDraft {
     bool? startWithWindows,
     AnnouncementMode? announcementMode,
     int? bellaVolumePercent,
+    ProjectStateFilter? projectState,
+    ProjectSort? projectSort,
+    SortDirection? projectDirection,
   }) {
     return ViewerSettingsDraft(
       cliPath: clearCliPath ? null : (cliPath ?? this.cliPath),
@@ -76,6 +86,9 @@ class ViewerSettingsDraft {
       startWithWindows: startWithWindows ?? this.startWithWindows,
       announcementMode: announcementMode ?? this.announcementMode,
       bellaVolumePercent: bellaVolumePercent ?? this.bellaVolumePercent,
+      projectState: projectState ?? this.projectState,
+      projectSort: projectSort ?? this.projectSort,
+      projectDirection: projectDirection ?? this.projectDirection,
     );
   }
 

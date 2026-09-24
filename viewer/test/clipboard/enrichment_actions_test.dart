@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/data/models.dart';
+import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/ui/app_shell.dart';
 
 import '../support/viewer_test_support.dart';
@@ -39,6 +40,7 @@ Future<ClipboardViewer> launchClipboardViewer(
   bool withEnricher = true,
   bool selectProject = true,
   String? clipboardText,
+  ViewerSettingsDraft settings = const ViewerSettingsDraft(),
 }) async {
   final enricher = FakeClipboardEnricher();
   final clipboard = FakeViewerClipboard(text: clipboardText);
@@ -47,6 +49,7 @@ Future<ClipboardViewer> launchClipboardViewer(
     reads: reads,
     enricher: withEnricher ? enricher : null,
     clipboard: clipboard,
+    settings: settings,
   );
   if (selectProject) {
     harness.model.selectProjectIndex(0);
@@ -186,7 +189,11 @@ void main() {
       final reads = fakeWorkspaceReads(
         projects: <ProjectItem>[testProjectItem(1, unavailable: true)],
       );
-      final viewer = await launchClipboardViewer(tester, reads: reads);
+      final viewer = await launchClipboardViewer(
+        tester,
+        reads: reads,
+        settings: const ViewerSettingsDraft(projectState: ProjectStateFilter.all),
+      );
       await focusProjectsList(tester, viewer);
 
       expect(
@@ -206,7 +213,11 @@ void main() {
     ) async {
       final projects = <ProjectItem>[testProjectItem(1, unavailable: true)];
       final reads = fakeWorkspaceReads(projects: projects);
-      final viewer = await launchClipboardViewer(tester, reads: reads);
+      final viewer = await launchClipboardViewer(
+        tester,
+        reads: reads,
+        settings: const ViewerSettingsDraft(projectState: ProjectStateFilter.all),
+      );
       await focusProjectsList(tester, viewer);
 
       expect(

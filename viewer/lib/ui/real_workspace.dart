@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
+import '../data/models.dart';
 import '../data/settings_store.dart';
 import '../platform/clipboard_text.dart';
 import '../platform/viewer_startup.dart';
@@ -74,6 +75,8 @@ class ViewerWorkspaceProvider extends StatefulWidget {
     required this.child,
     this.drafts,
     this.closeGuard,
+    this.initialSettings = const ViewerSettingsDraft(),
+    this.onProjectPreferencesChanged,
   });
 
   final ViewerEnvironment environment;
@@ -90,6 +93,9 @@ class ViewerWorkspaceProvider extends StatefulWidget {
 
   /// Platform close hook, so an open draft can be saved or discarded first.
   final ViewerCloseGuard? closeGuard;
+  final ViewerSettingsDraft initialSettings;
+  final void Function(ProjectStateFilter, ProjectSort, SortDirection)?
+  onProjectPreferencesChanged;
 
   /// Usually the shell.
   final Widget child;
@@ -122,12 +128,37 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
     readers: _readers,
     announcements: widget.announcements,
     viewerClipboard: widget.viewerClipboard,
+    initialSettings: widget.initialSettings,
   );
+
+  late ProjectStateFilter _savedProjectState =
+      widget.initialSettings.projectState;
+  late ProjectSort _savedProjectSort = widget.initialSettings.projectSort;
+  late SortDirection _savedProjectDirection =
+      widget.initialSettings.projectDirection;
+
+  void _onProjectPreferencesChanged() {
+    final projects = _model.projectList;
+    if (_savedProjectState == projects.stateFilter &&
+        _savedProjectSort == projects.sort &&
+        _savedProjectDirection == projects.direction) {
+      return;
+    }
+    _savedProjectState = projects.stateFilter;
+    _savedProjectSort = projects.sort;
+    _savedProjectDirection = projects.direction;
+    widget.onProjectPreferencesChanged?.call(
+      _savedProjectState,
+      _savedProjectSort,
+      _savedProjectDirection,
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _model.projectList.addListener(_onProjectPreferencesChanged);
     widget.closeGuard?.attach(_closeHandler);
     // The handshake and the first catalog read start after the first frame, so
     // a failing CLI paints the shell and its status region first.
@@ -142,6 +173,7 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
   void dispose() {
     widget.closeGuard?.detach(_closeHandler);
     WidgetsBinding.instance.removeObserver(this);
+    _model.projectList.removeListener(_onProjectPreferencesChanged);
     _model.dispose();
     super.dispose();
   }
@@ -191,6 +223,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
     required this.announcements,
     this.initialSettings,
     this.onSettingsChanged,
+    this.onProjectPreferencesChanged,
     this.viewerClipboard,
     this.drafts,
     this.closeGuard,
@@ -202,6 +235,8 @@ class ViewerWorkspaceHost extends StatelessWidget {
   final AnnouncementController announcements;
   final ViewerSettingsDraft? initialSettings;
   final ValueChanged<ViewerSettingsDraft>? onSettingsChanged;
+  final void Function(ProjectStateFilter, ProjectSort, SortDirection)?
+  onProjectPreferencesChanged;
 
   /// Clipboard the preview reads; null uses the real platform clipboard.
   final ViewerClipboard? viewerClipboard;
@@ -222,6 +257,8 @@ class ViewerWorkspaceHost extends StatelessWidget {
       viewerClipboard: viewerClipboard,
       drafts: drafts,
       closeGuard: closeGuard,
+      initialSettings: initialSettings ?? const ViewerSettingsDraft(),
+      onProjectPreferencesChanged: onProjectPreferencesChanged,
       child: Builder(
         builder: (context) {
           final model = ViewerWorkspaceScope.of(context);

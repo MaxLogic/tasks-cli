@@ -22,6 +22,7 @@ import '../data/editor_models.dart';
 import '../data/models.dart';
 import '../data/project_archive.dart';
 import '../data/settings_store.dart';
+import '../data/settings_draft.dart';
 import '../platform/clipboard_text.dart';
 import 'editor_dialogs.dart';
 
@@ -76,6 +77,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     required this.environment,
     required this.readers,
     required this.announcements,
+    this.initialSettings = const ViewerSettingsDraft(),
     ViewerClipboard? viewerClipboard,
     this.staleRefreshAfter = viewerStaleRefreshAfter,
   }) : clipboard = ClipboardController(
@@ -97,6 +99,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
 
   /// The one announcement channel this window speaks through.
   final AnnouncementController announcements;
+  final ViewerSettingsDraft initialSettings;
 
   /// Clipboard enrichment state, speech and the captured project scope.
   final ClipboardController clipboard;
@@ -107,6 +110,9 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   /// The project catalog; its selection decides what the other panes show.
   late final ProjectController projectList = ProjectController(
     reader: readers.projects,
+    initialState: initialSettings.projectState,
+    initialSort: initialSettings.projectSort,
+    initialDirection: initialSettings.projectDirection,
   );
 
   /// The one editor for this window; a pane rebuild never loses a draft.
@@ -388,6 +394,23 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   /// Ctrl+D from anywhere in the window.
   Future<void> markDoneTask() async {
     await editorHost?.markDone();
+  }
+
+  /// Context-menu status changes use the editor's versioned save workflow.
+  Future<void> changeTaskStatus(String status) async {
+    if (!editor.canWrite || editor.isSaving || editorHost == null) return;
+    final original = editor.base;
+    final projectId = selectedProjectId;
+    if (original == null || original.status == status) return;
+    if (!await requestLeave(EditorLeaveReason.leaveEditMode)) return;
+    if (selectedProjectId != projectId ||
+        editor.base?.id != original.id ||
+        editor.isSaving) {
+      return;
+    }
+    editor.beginEdit();
+    editor.setField(EditorField.status, status);
+    await editorHost?.save();
   }
 
   /// Ctrl+S from anywhere in the window; a no-op without an open editor.

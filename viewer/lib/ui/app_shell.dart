@@ -402,6 +402,15 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
     });
   }
 
+  @override
+  void didUpdateWidget(covariant ViewerShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(widget.initialSettings, oldWidget.initialSettings) &&
+        widget.initialSettings != null) {
+      _settings = widget.initialSettings!;
+    }
+  }
+
   void _onStatusFocusChanged() {
     if (_status.regionFocus.hasFocus) {
       _onRegionFocusChange(ViewerRegion.status, true);
@@ -942,9 +951,11 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       if (widget.environment.tasksExe == null) 'Tasks CLI',
     ];
     final status = missing.isEmpty
-        ? 'Configuration ready'
+        ? ''
         : 'Setup required: ${missing.join(' and ')}';
-    return widget.environment.testMode ? 'test mode  |  $status' : status;
+    return widget.environment.testMode
+        ? (status.isEmpty ? 'test mode' : 'test mode  |  $status')
+        : status;
   }
 
   @override
@@ -1013,27 +1024,43 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
                   'Tasks Viewer',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
-                Text(
-                  _environmentSummary,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+                if (_environmentSummary.isNotEmpty)
+                  Text(
+                    _environmentSummary,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
               ],
             ),
           ),
-          IconButton(
-            tooltip: 'Refresh (F5)',
-            onPressed: _refresh,
-            icon: const Icon(Icons.refresh),
+          Tooltip(
+            message: 'Refresh (F5)',
+            excludeFromSemantics: true,
+            child: IconButton(
+              onPressed: _refresh,
+              icon: const Icon(Icons.refresh, semanticLabel: 'Refresh (F5)'),
+            ),
           ),
-          IconButton(
-            tooltip: 'Settings (Ctrl+,)',
-            onPressed: () => unawaited(openSettings()),
-            icon: const Icon(Icons.settings_outlined),
+          Tooltip(
+            message: 'Settings (Ctrl+,)',
+            excludeFromSemantics: true,
+            child: IconButton(
+              onPressed: () => unawaited(openSettings()),
+              icon: const Icon(
+                Icons.settings_outlined,
+                semanticLabel: 'Settings (Ctrl+,)',
+              ),
+            ),
           ),
-          IconButton(
-            tooltip: 'Hotkey help (F10)',
-            onPressed: () => unawaited(openHelp()),
-            icon: const Icon(Icons.help_outline),
+          Tooltip(
+            message: 'Hotkey help (F10)',
+            excludeFromSemantics: true,
+            child: IconButton(
+              onPressed: () => unawaited(openHelp()),
+              icon: const Icon(
+                Icons.help_outline,
+                semanticLabel: 'Hotkey help (F10)',
+              ),
+            ),
           ),
         ],
       ),

@@ -177,9 +177,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
       );
       return;
     }
-    final draft = ViewerSettingsDraft(
+    final draft = widget.initial.copyWith(
       cliPath: cliPath.isEmpty ? null : cliPath,
+      clearCliPath: cliPath.isEmpty,
       dataRoot: dataRoot.isEmpty ? null : dataRoot,
+      clearDataRoot: dataRoot.isEmpty,
       themeMode: _theme,
       textScalePercent: _textScale,
       projectsPanePercent: projects,

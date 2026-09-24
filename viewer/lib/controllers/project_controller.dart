@@ -35,6 +35,9 @@ class ProjectController extends ChangeNotifier {
     this.pageSize = projectPageSize,
     this.maxCachedPages = projectMaxCachedPages,
     this.prefetchRows = projectPrefetchRows,
+    this.initialState = ProjectStateFilter.hasOpen,
+    this.initialSort = ProjectSort.lastWrite,
+    this.initialDirection = SortDirection.descending,
   }) : // Private field, so an initializing formal cannot name the parameter.
        // ignore: prefer_initializing_formals
        _reader = reader;
@@ -44,15 +47,18 @@ class ProjectController extends ChangeNotifier {
   final int pageSize;
   final int maxCachedPages;
   final int prefetchRows;
+  final ProjectStateFilter initialState;
+  final ProjectSort initialSort;
+  final SortDirection initialDirection;
 
   Timer? _debounceTimer;
   int _generation = 0;
   bool _disposed = false;
 
   String _query = '';
-  ProjectStateFilter _stateFilter = ProjectStateFilter.all;
-  ProjectSort _sort = ProjectSort.name;
-  SortDirection _direction = SortDirection.ascending;
+  late ProjectStateFilter _stateFilter = initialState;
+  late ProjectSort _sort = initialSort;
+  late SortDirection _direction = initialDirection;
 
   int _totalCount = 0;
 

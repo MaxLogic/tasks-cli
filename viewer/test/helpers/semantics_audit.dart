@@ -105,8 +105,9 @@ void _auditNode(
 ) {
   final flags = data.flagsCollection;
   final isEnabled = flags.isEnabled != ui.Tristate.isFalse;
-  final hasName =
-      data.label.trim().isNotEmpty || data.tooltip.trim().isNotEmpty;
+  // A tooltip is supplementary help, not the control's accessible name.
+  // Windows screen readers must receive a label without requiring hover.
+  final hasName = data.label.trim().isNotEmpty;
   final hasDirectAction = <ui.SemanticsAction>{
     ui.SemanticsAction.tap,
     ui.SemanticsAction.longPress,
@@ -125,8 +126,14 @@ void _auditNode(
     );
   }
 
-  if (hasDirectAction && !hasName) {
-    report('interactive control has no accessible name or tooltip');
+  if ((hasDirectAction ||
+          flags.isButton ||
+          flags.isLink ||
+          flags.isSlider ||
+          flags.isChecked != ui.CheckedState.none ||
+          flags.isToggled != ui.Tristate.none) &&
+      !hasName) {
+    report('interactive control has no accessible name');
   }
   if (flags.isTextField && !hasName) {
     report('text field has no accessible name');

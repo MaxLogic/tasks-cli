@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/controllers/announcement_controller.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
+import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/data/settings_store.dart';
 
 late Directory _root;
@@ -64,6 +65,9 @@ void main() {
       expect(result.draft.startWithWindows, isTrue);
       expect(result.draft.announcementMode, AnnouncementMode.bella);
       expect(result.draft.bellaVolumePercent, 70);
+      expect(result.draft.projectState, ProjectStateFilter.hasOpen);
+      expect(result.draft.projectSort, ProjectSort.lastWrite);
+      expect(result.draft.projectDirection, SortDirection.descending);
       expect(_root.listSync(), isEmpty);
     });
 
@@ -80,6 +84,9 @@ void main() {
         startWithWindows: false,
         announcementMode: AnnouncementMode.nvdaOnly,
         bellaVolumePercent: 30,
+        projectState: ProjectStateFilter.archived,
+        projectSort: ProjectSort.name,
+        projectDirection: SortDirection.ascending,
       );
       await store.save(draft);
 
@@ -95,6 +102,9 @@ void main() {
       expect(result.draft.startWithWindows, isFalse);
       expect(result.draft.announcementMode, AnnouncementMode.nvdaOnly);
       expect(result.draft.bellaVolumePercent, 30);
+      expect(result.draft.projectState, ProjectStateFilter.archived);
+      expect(result.draft.projectSort, ProjectSort.name);
+      expect(result.draft.projectDirection, SortDirection.ascending);
     });
 
     test(

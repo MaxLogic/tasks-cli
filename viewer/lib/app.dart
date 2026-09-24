@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'app_environment.dart';
 import 'controllers/announcement_controller.dart';
 import 'data/settings_draft.dart';
+import 'data/models.dart';
 import 'data/settings_store.dart';
 import 'platform/viewer_startup.dart';
 import 'platform/window_state.dart';
@@ -85,6 +86,7 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
       AnnouncementController(clipPlayer: SilentClipPlayer());
   late ViewerEnvironment _environment = widget.environment;
   late ViewerSettingsDraft _settings = widget.initialSettings;
+  Future<void> _settingsWrite = Future<void>.value();
   late ViewerDataReader? _readers =
       widget.readers ?? widget.readersFor?.call(widget.environment);
 
@@ -156,13 +158,29 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
     unawaited(_applyStartupPreference(draft));
   }
 
+  void _applyProjectPreferences(
+    ProjectStateFilter state,
+    ProjectSort sort,
+    SortDirection direction,
+  ) {
+    final draft = _settings.copyWith(
+      projectState: state,
+      projectSort: sort,
+      projectDirection: direction,
+    );
+    setState(() => _settings = draft);
+    unawaited(_persistSettings(draft));
+  }
+
   Future<void> _persistSettings(ViewerSettingsDraft draft) async {
     final persist = widget.onSettingsPersist;
     if (persist == null) {
       return;
     }
+    final write = _settingsWrite.then((_) => persist(draft));
+    _settingsWrite = write.then<void>((_) {}, onError: (Object _) {});
     try {
-      await persist(draft);
+      await write;
     } on Object catch (error) {
       _announcements.announceStatus(
         'Settings could not be saved: $error. They stay in effect for this '
@@ -208,6 +226,7 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
       announcements: _announcements,
       initialSettings: _settings,
       onSettingsChanged: _applySettings,
+      onProjectPreferencesChanged: _applyProjectPreferences,
       startup: widget.startup,
       drafts: widget.drafts,
       closeGuard: widget.closeGuard,
