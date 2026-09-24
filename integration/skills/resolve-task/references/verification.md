@@ -28,6 +28,34 @@ logical schema or test count alone. Limit this to variants that change the
 implementation path, not every combination of inputs. Scope completion claims
 to that evidence.
 
+## Probe non-functional gates early
+
+A non-functional gate (performance ratio, latency, memory, size, packaging,
+startup time) usually rests on one assumption: the chosen algorithm, library,
+serialization format or platform can reach the target at all. The Final tier
+is the most expensive place to learn that it cannot. In one run a required
+performance ratio failed at the Final gate for a reason no in-scope change
+could fix, after every task had already been proven and closed.
+
+At planning time, list each such gate next to its Final command and name the
+assumption it depends on. As soon as the seam exists, usually after the first
+slice, measure that assumption with the cheapest probe that runs the real
+production route end to end: a timing over a representative input, a size
+check of the produced artifact, a memory sample. Record it as an execution in
+the evidence record like any other gate; it does not replace the Final run.
+
+Classify the probe result before continuing:
+
+- **Target reachable:** continue; the Final gate stays scheduled.
+- **Failure from something inside the authorized scope:** treat it as a
+  discovered prerequisite and resolve it in the active run.
+- **Failure from something outside the authorized scope** (an upstream
+  dependency, a platform limit, a target that the spec set without evidence):
+  record a needs-human decision task now, with the measurement, the assumption
+  it falsified and the options. Do not spend the remaining tasks on work whose
+  acceptance is already predicted to fail; continue with independent work and
+  report the gate as at risk.
+
 ## Task tier
 
 Run for every task after its frozen source/proof inputs have passed focused
@@ -127,7 +155,8 @@ SQLite task lifecycle transition has been applied:
 4. Run all required production builds and validators.
 5. Run full static analysis and compare with the recorded baseline.
 6. Run non-functional acceptance: performance, security, accessibility,
-   packaging, migration, or live UI proof as applicable.
+   packaging, migration, or live UI proof as applicable. Its riskiest
+   assumption should already have been probed after the first slice.
 7. Run final independent review when full mode/high risk requires it.
 
 Every final claim must come from this same candidate. If one command cannot run
