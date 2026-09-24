@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.0.0"
+  version: "6.1.0"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
@@ -43,6 +43,15 @@ production-versus-proof-only limits before implementation. Use existing session
 continuity if available; no new state schema or mandatory helper is introduced
 by this copy. Without recoverable session proof, use the same checklist directly
 and rerun evidence that cannot be recovered. Never invent a command or result.
+
+Name every non-functional acceptance gate (performance ratio, latency, memory,
+size, packaging) at planning time, with the assumption each rests on. Once the
+seam it depends on exists, usually after the first slice, measure that
+assumption with the cheapest end-to-end probe instead of waiting for the Final
+tier. A probe that predicts failure for a cause outside the authorized scope is
+the demonstrated infeasibility that justifies re-planning: record a needs-human
+decision task with the measurement immediately and continue independent work.
+See [verification](references/verification.md).
 
 ## Task loop
 
