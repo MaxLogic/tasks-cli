@@ -107,6 +107,7 @@ class AccessibleVirtualList extends StatefulWidget {
     this.onPendingRowSlow,
     this.cacheExtent,
     this.onFocusChange,
+    this.emptyAction,
   });
 
   final VirtualListController controller;
@@ -146,6 +147,11 @@ class AccessibleVirtualList extends StatefulWidget {
   final double? cacheExtent;
 
   final ValueChanged<bool>? onFocusChange;
+
+  /// Optional control under the empty message, for example Clear filters.
+  /// It is the next Tab stop after the empty list and keeps its own
+  /// accessible name.
+  final Widget? emptyAction;
 
   @override
   State<AccessibleVirtualList> createState() => _AccessibleVirtualListState();
@@ -603,37 +609,56 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     return KeyEventResult.ignored;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    if (widget.itemCount == 0) {
-      return Focus(
-        focusNode: _containerFocus,
-        includeSemantics: false,
-        onFocusChange: _onContainerFocusChange,
-        onKeyEvent: _handleKeyEvent,
-        child: Semantics(
-          container: true,
-          focusable: true,
-          focused: _containerFocused,
-          // One name carries both the collection and its empty message, so a
-          // screen reader speaks the reason the region is empty either when
-          // focus lands here or while reviewing the tree.
-          label: '${widget.listLabel}. ${widget.emptyLabel}',
-          child: ExcludeSemantics(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  widget.emptyLabel,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
+  Widget _buildEmpty(BuildContext context) {
+    return Focus(
+      focusNode: _containerFocus,
+      includeSemantics: false,
+      onFocusChange: _onContainerFocusChange,
+      onKeyEvent: _handleKeyEvent,
+      child: Semantics(
+        container: true,
+        focusable: true,
+        focused: _containerFocused,
+        // One name carries both the collection and its empty message, so a
+        // screen reader speaks the reason the region is empty either when
+        // focus lands here or while reviewing the tree.
+        label: '${widget.listLabel}. ${widget.emptyLabel}',
+        explicitChildNodes: widget.emptyAction != null,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                ExcludeSemantics(
+                  child: Text(
+                    widget.emptyLabel,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
                 ),
-              ),
+                if (widget.emptyAction case final action?) ...<Widget>[
+                  const SizedBox(height: 8),
+                  action,
+                ],
+              ],
             ),
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
+
+  // Widget order keeps an empty action as the Tab stop right after the list
+  // itself; reading order would rank the nested rects unpredictably. Both
+  // states share the group so the container's Focus keeps its element.
+  @override
+  Widget build(BuildContext context) => FocusTraversalGroup(
+    policy: WidgetOrderTraversalPolicy(),
+    child: widget.itemCount == 0 ? _buildEmpty(context) : _buildRows(context),
+  );
+
+  Widget _buildRows(BuildContext context) {
     return Focus(
       focusNode: _containerFocus,
       includeSemantics: false,

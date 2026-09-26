@@ -10,7 +10,9 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../data/models.dart';
+import 'app_shell.dart';
 import 'viewer_format.dart';
+import 'workspace_model.dart';
 
 /// Vertical caps for the scrolling regions of one pane body.
 ///
@@ -88,6 +90,21 @@ class ViewerPaneRegion extends StatelessWidget {
       constraints: BoxConstraints(maxHeight: maxHeight < 0 ? 0 : maxHeight),
       child: SingleChildScrollView(child: child),
     );
+  }
+}
+
+/// A horizontal rule whose box is as tall as the theme's line is thick.
+///
+/// `Divider(height: 1)` paints the high-contrast 2px line into a 1px box, so
+/// half of it lands on the neighbouring region; this rule reserves the full
+/// thickness instead.
+class ViewerRule extends StatelessWidget {
+  const ViewerRule({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final thickness = DividerTheme.of(context).thickness ?? 1;
+    return Divider(height: thickness, thickness: thickness);
   }
 }
 
@@ -182,4 +199,47 @@ class ViewerStatusLine extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Reads the clipboard for a list's Ctrl+V search.
+///
+/// Returns the one-line search text, or null (with a spoken reason) when the
+/// clipboard holds no text or cannot be read; the filters then stay as they
+/// are.
+Future<String?> readClipboardSearchText(
+  ViewerShellApi api,
+  ViewerWorkspaceModel model,
+) async {
+  final String? raw;
+  try {
+    raw = await model.clipboard.clipboard.readText();
+  } on ViewerFailure catch (failure) {
+    api.announce(failure.message, dynamic: true);
+    return null;
+  }
+  final text = viewerClipboardSearchText(raw);
+  if (text == null) {
+    api.announce('The clipboard has no text to search for.', dynamic: true);
+  }
+  return text;
+}
+
+/// Puts the keyboard back on [handles]' list after its rows were replaced,
+/// unless the user has since moved focus to another control.
+///
+/// The check runs after the next frame, once the rebuilt list has dropped the
+/// rows that no longer match.
+void keepListFocus(ViewerRegionHandles handles) {
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (handles.list.hasListFocus) {
+      return;
+    }
+    final primary = FocusManager.instance.primaryFocus;
+    if (primary == null ||
+        primary is FocusScopeNode ||
+        identical(primary, handles.regionFocus)) {
+      handles.list.focusRegion();
+    }
+  });
+  WidgetsBinding.instance.scheduleFrame();
 }

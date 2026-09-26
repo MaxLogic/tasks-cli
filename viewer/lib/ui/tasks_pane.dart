@@ -192,9 +192,40 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       case 'tasks.removeActiveFilterGroup':
         _activeFiltersFocus.requestFocus();
         return KeyEventResult.handled;
+      case 'tasks.pasteFilter':
+        if (!_handles.list.hasListFocus) {
+          // A text field in this region keeps its native paste.
+          return KeyEventResult.ignored;
+        }
+        unawaited(_pasteIntoSearch(tasks));
+        return KeyEventResult.handled;
       default:
         return KeyEventResult.ignored;
     }
+  }
+
+  /// Ctrl+V on the list: the clipboard text (a copied task ID, say) replaces
+  /// the search and applies at once, and the keyboard stays in the list.
+  Future<void> _pasteIntoSearch(TaskController tasks) async {
+    final text = await readClipboardSearchText(widget.api, widget.model);
+    if (text == null || !mounted || !identical(tasks, _tasks)) {
+      return;
+    }
+    _search.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    tasks.setQuery(text);
+    await tasks.submitQuery();
+    if (!mounted || !identical(tasks, _tasks)) {
+      return;
+    }
+    keepListFocus(_handles);
+    final count = tasks.totalCount;
+    widget.api.announce(
+      '${count == 1 ? '1 matching task' : '$count matching tasks'} for $text',
+      dynamic: true,
+    );
   }
 
   FocusNode _scopeFocus(TaskScope scope) =>
@@ -370,7 +401,9 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   }
 
   Widget _buildHeading(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(12, 2, 12, 2),
+    // The same inset as the shell's Projects and Task details headings, so
+    // the three pane titles share one baseline.
+    padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
     child: Semantics(
       header: true,
       child: Text(
@@ -463,6 +496,8 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
               ),
             ],
           ),
+          // Room for the helper line before the next label.
+          const SizedBox(height: 12),
           Text('Scope (Alt+S)', style: theme.textTheme.bodySmall),
           RadioGroup<TaskScope>(
             groupValue: tasks.scope,
@@ -526,7 +561,9 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             isSelected: tasks.priorities.contains,
             onToggle: tasks.togglePriority,
           ),
+          const SizedBox(height: 8),
           _buildLabelsRow(context, tasks),
+          const SizedBox(height: 12),
           MergeSemantics(
             child: Row(
               children: <Widget>[
@@ -575,10 +612,10 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
               },
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
           Wrap(
             spacing: 12,
-            runSpacing: 4,
+            runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
               SizedBox(
@@ -797,17 +834,14 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       // The failure view below carries the actionable message on its own.
       return const SizedBox.shrink();
     }
-    final projectTotal = widget.model.selectedProject?.stats?.total;
     final sampled = tasks.sampledAtMs;
     final refreshFailure = tasks.refreshFailure;
-    final line = ViewerStatusLine(
+    // An empty result is explained once, by the list's own empty state,
+    // which also carries Clear filters.
+    return ViewerStatusLine(
       text: <String>[
         if (tasks.isLoading && !tasks.hasConfirmedData)
           'Loading tasks'
-        else if (tasks.totalCount == 0 && projectTotal == 0)
-          'This project has no tasks'
-        else if (tasks.totalCount == 0)
-          'No tasks match these filters'
         else if (tasks.totalCount == 1)
           '1 matching task'
         else
@@ -820,22 +854,6 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 'last confirmed data.'
           : tasks.notice,
       warning: refreshFailure != null,
-    );
-    if (tasks.totalCount != 0 || tasks.isLoading || projectTotal == 0) {
-      return line;
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        line,
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
-          child: TextButton(
-            onPressed: _clearFilters,
-            child: const Text('Clear filters'),
-          ),
-        ),
-      ],
     );
   }
 
@@ -854,6 +872,8 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     releaseFailureViewRegionFocus();
     final handles = _handles;
     final itemCount = tasks.totalCount;
+    final projectTotal = widget.model.selectedProject?.stats?.total;
+    final projectEmpty = projectTotal == 0;
     return Focus(
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent || !handles.list.hasListFocus) {
@@ -895,7 +915,18 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         listLabel: 'Tasks in ${widget.model.selectedProjectName}',
         emptyLabel: tasks.isLoading
             ? 'Loading tasks'
+            : projectEmpty
+            ? 'This project has no tasks'
             : 'No tasks match these filters',
+        emptyAction: tasks.isLoading || projectEmpty
+            ? null
+            : Tooltip(
+                message: 'Alt+C',
+                child: TextButton(
+                  onPressed: _clearFilters,
+                  child: const Text('Clear filters'),
+                ),
+              ),
         itemKeyBuilder: (index) => ValueKey<String>(
           tasks.itemAt(index)?.canonicalId ?? 'tasks-row-$index',
         ),

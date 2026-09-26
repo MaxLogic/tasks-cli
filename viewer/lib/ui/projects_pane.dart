@@ -120,6 +120,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       case 'projects.previewEnrichment':
         unawaited(_previewEnrichment());
         return KeyEventResult.handled;
+      case 'projects.pasteFilter':
+        if (!_handles.list.hasListFocus) {
+          // A text field in this region keeps its native paste.
+          return KeyEventResult.ignored;
+        }
+        unawaited(_pasteIntoSearch());
+        return KeyEventResult.handled;
       default:
         return KeyEventResult.ignored;
     }
@@ -134,6 +141,31 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   void _clearFilters() {
     _search.clear();
     _projects.clearFilters();
+  }
+
+  /// Ctrl+V on the list: the clipboard text replaces the search and applies
+  /// at once, and the keyboard stays in the list.
+  Future<void> _pasteIntoSearch() async {
+    final text = await readClipboardSearchText(widget.api, widget.model);
+    if (text == null || !mounted) {
+      return;
+    }
+    _search.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    _projects.setQuery(text);
+    await _projects.submitQuery();
+    if (!mounted) {
+      return;
+    }
+    keepListFocus(_handles);
+    final count = _projects.totalCount;
+    widget.api.announce(
+      '${count == 1 ? '1 matching project' : '$count matching projects'} '
+      'for $text',
+      dynamic: true,
+    );
   }
 
   /// Fetches the page that owns [index] and settles the pending row focus.
@@ -205,7 +237,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      if (projects.totalCount > 0) const Divider(height: 1),
+                      if (projects.totalCount > 0) const ViewerRule(),
                       _buildSummary(context, projects),
                     ],
                   ),
@@ -251,9 +283,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               ),
             ],
           ),
+          // Room for the search field's helper line before the next floating
+          // label, and between wrapped runs of outlined fields.
+          const SizedBox(height: 12),
           Wrap(
             spacing: 12,
-            runSpacing: 4,
+            runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: <Widget>[
               SizedBox(
@@ -270,6 +305,16 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                     isDense: true,
                     border: OutlineInputBorder(),
                   ),
+                  // The closed combo shows the value alone; the menu items keep
+                  // their Alt+digit keys.
+                  selectedItemBuilder: (context) => <Widget>[
+                    for (final value in ProjectStateFilter.values)
+                      Text(
+                        value.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                  ],
                   items: <DropdownMenuItem<ProjectStateFilter>>[
                     for (final value in ProjectStateFilter.values)
                       DropdownMenuItem<ProjectStateFilter>(
@@ -362,8 +407,6 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     final segments = <String>[
       if (projects.isLoading && !projects.hasConfirmedData)
         'Loading projects'
-      else if (projects.totalCount == 0)
-        'No projects match these filters'
       else if (projects.totalCount == 1)
         '1 matching project'
       else
@@ -433,6 +476,15 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         emptyLabel: projects.isLoading
             ? 'Loading projects'
             : 'No projects match these filters',
+        emptyAction: projects.isLoading
+            ? null
+            : Tooltip(
+                message: 'Alt+C',
+                child: TextButton(
+                  onPressed: _clearFilters,
+                  child: const Text('Clear filters'),
+                ),
+              ),
         itemKeyBuilder: (index) => ValueKey<String>(
           projects.itemAt(index)?.projectId ?? 'projects-row-$index',
         ),
@@ -526,7 +578,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
           return;
         case _ProjectMenuAction.copyPath:
           if (root == null) return;
-          await Clipboard.setData(ClipboardData(text: root));
+          await Clipboard.setData(ClipboardData(text: viewerDisplayPath(root)));
           widget.api.announce('Project path copied', dynamic: true);
           return;
         case _ProjectMenuAction.archive:
@@ -691,7 +743,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   _summaryLine(context, 'Root: no bound root')
                 else
                   for (final root in item.roots)
-                    _summaryLine(context, 'Root: $root'),
+                    _summaryLine(context, 'Root: ${viewerDisplayPath(root)}'),
               ],
               const SizedBox(height: 8),
               _buildClipboardActions(context, projects, item),
@@ -822,88 +874,107 @@ class _ProjectRowTile extends StatelessWidget {
     final counts = stats == null
         ? (item.error?.message ?? 'Statistics unavailable')
         : '${stats.open} open / ${stats.total} total / ${stats.blocked} blocked';
-    final root = item.roots.isEmpty ? 'No bound root' : item.roots.first;
+    final root = item.roots.isEmpty
+        ? 'No bound root'
+        : viewerDisplayPath(item.roots.first);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onSecondaryTap: () => onMenu(context),
       excludeFromSemantics: true,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
+        padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+        child: Row(
           children: <Widget>[
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: ExcludeSemantics(
-                    child: Text(
-                      item.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ExcludeSemantics(
-                  child: Text(progressText, style: theme.textTheme.bodySmall),
-                ),
-                SizedBox(
-                  width: 28,
-                  height: 20,
-                  child: Tooltip(
-                    message: 'Actions for ${item.name}',
-                    excludeFromSemantics: true,
-                    child: IconButton.outlined(
-                      padding: EdgeInsets.zero,
-                      onPressed: () => onMenu(context),
-                      icon: Icon(
-                        Icons.more_horiz,
-                        size: 18,
-                        semanticLabel: 'Actions for ${item.name}',
+            Expanded(
+              child: ExcludeSemantics(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    // The progress keeps its natural width up to half the
+                    // row; only a very narrow pane shortens it.
+                    LayoutBuilder(
+                      builder: (context, constraints) => Row(
+                        children: <Widget>[
+                          Expanded(
+                            child: Text(
+                              item.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: constraints.maxWidth / 2,
+                            ),
+                            child: Text(
+                              progressText,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                ),
-              ],
-            ),
-            ExcludeSemantics(
-              child: Row(
-                children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      counts,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall,
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: Text(
+                            counts,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            root,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      root,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.right,
-                      style: theme.textTheme.bodySmall,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (!compact)
-              ExcludeSemantics(
-                child: Text(
-                  'Started (first task): '
-                  '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
-                  '   Last task write: '
-                  '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall,
+                    if (!compact)
+                      Text(
+                        'Started (first task): '
+                        '${stats?.startedMs == null ? 'No recorded tasks' : viewerDate(context, stats!.startedMs!)}'
+                        '   Last task write: '
+                        '${stats?.lastWriteMs == null ? 'No recorded tasks' : viewerTimestamp(context, stats!.lastWriteMs!)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                  ],
                 ),
               ),
+            ),
+            const SizedBox(width: 8),
+            // A full 32px outlined target, centred on the row, never touching
+            // the progress text (design.md section 4).
+            Tooltip(
+              message: 'Actions for ${item.name}',
+              excludeFromSemantics: true,
+              child: IconButton.outlined(
+                constraints: const BoxConstraints.tightFor(
+                  width: 32,
+                  height: 32,
+                ),
+                padding: EdgeInsets.zero,
+                iconSize: 18,
+                onPressed: () => onMenu(context),
+                icon: Icon(
+                  Icons.more_horiz,
+                  semanticLabel: 'Actions for ${item.name}',
+                ),
+              ),
+            ),
           ],
         ),
       ),

@@ -21,6 +21,11 @@ import 'package:flutter/foundation.dart';
 
 import '../data/models.dart';
 
+/// Wall clock for the task list's sample time. Render regression tests pin
+/// it so the status line is deterministic; production never replaces it.
+@visibleForTesting
+int Function() taskSampleClock = () => DateTime.now().millisecondsSinceEpoch;
+
 /// Rows requested per CLI page (viewer/spec.md section 5).
 const int taskPageSize = 100;
 
@@ -607,7 +612,7 @@ class TaskController extends ChangeNotifier {
       _snapshot = page.snapshot;
     }
     if (pageIndex == 0) {
-      _sampledAtMs = DateTime.now().millisecondsSinceEpoch;
+      _sampledAtMs = taskSampleClock();
     }
     _trimPages();
   }

@@ -118,13 +118,14 @@ Global bindings:
 | `Ctrl+H` | Find in body (literal text, Next/Previous, match count) |
 | `Ctrl+D` | Mark the selected task done, using the dirty-draft guard when needed |
 | `Ctrl+E` | Enrich the clipboard, only while the Projects list itself has focus |
+| `Ctrl+V` | While the Projects or Tasks list itself has focus: replace that list's search with the trimmed clipboard text and apply it; focus stays in the list |
 | `Ctrl+S` | Save the active editor |
 | `Ctrl+,` | Settings |
 | `Alt+Left` | Back from a dependency detail or a reduced-layout child pane |
 | `Escape` | Close the active popup or dialog; no destructive action on its own |
 
-Plain `Ctrl+E` outside the Projects list keeps the focused control's normal
-behaviour. Every other native text-editing key stays with the field, including
+Plain `Ctrl+E` outside the Projects list, and `Ctrl+V` outside a focused list,
+keep the focused control's normal behaviour (a search field pastes as usual). Every other native text-editing key stays with the field, including
 AltGr combinations; F1/F2/F3, F4, F5, F6, F10, Ctrl+S, Ctrl+H and Ctrl+, keep
 their documented meaning while a text field has focus. Press F10 for the full
 scoped list, including the per-region `Alt` access keys.

@@ -775,6 +775,11 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       case 'details.openDependency':
         widget.actions.onActivate?.call();
         return true;
+      case 'projects.pasteFilter':
+      case 'tasks.pasteFilter':
+        // The pane takes Ctrl+V only while its list has focus; everywhere
+        // else the key keeps the focused text field's native paste.
+        return false;
       default:
         break;
     }
@@ -990,9 +995,9 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
                             maxHeight: budget.toolbar,
                             child: _buildToolbar(context),
                           ),
-                          const Divider(height: 1),
+                          const ViewerRule(),
                           Expanded(child: _buildPanes(workspace, mode, budget)),
-                          const Divider(height: 1),
+                          const ViewerRule(),
                           ViewerPaneRegion(
                             maxHeight: budget.status,
                             child: _buildStatusRegion(),
@@ -1182,7 +1187,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
               maxHeight: budget.navigation,
               child: _buildRegionNavigation(context),
             ),
-            const Divider(height: 1),
+            const ViewerRule(),
             Expanded(
               child: Stack(
                 fit: StackFit.expand,
