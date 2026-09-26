@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.1.0"
+  version: "6.2.0"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
@@ -20,8 +20,9 @@ helpers or their coupled state-transition/close helpers.
 
 Use focused mode for one low/medium-risk task; full mode for multiple tasks,
 backlog sweeps or high-risk changes. Read repository guidance, rules, relevant
-specs and nearest tests. Resolve identity before any access. Fetch bounded rows,
-then selected bodies, versions and prerequisites. Explicit IDs include necessary
+specs and nearest tests. Resolve identity before any access. Fetch bounded rows
+(text output), then selected bodies, versions and prerequisites in one
+multi-ID `show`; add `--rules` once per session. Explicit IDs include necessary
 prerequisites; semantic selections include matching work plus prerequisites;
 "all open" requires `list --open` with every page, including blocked/human work.
 Normal runnable list alone cannot establish that a sweep is complete.
@@ -56,7 +57,8 @@ See [verification](references/verification.md).
 ## Task loop
 
 1. Read current task/version and deps. Coordinator transitions ready work to
-   `in-progress` with `--expect-version`; conflicts require reconciliation.
+   `in-progress` with the observed `--expect-version` (no extra `show` for a
+   status-only change); exit 4 means stale, so re-read and reconcile.
 2. Extract acceptance from Outcome, Proof, rules/specs and notes. Each outcome
    needs observable proof. Split independently provable work before coding;
    retain a reason when a large change is indivisible.
@@ -69,9 +71,10 @@ See [verification](references/verification.md).
 5. Freeze the source and proof inputs; record real candidate identity, hashes
    where used, literal commands, exit codes, test counts and proof references.
    Run the task tier on those inputs. Zero selected tests do not prove behavior.
-6. Coordinator re-reads current version, checks acceptance and review, then
-   transitions to `done`. Read back the committed result. A stale version cannot
-   be overwritten with an automatic retry. Keep concise proof pointers in Notes.
+6. Coordinator checks acceptance and review, then transitions to `done` with the
+   last observed version. The write output is the committed result; no
+   read-back `show`. A stale version (exit 4) is re-read and reconciled, never
+   overwritten with an automatic retry. Keep concise proof pointers in Notes.
 7. Inspect the exact owned patch, clean owned temporary artifacts safely, and
    continue only with dependency-ready work. Archive only when requested.
 
