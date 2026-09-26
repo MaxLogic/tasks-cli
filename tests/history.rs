@@ -75,9 +75,7 @@ fn selected_history_text_and_json_include_the_same_snapshot() {
         .expect("JSON history");
     assert!(json.status.success());
     let value: Value = serde_json::from_slice(&json.stdout).expect("JSON output");
-    let snapshot = value["data"]["items"][0]["snapshot_json"]
-        .as_str()
-        .expect("snapshot JSON");
-    assert!(snapshot.contains("complete title"));
-    assert!(snapshot.contains("complete body Ω"));
+    let snapshot = &value["data"]["items"][0]["snapshot"];
+    assert_eq!(snapshot["title"], "complete title");
+    assert_eq!(snapshot["body"], "complete body Ω");
 }

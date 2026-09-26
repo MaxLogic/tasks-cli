@@ -808,13 +808,13 @@ final class _Slice5Harness {
     final items = _envelopeData(call)['items']! as List<Object?>;
     expect(items.length, 1);
     final event = items.single! as Map<String, Object?>;
-    final raw = event['snapshot_json'];
+    final raw = event['snapshot'];
     expect(
       raw,
-      isA<String>(),
-      reason: 'history --event must return the persisted snapshot',
+      isA<Map<String, Object?>>(),
+      reason: 'history --event must return the persisted snapshot object',
     );
-    return jsonDecode(raw! as String) as Map<String, Object?>;
+    return raw! as Map<String, Object?>;
   }
 
   /// Asserts the case left exactly one update event with the final values.

@@ -297,6 +297,20 @@ pub struct TaskDetail {
     pub rules: String,
 }
 
+/// Task detail as printed by `show`: no duplicate dependency ID list and no
+/// rules, which the payload carries at most once when requested.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShowTask {
+    pub priority: Priority,
+    pub id: u64,
+    pub status: TaskStatus,
+    pub version: u64,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    pub dependency_summaries: Vec<DependencySummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySummary {
     pub id: u64,
@@ -314,6 +328,10 @@ pub struct TaskUpdate {
     pub deps: Option<Vec<u64>>,
     pub clear_deps: bool,
     pub labels: Option<Vec<String>>,
+    /// Labels merged into the current set; conflicts with `labels`.
+    pub add_labels: Vec<String>,
+    /// Labels removed from the current set; conflicts with `labels`.
+    pub remove_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,15 +340,45 @@ pub struct RuleRecord {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One task history event. `task_id` and `entity_type` stay available to
+/// library callers but are not serialized: the history payload names the task
+/// once at top level and only task events are listed.
+#[derive(Debug, Clone, Serialize)]
 pub struct HistoryEvent {
     pub event_id: u64,
+    #[serde(skip)]
     pub task_id: Option<u64>,
+    #[serde(skip)]
     pub entity_type: String,
     pub operation: String,
     pub resulting_version: i64,
     pub created_ms: i64,
+    /// Snapshot fields that differ from the previous task event; absent when
+    /// the event has no comparable predecessor (create, migrated, legacy text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_fields: Option<Vec<String>>,
+    /// Stored snapshot, emitted as a nested JSON value named `snapshot`.
+    #[serde(
+        rename = "snapshot",
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_snapshot"
+    )]
     pub snapshot_json: Option<String>,
+}
+
+/// Emits stored snapshot text as nested JSON; text that is not valid JSON
+/// (possible in legacy stores) is emitted unchanged as a JSON string.
+fn serialize_snapshot<S: serde::Serializer>(
+    snapshot: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match snapshot.as_deref() {
+        Some(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => value.serialize(serializer),
+            Err(_) => serializer.serialize_str(text),
+        },
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

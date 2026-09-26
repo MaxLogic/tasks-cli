@@ -29,8 +29,7 @@ tasks list
 That gives you a project, a task, and a backlog you can read at a glance:
 
 ```text
-project_id: 3a785d75-2e1c-4351-80e3-8ba9e7fab992
-T-001	P2	todo	v1	Write release notes	[]	labels=[]
+T-001	P2	todo	v1	Write release notes
 has_more: false
 ```
 
@@ -42,8 +41,6 @@ id: T-002
 status: draft
 priority: P2
 version: 1
-labels:
-dependencies: 1
 depends_on: T-001	todo	v2	Write release notes
 title:
 Tag the release
@@ -86,9 +83,11 @@ isolated root, which is what the tests do.
 tasks list [--open] [--after P2:T-020] [--limit 20]
 tasks search "release notes"
 tasks show T-12
+tasks show T-12 T-13 --rules
 tasks create --title "Write release notes" --body-file notes.md
 tasks update T-12 --expect-version 1 --status todo
 tasks update T-12 --expect-version 2 --clear-deps
+tasks update T-12 --expect-version 3 --add-label needs-human --remove-label perf
 tasks history T-12
 tasks rules show
 tasks rules set --body-file RULES.md --expect-version 1
@@ -101,17 +100,18 @@ tasks history T-12 --format json
 tasks history T-12 --event 42 --format json
 ```
 
-The first command lists event IDs and `resulting_version`. Select the event for
-the desired task version; the second returns its complete `snapshot_json`.
+The first command lists event IDs, `resulting_version` and the `changed_fields`
+of each update. Select the event for the desired task version; the second
+returns its complete `snapshot` as a nested JSON object.
 Event IDs and task version numbers are different. Reading an old snapshot does
 not restore it or change the current task.
 
 Statuses are `draft`, `todo`, `in-progress`, `blocked`, `done`, and
 `cancelled`. Bodies come from a file, and `-` reads standard input. Page limits
 run from 1 to 100, and `--after` continues from the cursor the previous page
-reported. `rules` holds the shared text that every `show` returns beside the
-task, which makes it the natural home for conventions that apply to the whole
-backlog.
+reported. `rules` holds the shared text that `show --rules` prints once after
+the tasks, which makes it the natural home for conventions that apply to the
+whole backlog. Plain `show` leaves the rules out.
 
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
@@ -233,8 +233,10 @@ are rejected outright.
 
 ## JSON for the callers that need it
 
-`--format json` wraps every command in a versioned envelope. The payload sits
-under `data`, errors still go to stderr, and the exit codes above still hold.
+`--format json` wraps every command in a versioned envelope, printed as one
+compact line (shown indented here). The payload sits under `data`, errors still
+go to stderr, and the exit codes above still hold. Several IDs in one `show`
+give command `show_many` with an `items` array.
 
 ```json
 {
@@ -248,13 +250,10 @@ under `data`, errors still go to stderr, and the exit codes above still hold.
     "version": 1,
     "title": "Tag the release",
     "body": "Ship it.\n",
-    "deps": [1],
     "labels": [],
     "dependency_summaries": [
       { "id": 1, "status": "todo", "version": 2, "title": "Write release notes" }
-    ],
-    "rule_version": 1,
-    "rules": ""
+    ]
   }
 }
 ```

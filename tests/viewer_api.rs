@@ -2203,12 +2203,14 @@ fn viewer_show_matches_legacy_detail_and_adds_running_timestamps() {
         &viewer_args(
             project.data_root.path(),
             Some(&project.id_text()),
-            &["show", &id_text],
+            &["show", &id_text, "--rules"],
         ),
         None,
     )
     .data();
     assert_eq!(legacy["command"], "show");
+    // Plain `show` no longer repeats the dependency IDs; the viewer keeps them.
+    assert!(legacy.get("deps").is_none());
     for field in [
         "id",
         "status",
@@ -2216,7 +2218,6 @@ fn viewer_show_matches_legacy_detail_and_adds_running_timestamps() {
         "version",
         "title",
         "body",
-        "deps",
         "labels",
         "dependency_summaries",
         "rule_version",
