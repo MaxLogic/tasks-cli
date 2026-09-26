@@ -44,7 +44,10 @@ void main() {
     await pressKey(tester, LogicalKeyboardKey.f1);
     await pressKey(tester, LogicalKeyboardKey.keyA);
     expect(harness.model.projectList.totalCount, 1);
-    expect(harness.model.selectedProjectId, isNot(testProjectItem(1).projectId));
+    expect(
+      harness.model.selectedProjectId,
+      isNot(testProjectItem(1).projectId),
+    );
     expect(find.text('Project 1'), findsNothing);
     expect(find.text('Project 2'), findsWidgets);
 
