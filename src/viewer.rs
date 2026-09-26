@@ -2071,6 +2071,7 @@ fn update_request(value: Value) -> Result<UpdateRequest, AppError> {
             .transpose()?,
         deps: optional_u64_array(&changes_map, "deps")?,
         clear_deps: false,
+        ..TaskUpdate::default()
     };
     if changes.title.is_none()
         && changes.body.is_none()

@@ -2,7 +2,7 @@ use crate::error::AppError;
 use crate::markdown::{ParsedImport, ParsedTask};
 use crate::model::{
     parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportProblem, ImportReport,
-    ListCursor, Pagination, Priority, RuleRecord, SelectionPage, TaskDetail, TaskStatus,
+    ListCursor, Pagination, Priority, RuleRecord, SelectionPage, ShowTask, TaskDetail, TaskStatus,
     TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES, ID_PREFIX, MAX_DEPENDENCIES,
     RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
@@ -122,6 +122,86 @@ fn configure_writer(conn: &Connection) -> Result<(), AppError> {
     conn.pragma_update(None, "synchronous", "FULL")?;
     Ok(())
 }
+
+/// Snapshot fields compared between consecutive task events, in output order.
+const HISTORY_FIELDS: [&str; 6] = ["title", "body", "status", "priority", "labels", "deps"];
+
+/// Column holding `ok` (1 when the event has a comparable predecessor);
+/// the six per-field flags follow it.
+const HISTORY_OK_COLUMN: usize = 6;
+
+/// Column of the raw snapshot text when `history_sql` selects it.
+const HISTORY_SNAPSHOT_COLUMN: usize = HISTORY_OK_COLUMN + 1 + HISTORY_FIELDS.len();
+
+/// Builds the history query from fixed fragments (never user input). The page
+/// is materialized first so each event's predecessor snapshot is looked up
+/// once; field comparisons then run in SQL, so snapshot bodies are returned
+/// only when `with_snapshot` asks for them. A field counts as changed only
+/// when both snapshots contain it, so older snapshots without labels or
+/// priority do not report spurious changes. Invalid legacy snapshot text
+/// makes the comparison unavailable instead of failing the read.
+fn history_sql(filter: &str, limit: &str, with_snapshot: bool) -> String {
+    let flags = HISTORY_FIELDS
+        .iter()
+        .map(|field| {
+            format!(
+                "CASE WHEN ok THEN json_type(s, '$.{field}') IS NOT NULL
+                   AND json_type(ps, '$.{field}') IS NOT NULL
+                   AND json_extract(s, '$.{field}') IS NOT json_extract(ps, '$.{field}')
+                 ELSE 0 END"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let snapshot = if with_snapshot { ", s" } else { "" };
+    format!(
+        "WITH page AS MATERIALIZED (
+            SELECT e.event_id, e.task_id, e.entity_type, e.operation, e.resulting_version,
+                   e.created_ms, e.snapshot_json AS s,
+                   (SELECT p.snapshot_json FROM events p
+                     WHERE p.task_id = e.task_id AND p.entity_type = 'task'
+                       AND p.event_id < e.event_id
+                     ORDER BY p.event_id DESC LIMIT 1) AS ps
+            FROM events e
+            WHERE {filter}
+            ORDER BY e.event_id ASC LIMIT {limit}
+        ),
+        checked AS (
+            SELECT *, COALESCE(ps IS NOT NULL AND json_valid(s) AND json_valid(ps), 0) AS ok
+            FROM page
+        )
+        SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, ok,
+               {flags}{snapshot}
+        FROM checked ORDER BY event_id ASC"
+    )
+}
+
+fn history_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEvent> {
+    let changed_fields = if r.get::<_, bool>(HISTORY_OK_COLUMN)? {
+        let mut fields = Vec::new();
+        for (offset, field) in HISTORY_FIELDS.iter().enumerate() {
+            if r.get::<_, bool>(HISTORY_OK_COLUMN + 1 + offset)? {
+                fields.push((*field).to_string());
+            }
+        }
+        Some(fields)
+    } else {
+        None
+    };
+    Ok(HistoryEvent {
+        event_id: r.get::<_, i64>(0)? as u64,
+        task_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+        entity_type: r.get::<_, String>(2)?,
+        operation: r.get::<_, String>(3)?,
+        resulting_version: r.get::<_, i64>(4)?,
+        created_ms: r.get::<_, i64>(5)?,
+        changed_fields,
+        snapshot_json: None,
+    })
+}
+
+/// Most task IDs one `show` call accepts; matches the list page limit.
+pub const MAX_SHOW_IDS: usize = 100;
 
 fn validate_limit(limit: usize) -> Result<usize, AppError> {
     if (1..=100).contains(&limit) {
@@ -1642,13 +1722,91 @@ impl Store {
         Ok(summaries)
     }
 
+    /// Full library detail for one task, including dependency IDs and rules.
     pub fn show_task(&mut self, raw_id: &str) -> Result<TaskDetail, AppError> {
         let id = parse_task_id(raw_id).map_err(AppError::Validation)?;
         let snapshot = self.conn.unchecked_transaction()?;
+        let task = self
+            .read_show_task(id)?
+            .ok_or_else(|| self.task_not_found(&[id]))?;
+        let rule = self.project_rules()?;
+        let detail = TaskDetail {
+            priority: task.priority,
+            labels: task.labels,
+            id,
+            status: task.status,
+            version: task.version,
+            title: task.title,
+            body: task.body,
+            deps: self.task_dependencies(id)?,
+            dependency_summaries: task.dependency_summaries,
+            rule_version: rule.version,
+            rules: rule.body,
+        };
+        snapshot.commit()?;
+        Ok(detail)
+    }
+
+    /// Reads up to [`MAX_SHOW_IDS`] tasks in request order, with the shared
+    /// rules only when `include_rules` is set, from one read snapshot. Repeated
+    /// IDs are shown once. Any missing ID fails the whole read.
+    pub fn show_tasks(
+        &mut self,
+        raw_ids: &[String],
+        include_rules: bool,
+    ) -> Result<(Vec<ShowTask>, Option<RuleRecord>), AppError> {
+        if raw_ids.len() > MAX_SHOW_IDS {
+            return Err(AppError::Validation(format!(
+                "show received {} task IDs; the limit is {MAX_SHOW_IDS}. Split the request.",
+                raw_ids.len()
+            )));
+        }
+        let mut ids = Vec::with_capacity(raw_ids.len());
+        for raw in raw_ids {
+            let id = parse_task_id(raw).map_err(AppError::Validation)?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut tasks = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for &id in &ids {
+            match self.read_show_task(id)? {
+                Some(task) => tasks.push(task),
+                None => missing.push(id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(self.task_not_found(&missing));
+        }
+        let rules = if include_rules {
+            Some(self.project_rules()?)
+        } else {
+            None
+        };
+        snapshot.commit()?;
+        Ok((tasks, rules))
+    }
+
+    fn task_not_found(&self, ids: &[u64]) -> AppError {
+        let rendered = ids
+            .iter()
+            .map(|id| render_task_id(*id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let noun = if ids.len() == 1 { "task" } else { "tasks" };
+        AppError::NotFound(format!(
+            "{noun} {rendered} not found in project {}; run tasks list to see the IDs in this project",
+            self.project_id
+        ))
+    }
+
+    fn read_show_task(&self, id: u64) -> Result<Option<ShowTask>, AppError> {
         let row = self
             .conn
             .query_row(
-                "SELECT status, version, title, body FROM tasks WHERE id = ?1",
+                "SELECT status, version, title, body, priority FROM tasks WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
@@ -1656,39 +1814,24 @@ impl Store {
                         r.get::<_, i64>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let (status_text, version, title, body) = row.ok_or_else(|| {
-            AppError::NotFound(format!(
-                "task {} not found in project {}; run tasks list to see the IDs in this project",
-                render_task_id(id),
-                self.project_id
-            ))
-        })?;
-        let rule = self.project_rules()?;
-        let detail = TaskDetail {
-            priority: self
-                .conn
-                .query_row("SELECT priority FROM tasks WHERE id=?1", [id], |r| {
-                    r.get::<_, String>(0)
-                })?
-                .parse()
-                .map_err(AppError::Validation)?,
-            labels: crate::labels::read(&self.conn, id)?,
+        let Some((status_text, version, title, body, priority)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ShowTask {
+            priority: priority.parse().map_err(AppError::Validation)?,
             id,
             status: validate_status(&status_text)?,
             version: version as u64,
             title,
             body,
-            deps: self.task_dependencies(id)?,
+            labels: crate::labels::read(&self.conn, id)?,
             dependency_summaries: self.dependency_summaries(id)?,
-            rule_version: rule.version,
-            rules: rule.body,
-        };
-        snapshot.commit()?;
-        Ok(detail)
+        }))
     }
 
     pub fn history(
@@ -1700,25 +1843,18 @@ impl Store {
     ) -> Result<(Pagination<HistoryEvent>, Option<HistoryEvent>), AppError> {
         let project_id = self.project_id;
         if let Some(event_id) = event {
+            let sql = history_sql(
+                "e.event_id = ?1 AND e.task_id = ?2 AND e.entity_type = 'task'",
+                "1",
+                true,
+            );
             let row = self
                 .conn
-                .query_row(
-                    "SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, snapshot_json
-                     FROM events
-                     WHERE event_id = ?1 AND task_id = ?2 AND entity_type = 'task'",
-                    params![event_id, task_id as i64],
-                    |r| {
-                        Ok(HistoryEvent {
-                            event_id: r.get::<_, i64>(0)? as u64,
-                            task_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
-                            entity_type: r.get::<_, String>(2)?,
-                            operation: r.get::<_, String>(3)?,
-                            resulting_version: r.get::<_, i64>(4)?,
-                            created_ms: r.get::<_, i64>(5)?,
-                            snapshot_json: r.get::<_, String>(6).ok(),
-                        })
-                    },
-                )
+                .query_row(&sql, params![event_id, task_id as i64], |r| {
+                    let mut event = history_event_from_row(r)?;
+                    event.snapshot_json = r.get::<_, String>(HISTORY_SNAPSHOT_COLUMN).ok();
+                    Ok(event)
+                })
                 .optional()?;
             let single = row.ok_or_else(|| {
                 AppError::NotFound(format!(
@@ -1737,34 +1873,14 @@ impl Store {
         }
         let page_size = validate_limit(limit)?;
         let fetch = page_size + 1;
-        let mut rows = self.conn.prepare(
-            "
-            SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, snapshot_json
-            FROM events
-            WHERE task_id = ?1 AND event_id > ?2
-            ORDER BY event_id ASC LIMIT ?3
-            ",
-        )?;
-        let mut list = Vec::new();
-        let iter = rows.query_map(
-            params![task_id as i64, after.unwrap_or(0), fetch as i64],
-            |r| {
-                Ok(HistoryEvent {
-                    event_id: r.get::<_, i64>(0)? as u64,
-                    task_id: r.get::<_, Option<i64>>(1)?.map(|v| v as u64),
-                    entity_type: r.get::<_, String>(2)?,
-                    operation: r.get::<_, String>(3)?,
-                    resulting_version: r.get::<_, i64>(4)?,
-                    created_ms: r.get::<_, i64>(5)?,
-                    snapshot_json: None,
-                })
-            },
-        )?;
-        for item in iter {
-            let mut ev = item?;
-            ev.snapshot_json = None;
-            list.push(ev);
-        }
+        let sql = history_sql("e.task_id = ?1 AND e.event_id > ?2", "?3", false);
+        let mut rows = self.conn.prepare(&sql)?;
+        let mut list = rows
+            .query_map(
+                params![task_id as i64, after.unwrap_or(0), fetch as i64],
+                history_event_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
         let mut has_more = false;
         let next_after = if list.len() > page_size {
             has_more = true;
@@ -2035,9 +2151,19 @@ impl Store {
             && changes.deps.is_none()
             && !changes.clear_deps
             && changes.labels.is_none()
+            && changes.add_labels.is_empty()
+            && changes.remove_labels.is_empty()
         {
             return Err(AppError::Usage(format!(
-                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels, --clear-labels or --priority (project {project_id})",
+                "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels, --clear-labels, --add-label, --remove-label or --priority (project {project_id})",
+                render_task_id(id)
+            )));
+        }
+        if changes.labels.is_some()
+            && !(changes.add_labels.is_empty() && changes.remove_labels.is_empty())
+        {
+            return Err(AppError::Usage(format!(
+                "update {}: --labels/--clear-labels replace the whole set and cannot be combined with --add-label or --remove-label; pass one style (project {project_id})",
                 render_task_id(id)
             )));
         }
@@ -2133,11 +2259,22 @@ impl Store {
             .map(|p| p.to_string())
             .unwrap_or_else(|| cur_priority.clone());
         let current_labels = crate::labels::read(&tx, id)?;
-        let next_labels = changes
-            .labels
-            .map(crate::labels::normalize)
-            .transpose()?
-            .unwrap_or_else(|| current_labels.clone());
+        let next_labels = match changes.labels {
+            Some(replacement) => crate::labels::normalize(replacement)?,
+            None if changes.add_labels.is_empty() && changes.remove_labels.is_empty() => {
+                current_labels.clone()
+            }
+            None => {
+                let removed = crate::labels::normalize(changes.remove_labels)?;
+                let mut merged = current_labels
+                    .iter()
+                    .filter(|label| !removed.contains(label))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                merged.extend(changes.add_labels);
+                crate::labels::normalize(merged)?
+            }
+        };
         let current_deps = Self::task_dependencies_from(&tx, id)?;
         let no_change = next_priority == cur_priority
             && next_labels == current_labels

@@ -1,6 +1,6 @@
 use crate::bulk::BulkRun;
 use crate::model::{
-    HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, TaskDetail, TaskSummary,
+    HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, ShowTask, TaskSummary,
 };
 use crate::viewer::{
     ViewerArchivePayload, ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload,
@@ -12,6 +12,18 @@ use serde::Serialize;
 pub struct ImportFileReport {
     pub path: String,
     pub report: ImportReport,
+}
+
+/// `show` with one ID: the task fields at top level, plus the shared rules
+/// only when `--rules` was passed.
+#[derive(Serialize)]
+pub struct ShowPayload {
+    #[serde(flatten)]
+    pub task: ShowTask,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -51,7 +63,15 @@ pub enum CommandPayload {
         unknown_ids: Vec<u64>,
         clipboard: bool,
     },
-    Show(TaskDetail),
+    Show(ShowPayload),
+    /// `show` with several IDs; rules appear once, only with `--rules`.
+    ShowMany {
+        items: Vec<ShowTask>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rule_version: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rules: Option<String>,
+    },
     Create {
         id: u64,
         status: String,
@@ -125,26 +145,66 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// One tab-separated row; the dependency and label columns appear only
+    /// when non-empty.
     fn summary_line(item: &TaskSummary) -> String {
-        let deps = item
-            .deps
-            .iter()
-            .map(|d| format!("T-{d:03}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "T-{:03}\t{}\t{}\tv{}\t{}\t[{}]\tlabels=[{}]\n",
+        let mut line = format!(
+            "T-{:03}\t{}\t{}\tv{}\t{}",
             item.id,
             item.priority,
             item.status,
             item.version,
             Self::bound_title(&item.title),
-            deps,
-            item.labels.join(",")
-        )
+        );
+        if !item.deps.is_empty() {
+            let deps = item
+                .deps
+                .iter()
+                .map(|d| format!("T-{d:03}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            line.push_str(&format!("\t[{deps}]"));
+        }
+        if !item.labels.is_empty() {
+            line.push_str(&format!("\tlabels=[{}]", item.labels.join(",")));
+        }
+        line.push('\n');
+        line
     }
+
+    fn show_lines(task: &ShowTask) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("id: T-{0:03}\n", task.id));
+        out.push_str(&format!("status: {}\n", task.status));
+        out.push_str(&format!("priority: {}\n", task.priority));
+        out.push_str(&format!("version: {}\n", task.version));
+        if !task.labels.is_empty() {
+            out.push_str(&format!("labels: {}\n", task.labels.join(", ")));
+        }
+        for dependency in &task.dependency_summaries {
+            out.push_str(&format!(
+                "depends_on: T-{0:03}\t{1}\tv{2}\t{3}\n",
+                dependency.id, dependency.status, dependency.version, dependency.title
+            ));
+        }
+        out.push_str("title:\n");
+        out.push_str(&format!("{}\n", task.title));
+        out.push_str("body:\n");
+        out.push_str(&task.body);
+        out.push('\n');
+        out
+    }
+
+    fn rules_lines(rule_version: Option<u64>, rules: Option<&str>) -> String {
+        match (rule_version, rules) {
+            (Some(version), Some(body)) => format!("rules(v{version}):\n{body}\n"),
+            _ => String::new(),
+        }
+    }
+
+    /// One compact JSON line; callers parse it rather than read it.
     pub fn json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
     }
 
     fn bound_title(title: &str) -> String {
@@ -234,7 +294,7 @@ impl Envelope {
     }
 
     pub fn text(&self) -> String {
-        let mut out = match &self.data {
+        match &self.data {
             CommandPayload::Init { project_id, db_path } => {
                 format!("project_id: {project_id}\ndb_path: {db_path}\n")
             }
@@ -308,26 +368,22 @@ impl Envelope {
                 out
             }
             CommandPayload::Enrich {text,..} => text.clone(),
-            CommandPayload::Show(task) => {
-                let mut out = String::new();
-                out.push_str(&format!("id: T-{0:03}\n", task.id));
-                out.push_str(&format!("status: {}\n", task.status));
-                out.push_str(&format!("priority: {}\n", task.priority));
-                out.push_str(&format!("version: {}\n", task.version));
-                out.push_str(&format!("labels: {}\n", task.labels.join(", ")));
-                out.push_str(&format!("dependencies: {}\n", task.deps.len()));
-                for dependency in &task.dependency_summaries {
-                    out.push_str(&format!(
-                        "depends_on: T-{0:03}\t{1}\tv{2}\t{3}\n",
-                        dependency.id, dependency.status, dependency.version, dependency.title
-                    ));
-                }
-                out.push_str("title:\n");
-                out.push_str(&format!("{}\n", task.title));
-                out.push_str("body:\n");
-                out.push_str(&task.body);
-                out.push('\n');
-                out.push_str(&format!("rules(v{}):\n{}\n", task.rule_version, task.rules));
+            CommandPayload::Show(show) => {
+                let mut out = Self::show_lines(&show.task);
+                out.push_str(&Self::rules_lines(show.rule_version, show.rules.as_deref()));
+                out
+            }
+            CommandPayload::ShowMany {
+                items,
+                rule_version,
+                rules,
+            } => {
+                let mut out = items
+                    .iter()
+                    .map(Self::show_lines)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                out.push_str(&Self::rules_lines(*rule_version, rules.as_deref()));
                 out
             }
             CommandPayload::History {
@@ -339,11 +395,15 @@ impl Envelope {
                 let mut out = String::new();
                 for e in items {
                     out.push_str(&format!(
-                        "{}\tv{}\t{}\t{}\t{}\n",
-                        e.event_id, e.resulting_version, e.entity_type, e.operation, e.created_ms
+                        "{}\tv{}\t{}\t{}",
+                        e.event_id, e.resulting_version, e.operation, e.created_ms
                     ));
+                    if let Some(fields) = &e.changed_fields {
+                        out.push_str(&format!("\tchanged={}", fields.join(",")));
+                    }
+                    out.push('\n');
                     if let Some(snapshot) = &e.snapshot_json {
-                        out.push_str("snapshot_json: ");
+                        out.push_str("snapshot: ");
                         out.push_str(snapshot);
                         out.push('\n');
                     }
@@ -459,16 +519,7 @@ impl Envelope {
             | CommandPayload::ViewerShow(_)
             | CommandPayload::ViewerUpdate(_) => serde_json::to_string(self)
                 .unwrap_or_else(|_| "viewer payloads require --format json".to_string()),
-        };
-        if let Some(project_id) = &self.project_id {
-            if !matches!(
-                &self.data,
-                CommandPayload::Init { .. } | CommandPayload::Bind { .. }
-            ) {
-                out = format!("project_id: {project_id}\n{out}");
-            }
         }
-        out
     }
 }
 

@@ -8,7 +8,7 @@ use tasks_cli::markdown;
 use tasks_cli::model::{
     parse_task_id, ImportProblem, ImportReport, ProblemCounts, TaskStatus, TaskUpdate,
 };
-use tasks_cli::output::{CommandPayload, Envelope, ImportFileReport};
+use tasks_cli::output::{CommandPayload, Envelope, ImportFileReport, ShowPayload};
 use tasks_cli::registry;
 use tasks_cli::store::Store;
 
@@ -32,6 +32,18 @@ fn read_text(path: &Path) -> Result<String, AppError> {
             error.utf8_error().valid_up_to()
         ))
     })
+}
+
+/// Splits a comma-separated label option; normalization happens in the store.
+fn split_labels(value: Option<&str>) -> Vec<String> {
+    value
+        .map(|text| {
+            text.split(',')
+                .filter(|label| !label.trim().is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn resolved_root(cli: &Cli) -> Result<PathBuf, AppError> {
@@ -367,10 +379,28 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 std::io::stdout().write_all(result.text.as_bytes())?;
             }
         }
-        Command::Show { id } => {
+        Command::Show { ids, rules } => {
             let project_id = resolved_project(&cli, &data_root)?;
-            let detail = Store::open_readonly(&data_root, &project_id)?.show_task(id)?;
-            envelope(Some(project_id), CommandPayload::Show(detail), cli.format);
+            let (mut tasks, rules) =
+                Store::open_readonly(&data_root, &project_id)?.show_tasks(ids, *rules)?;
+            let (rule_version, rules) = match rules {
+                Some(record) => (Some(record.version), Some(record.body)),
+                None => (None, None),
+            };
+            let payload = if tasks.len() == 1 {
+                CommandPayload::Show(ShowPayload {
+                    task: tasks.remove(0),
+                    rule_version,
+                    rules,
+                })
+            } else {
+                CommandPayload::ShowMany {
+                    items: tasks,
+                    rule_version,
+                    rules,
+                }
+            };
+            envelope(Some(project_id), payload, cli.format);
         }
         Command::History {
             id,
@@ -533,6 +563,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     priority,
                     labels,
                     clear_labels,
+                    add_label,
+                    remove_label,
                     id,
                     expect_version,
                     title,
@@ -568,6 +600,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             status,
                             deps,
                             clear_deps,
+                            add_labels: split_labels(add_label.as_deref()),
+                            remove_labels: split_labels(remove_label.as_deref()),
                         },
                     )?;
                     envelope(

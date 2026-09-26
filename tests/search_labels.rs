@@ -90,8 +90,7 @@ fn labels_are_normalized_filterable_and_versioned_with_full_history() {
         Some(4)
     );
     let old = f.ok(&["history", "T-1", "--event", &first_event]);
-    let snapshot: Value =
-        serde_json::from_str(old["items"][0]["snapshot_json"].as_str().unwrap()).unwrap();
+    let snapshot = old["items"][0]["snapshot"].clone();
     assert_eq!(snapshot["labels"], json!(["needs-human", "security"]));
     assert_eq!(snapshot["body"], "initial content");
     assert!(f.ok(&["list", "--open", "--label", "security"])["items"]

@@ -116,8 +116,7 @@ fn priority_cursor_versions_history_and_markdown_preserve_priority() {
     assert_eq!(f.run(&["show", "T-1"])["priority"], "P0");
     let event = updated["event_id"].as_u64().unwrap().to_string();
     let history = f.run(&["history", "T-1", "--event", &event]);
-    let snapshot: Value =
-        serde_json::from_str(history["items"][0]["snapshot_json"].as_str().unwrap()).unwrap();
+    let snapshot = history["items"][0]["snapshot"].clone();
     assert_eq!(snapshot["priority"], "P0");
     let export = f.root.path().join("export.md");
     f.run(&["export", "--out", export.to_str().unwrap()]);

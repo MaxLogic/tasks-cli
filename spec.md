@@ -160,10 +160,15 @@ resolving database paths or storing bindings.
 
 Global options: `--data-root`, `--project`, `--format text|json` (default text).
 No interactive prompts or color in v1. UTF-8 output. Stdout contains results only;
-stderr contains concise errors. JSON is one object with `schema_version: 1`,
-`project_id` (null before selection), and command-specific data; errors contain
-`error.code`, `error.message`, and optional structured conflict details. Text and
-JSON have the same semantics. No timestamps or banners added merely for display.
+stderr contains concise errors. JSON is one compact single-line object (no
+pretty-printing) with `schema_version: 1`, `project_id` (null before selection),
+and command-specific data; errors contain `error.code`, `error.message`, and
+optional structured conflict details. Text and JSON have the same semantics. No
+timestamps or banners added merely for display. Text output prints a
+`project_id:` line only where the project is the result (`init`, `bind`,
+`doctor`); JSON always carries it in the envelope. Text is the default for
+reading; use JSON when parsing fields or cursors. Every command and option has a
+one-line `--help` description.
 
 | Command | Required behavior |
 | --- | --- |
@@ -173,11 +178,11 @@ JSON have the same semantics. No timestamps or banners added merely for display.
 | `unlocks [--offset N] [--limit N]` | Open prerequisites ranked by immediately runnable then direct open dependents |
 | `enrich [--file PATH]` | Enrich UTF-8 text task references; stdin by default, exact text to stdout |
 | `enrich-clipboard` | Enrich clipboard text and replace it after checking the original still matches |
-| `show T-N` | Full task, version, project rules and direct dependency summaries |
+| `show T-N... [--rules]` | Full task(s), version and direct dependency summaries; shared rules only with `--rules`, printed once |
 | `search TEXT [--label LABEL] [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; numeric ID cursor, same page limits |
 | `create --title TEXT --body-file PATH` | Optional `--status`, default draft; `--priority P0..P3`, default P2; allocate next ID atomically |
-| `update T-N --expect-version N ...` | At least one of title, body-file, status, priority, labels or full dependency replacement |
-| `history T-N [--after N] [--limit N]` | Metadata only by default; `--event N` returns complete selected event |
+| `update T-N --expect-version N ...` | At least one of title, body-file, status, priority, labels (replace, clear, add or remove) or full dependency replacement |
+| `history T-N [--after N] [--limit N]` | Metadata and changed field names by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
 | `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
@@ -209,6 +214,10 @@ Upgrades from schemas 0, 1 and 2 remain explicit, backed up and atomic.
 
 Create/update accept `--labels LABEL,...`; update omission preserves the set,
 `--labels` replaces it and mutually exclusive `--clear-labels` empties it.
+Update also accepts `--add-label LABEL,...` and `--remove-label LABEL,...`,
+together or alone, which merge into or subtract from the current set inside the
+version-checked transaction (removal first, so a label in both is kept); they
+conflict with `--labels`/`--clear-labels`. Removing an absent label is a no-op.
 Normalize by trimming, ASCII lowercasing, sorting and deduplicating; allow at
 most 32 labels of 1–64 ASCII letters, digits or `-_.:`. Labels appear in show,
 summary rows, history snapshots, import previews and optional canonical metadata.
@@ -282,7 +291,9 @@ Successful replacement publishes plain text, replacing other clipboard formats.
 WSL delegation runs this command wholly through tasks.exe for Windows-owned stores.
 
 List/search rows contain only ID, status, version, title (display bounded to 120
-Unicode characters), priority, dependency IDs and normalized labels. Include `has_more` and `next_after`; read
+Unicode characters), priority, dependency IDs and normalized labels. Text rows
+are tab-separated `T-N, priority, status, vN, title`, followed by `[T-A,T-B]`
+only when the task has dependencies and `labels=[a,b]` only when it has labels. Include `has_more` and `next_after`; read
 limit+1 rows, do not COUNT(*) on each request. For plain search, `--after` is the numeric ID from the
 last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
 concurrent edits can change later pages. Each list, search, show and export call
@@ -290,14 +301,40 @@ reads its task rows, dependencies and rules within one deferred read transaction
 In WAL mode, writers can commit while that read retains its original snapshot.
 Release the read transaction before rendering or publishing an export. History
 pages similarly use event IDs.
-`show` never silently truncates body text. History full snapshots and export are
+`show` never silently truncates body text. It accepts 1–100 task IDs, shown in
+request order with repeats collapsed, all read in one snapshot; if any ID is
+missing, the whole command fails with exit 3 naming every missing ID and prints
+no task. JSON for one ID is command `show` with the task fields at top level:
+`priority`, `id`, `status`, `version`, `title`, `body`, `labels`,
+`dependency_summaries` (each `id`, `status`, `version`, `title`; the separate
+`deps` ID array is not repeated). Several IDs give command `show_many` with
+`items` holding those task objects. With `--rules`, `rule_version` and `rules`
+appear once at the payload top level; without it they are absent and the rules
+are not read. Text prints one block per task (blank line between blocks), omits
+an empty `labels:` line and has one `depends_on:` line per dependency; with
+`--rules` a single `rules(vN):` block follows the last task. The viewer's
+`viewer show` protocol is unchanged and still includes `deps` and rules.
+
+History JSON is command `history` with the task `id`, `items`, `has_more` and
+`next_after`. Each item has `event_id`, `operation`, `resulting_version`,
+`created_ms` and, when the event has a comparable predecessor task event,
+`changed_fields`: the names among title, body, status, priority, labels and deps
+(in that order) whose snapshot values differ from the previous task event. A
+field counts only when both snapshots contain it; create/migrated events and
+legacy non-JSON snapshots have no `changed_fields`. The comparison runs in SQL
+so listing never returns snapshot bodies. Items do not repeat `task_id` or
+`entity_type` (always this task). `--event N` adds `snapshot`, the stored
+snapshot as a nested JSON value (or a string when legacy text is not JSON). Text
+history rows are `event_id, vN, operation, created_ms[, changed=a,b]`, with a
+`snapshot:` line for `--event`. History full snapshots and export are
 explicit bulk access, not default context. Dependency cycles and self-links fail.
 Create, update and import enforce the same dependency-list limit: at most 1000
 IDs per task.
 
 `rules` contains shared verification/workflow requirements needed to interpret
-tasks; do not make agents infer them from an obsolete TASKS.md. `show` includes
-these rules, with version, by default. Repeated output should be deterministic
+tasks; do not make agents infer them from an obsolete TASKS.md. `show --rules`
+or `rules show` returns them with their version; plain `show` omits them so an
+agent reads rules once per session rather than with every task. Repeated output should be deterministic
 for unchanged data. Writes return only ID, status, new version and event ID.
 Support `--body-file -` for UTF-8 stdin; never launch an editor or interpolate text
 through a shell. Preserve input body whitespace/newlines. Reject invalid UTF-8,
