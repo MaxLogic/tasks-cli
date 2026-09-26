@@ -1,5 +1,47 @@
 # tasks-cli verification report
 
+## Token-efficient output, skills 1.1/4.1/6.2 and install — 2026-09-26
+
+`e60aaab` makes JSON compact and omits rules from `show` unless `--rules` is
+passed. It adds multi-ID `show` (1–100 IDs, exit 3 if any is missing),
+`--add-label`/`--remove-label`, and `changed_fields` in history, and replaces
+`snapshot_json` with a nested `snapshot`. The data schema is unchanged. The
+skills that describe these commands were committed in `5048280`, `60a9599`
+and `b8a9240`, and both binaries were installed at `b8a9240`
+(`integration/deployment-20260926.md`).
+
+### Proof
+
+- Windows gates on the implementation tree: fmt, clippy, test and release
+  build all exit 0, with **228 passed, 0 failed**
+  (`target/evidence/cli-impl/cli-impl-win-status.txt`, `cli-impl-win-test.log`).
+- Ubuntu/WSL gates with the Linux-owned target `~/.cache/tasks-cli-impl-target`:
+  all exit 0, with **232 passed, 0 failed**
+  (`target/evidence/cli-impl/linux-status.txt`, `linux-test.log`). The first
+  attempt used a target on `/mnt/f` and failed in libc's build script; its logs
+  are kept as `first-attempt-linux-*`.
+- Real two-binary delegation (Linux `tasks` → Windows `tasks.exe`) on a
+  temporary store covered init, rules, create, multi-ID show in text and JSON,
+  label add, a stale write (exit 4), a missing ID (exit 3), history JSON,
+  `history --event` and text list. Every check passed
+  (`target/evidence/cli-impl/delegation/summary.txt`).
+- Output size (UTF-8 bytes, same fixture): `list --open` JSON 5442 → 2973,
+  `show` JSON 1766 → 553.
+- Installed binaries: before the install, every command the updated skills
+  document was run against a temporary data root with
+  `target/release/tasks.exe`. On WSL, `tasks --version` reports
+  `b8a9240ba6e7`, and `tasks show --help` lists `<IDS>...` and `--rules`
+  through the installed symlink.
+
+### Limits
+
+- Before schema 2, history events did not store the previous status. The
+  first update after such an event can therefore list `status` in
+  `changed_fields` even when the status did not change.
+- Other JSON consumers that read `deps` from `show`, rules from `show`, or
+  `snapshot_json` from history must be updated. The viewer accepts both the
+  old and the new history shapes (`a1985d4`).
+
 ## Viewer slice 4: projects, tasks, details and history under NVDA — 2026-09-22
 
 Slice 4 of `viewer/` adds the real project and task lists, the details pane with

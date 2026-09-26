@@ -1,5 +1,37 @@
 # Tasks Viewer verification report
 
+## 2026-09-26: UI polish, Ctrl+V list search and lean CLI output
+
+Covers `7dfbbd1`, `a1985d4` and `dc98db6`: list layout and spacing, Clear
+filters in the empty state, the table project summary, the type scale,
+Ctrl+V into the list search, acceptance of the lean CLI history shape, and
+committed layout goldens. `33534a5` formats three test files and fixes a
+`verify-windows.ps1` bug. The script read its fixture-cleanup roots only after
+packaging, so a failure in an earlier gate left the throwaway store in place.
+
+`verify-windows.ps1` ran at `33534a5`. The tree was dirty only with the
+uncommitted AGENTS.md, deployment record and report text. It passed **12/12
+gates**:
+
+- G05: 547 passed, with 1 documented skip that G06 closes (3 passed).
+- G08: all 5 real-store end-to-end cases passed.
+- G11: found 70 native UIA nodes; the project region and Settings were exposed.
+- Probed `data/app.so`: `fcd0149b9d57bbe92fb4679c38d35e261dc1781a4c5b01a5a54b6c9a2da91eb4`.
+- Evidence: `viewer/target/evidence/viewer/2026-09-26-111817-verify-windows/`.
+
+Two earlier runs failed and are kept:
+
+- `2026-09-26-111120-verify-windows` failed G03 on the three unformatted
+  files. That failure exposed the cleanup bug.
+- `2026-09-26-111255-verify-windows` passed G00–G10 but failed G11 after 45 s.
+  The UIA snapshot held only `FLUTTERVIEW`, the same intermittent exposure
+  recorded on 2026-09-23. The unchanged bundle passed G11 on the next run.
+  The cause is still unexplained.
+
+The layout goldens use the Segoe UI files installed on this machine. They ran
+in G05; they skip only on hosts that lack those fonts. As before, the window
+workflows (V08) and NVDA speech walkthroughs (V10) remain manual.
+
 ## 2026-09-23: packaged release UI Automation gate
 
 `viewer/tool/verify-windows.ps1` now runs G11 by default after G10 packaging. It seeds a

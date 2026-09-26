@@ -24,6 +24,31 @@ with the real two binaries, not just argument mocks.
   authorize switching PFM, DelphiAiKit or other live projects to the new store.
   Migration trials use copies. Never modify live Markdown task ledgers during tests.
 
+## Installation
+
+There is no installer. The installed commands are symlinks to release builds,
+so installing a new version means rebuilding them. Installing still requires
+authorization, because it replaces the in-use executable for every project.
+
+- Windows: `F:\CliTools\tasks.exe` (on PATH) is a symlink to
+  `target\release\tasks.exe`. Run `cargo build --release --locked`.
+- Ubuntu/WSL: `~/.local/bin/tasks` is a symlink to
+  `~/.local/share/tasks-cli/target/release/tasks`. Build it with that
+  `CARGO_TARGET_DIR`. `~/.profile` exports
+  `TASKS_WINDOWS_EXE=/mnt/f/CliTools/tasks.exe` for delegation.
+- Viewer: `pwsh -NoProfile -File viewer/tool/package.ps1` writes
+  `target\viewer-release\` with its own copy of `tasks.exe`. Stop the running
+  viewer first, then repackage and restart it after each CLI change.
+- The `task-ledger`, `create-task` and `resolve-task` skills are deployed as
+  links to `integration/skills/`. Committed edits are live immediately, so
+  change them together with the installed CLI they describe.
+- `cargo clean` removes the installed binaries; rebuild right after it.
+  Any Windows `cargo build --release` replaces the installed `tasks.exe`,
+  including `viewer/tool/verify-windows.ps1`. That script briefly ships a
+  test-hooks build before it restores the plain one. Do not let agents use the
+  live backlog while it runs.
+- Record each install in `integration/deployment-<date>.md`.
+
 ## Architecture and performance
 
 - Start with one Cargo package, a thin binary and a small library. Use synchronous
