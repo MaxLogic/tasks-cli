@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'commands.dart';
+import 'viewer_controls.dart';
 import 'viewer_format.dart';
 
 /// Rows rendered in each synthetic collection.
@@ -230,7 +231,7 @@ class _PrototypeProjectsPaneState extends State<PrototypeProjectsPane> {
             },
           ),
         ),
-        const Divider(height: 1),
+        const ViewerRule(),
         Padding(
           padding: const EdgeInsets.all(12),
           child: Text(
@@ -384,7 +385,7 @@ class _PrototypeTasksPaneState extends State<PrototypeTasksPane> {
             },
           ),
         ),
-        const Divider(height: 1),
+        const ViewerRule(),
         Padding(
           padding: const EdgeInsets.all(12),
           child: Text(
@@ -553,7 +554,7 @@ class _PrototypeDetailsPaneState extends State<PrototypeDetailsPane> {
             ),
           ),
         ),
-        const Divider(height: 1),
+        const ViewerRule(),
         Padding(
           padding: const EdgeInsets.all(12),
           child: Text(

@@ -51,7 +51,7 @@ String viewerProjectRowLabel(
   if (includeRoot && item.roots.isNotEmpty) {
     buffer
       ..write(', root ')
-      ..write(item.roots.first);
+      ..write(viewerDisplayPath(item.roots.first));
   }
   final stats = item.stats;
   if (stats == null) {
@@ -169,4 +169,31 @@ String viewerTimezoneLabel(DateTime local) {
   final hours = absolute.inHours.toString().padLeft(2, '0');
   final minutes = (absolute.inMinutes % 60).toString().padLeft(2, '0');
   return 'UTC$sign$hours:$minutes';
+}
+
+/// [path] as a person reads it: without the Win32 verbatim prefix.
+///
+/// The CLI reports canonical roots such as `\\?\F:\work`; the prefix is noise
+/// on screen and in a copied path. Launchers keep the raw root.
+String viewerDisplayPath(String path) {
+  const unc = r'\\?\UNC\';
+  const verbatim = r'\\?\';
+  if (path.startsWith(unc)) {
+    return '\\\\${path.substring(unc.length)}';
+  }
+  if (path.startsWith(verbatim)) {
+    return path.substring(verbatim.length);
+  }
+  return path;
+}
+
+/// Clipboard text as a one-line search, or null when there is nothing to
+/// search for: surrounding whitespace goes, and inner line breaks become one
+/// space so a copied ticket line still reads as one query.
+String? viewerClipboardSearchText(String? text) {
+  if (text == null) {
+    return null;
+  }
+  final line = text.trim().replaceAll(RegExp(r'\s*[\r\n]+\s*'), ' ');
+  return line.isEmpty ? null : line;
 }

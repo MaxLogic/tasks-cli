@@ -222,6 +222,14 @@ final Map<LogicalKeyboardKey, String> _keyLabels = <LogicalKeyboardKey, String>{
 
 String _keyLabel(LogicalKeyboardKey key) => _keyLabels[key] ?? key.keyLabel;
 
+/// Ctrl+V on a focused list; the pane handler ignores it anywhere else, so a
+/// text field keeps its native paste.
+const SingleActivator _pasteKey = SingleActivator(
+  LogicalKeyboardKey.keyV,
+  control: true,
+  includeRepeats: false,
+);
+
 SingleActivator _alt(LogicalKeyboardKey key) =>
     SingleActivator(key, alt: true, includeRepeats: false);
 
@@ -613,7 +621,30 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
           'Focus the selected project summary, including every bound root.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyU)],
     ),
+    CommandSpec(
+      id: 'projects.pasteFilter',
+      scope: CommandScope.projects,
+      group: HelpGroup.projects,
+      label: 'Paste into search',
+      description:
+          'While the Projects list itself has focus, replace the Projects '
+          'search with the clipboard text (trimmed) and apply it; focus stays '
+          'in the list. In a text field Ctrl+V pastes as usual.',
+      activators: <ShortcutActivator>[_pasteKey],
+    ),
     // ----------------------------------------------------------------- tasks
+    CommandSpec(
+      id: 'tasks.pasteFilter',
+      scope: CommandScope.tasks,
+      group: HelpGroup.tasks,
+      label: 'Paste into search',
+      description:
+          'While the Tasks list itself has focus, replace the Tasks search '
+          'with the clipboard text (trimmed), for example a copied task ID, '
+          'and apply it; focus stays in the list. In a text field Ctrl+V '
+          'pastes as usual.',
+      activators: <ShortcutActivator>[_pasteKey],
+    ),
     CommandSpec(
       id: 'tasks.clearSearch',
       scope: CommandScope.tasks,

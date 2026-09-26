@@ -933,7 +933,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                   maxHeight: budget.footer,
                   child: _buildTabBar(context, state),
                 ),
-                const Divider(height: 1),
+                const ViewerRule(),
                 Expanded(child: _buildPanel(context, state, detail)),
               ],
             );
@@ -1198,7 +1198,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
               maxHeight: budget.header,
               child: _buildFindRow(context, state),
             ),
-            const Divider(height: 1),
+            const ViewerRule(),
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -1401,12 +1401,12 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                 ),
               ),
             ),
-            const Divider(height: 1),
+            const ViewerRule(),
             ViewerPaneRegion(
               maxHeight: budget.footer,
               child: _buildHistoryFooter(context, state),
             ),
-            const Divider(height: 1),
+            const ViewerRule(),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -1484,7 +1484,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
-        const Divider(height: 1),
+        const ViewerRule(),
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),

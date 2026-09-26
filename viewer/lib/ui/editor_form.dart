@@ -16,6 +16,7 @@ import '../data/editor_models.dart';
 import '../data/models.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
+import 'viewer_controls.dart';
 
 /// Fixed feedback text for a write that outlives the busy threshold.
 const String viewerEditorSavingMessage = 'Saving';
@@ -272,7 +273,7 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
                   ],
                 ),
               ),
-            const Divider(height: 1),
+            const ViewerRule(),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
@@ -329,7 +330,7 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
                 ),
               ),
             ),
-            const Divider(height: 1),
+            const ViewerRule(),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
               child: Row(

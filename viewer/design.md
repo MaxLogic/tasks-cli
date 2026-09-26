@@ -71,11 +71,13 @@ Dates display using the user's locale and local time, with full timestamp and ti
 
 Selecting a row updates its summary and Tasks. In a full layout, focus remains on the project row. Switching while an editor is dirty first opens the unsaved-changes dialog; Cancel restores the original selected project and focus.
 
-Each project row has a bordered ellipsis action button. Right-click, Menu and Shift+F10 open the same compact menu. E opens Explorer, R opens Alacritty, T opens Terminal, F copies the path, A archives or unarchives, D copies the project ID, and C enriches the clipboard. These letters also work when the project list has focus and a project row is selected.
+Paths are displayed and copied without the Win32 verbatim prefix (`\\?\C:` shows as `C:`, `\\?\UNC\` as `\\`); launchers receive the raw root. Each project row has a bordered ellipsis action button, a 32px target centred beside the row text. Right-click, Menu and Shift+F10 open the same compact menu. E opens Explorer, R opens Alacritty, T opens Terminal, F copies the path, A archives or unarchives, D copies the project ID, and C enriches the clipboard. These letters also work when the project list has focus and a project row is selected.
 
 ## 5. Tasks region
 
 Order: heading including selected project name, search, filter controls, sort, Clear filters, result count, list. Helper text: "Search task ID, title or body". Initial filter is Open tasks; initial sort is Priority ascending. Start with the filter controls collapsed so more task rows are visible. Keep search in the compact row. The Filters button reports the scope and active filter count and expands the full controls inline. Display active filters in plain text with individual labelled Remove buttons in that expanded area.
+
+When no task matches, the list's empty state states the reason once and carries a Clear filters button (Alt+C), the next Tab stop after the empty list. The status line keeps only the count and sample time.
 
 Ctrl+C or C on a focused task row copies its ID and name. Each row has an ellipsis menu, also reached by right-click, Menu or Shift+F10. C copies ID and name, V copies full content, E edits, D marks done, B blocks, and X cancels. These letters also work when the task list has focus and a task row is selected. Status changes use the editor's versioned save and dirty-draft guard.
 
@@ -152,6 +154,7 @@ All shortcuts have visible button/control equivalents and appear in Help. Handle
 | F4 | Edit selected task when in Tasks or Task details |
 | Ctrl+D | Mark selected task done when Tasks or Task details has focus; apply the dirty-draft guard if necessary |
 | Ctrl+E | Invoke Enrich clipboard when the Projects list itself has focus; capture selected project UUID |
+| Ctrl+V | When the Projects or Tasks list itself has focus: replace that list's search with the clipboard text (trimmed, line breaks become spaces) and apply it at once; focus stays in the list. An empty or non-text clipboard changes nothing. In a text field Ctrl+V is the field's own paste |
 | Ctrl+S | Save active editor; otherwise no action |
 | Ctrl+, | Open Settings |
 | Alt+Left | Back from dependency detail or reduced-layout child pane; never intercept text-caret commands |
@@ -172,8 +175,8 @@ Every interactive control has a direct shortcut or an access key. Use the follow
 
 | Scope | Control-to-key mapping |
 | --- | --- |
-| Projects | Text filter Ctrl+F; Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
-| Tasks | Text filter Ctrl+F; Clear search Alt+X; Expand filters Alt+F; Scope Alt+S; Status checklist Alt+T; Priority checklist Alt+P; Labels field Alt+L; Apply labels Alt+A; Needs human Alt+H; Readiness Alt+R; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Remove active filter group Alt+M |
+| Projects | Text filter Ctrl+F; Paste into search Ctrl+V (list focused); Clear search Alt+X; State Alt+S; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Copy project ID Alt+Y; Enrich clipboard button Alt+E; Preview enrichment Alt+P; Refresh F5 |
+| Tasks | Text filter Ctrl+F; Paste into search Ctrl+V (list focused); Clear search Alt+X; Expand filters Alt+F; Scope Alt+S; Status checklist Alt+T; Priority checklist Alt+P; Labels field Alt+L; Apply labels Alt+A; Needs human Alt+H; Readiness Alt+R; Sort Alt+O; Direction Alt+I; Clear filters Alt+C; Remove active filter group Alt+M |
 | Task details, read mode | Details tab Alt+1; Dependencies Alt+2; History Alt+3; Project rules Alt+4; Description F3; Edit F4; Mark done Ctrl+D; Copy reference Alt+C; Back Alt+Left; Find in body Ctrl+H; Next match Alt+N; Previous match Alt+P; dependency list Alt+L; Open dependency Alt+O; history list Alt+V; event snapshot Alt+E; rules text Alt+R |
 | Editor | Title Alt+T; Status Alt+S; Priority Alt+P; Labels Alt+L; Dependencies Alt+D; Body F3/Alt+B; Save Ctrl+S; Cancel Alt+C |
 | Settings | CLI path Alt+E; Browse CLI Alt+B; Data root Alt+D; Browse root Alt+O; Test connection Alt+T; Theme Alt+H; Text size Alt+Z; Projects width Alt+P; Tasks width Alt+K; Details width Alt+I; Reset layout Alt+R; Start with Windows Alt+W; Announcement mode Alt+A; Bella volume Alt+V; Test voice Alt+Y; Save Ctrl+S; Cancel Alt+C |
