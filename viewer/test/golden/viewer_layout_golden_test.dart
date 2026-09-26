@@ -10,6 +10,8 @@ library;
 
 import 'dart:io';
 
+import 'package:flutter/material.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/app.dart';
@@ -17,6 +19,7 @@ import 'package:tasks_viewer/controllers/announcement_controller.dart';
 import 'package:tasks_viewer/controllers/task_controller.dart';
 import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
+import 'package:tasks_viewer/ui/projects_pane.dart';
 import 'package:tasks_viewer/ui/real_workspace.dart';
 import 'package:tasks_viewer/ui/workspace_model.dart';
 
@@ -170,6 +173,24 @@ void main() {
               await tester.pumpAndSettle();
               await model.openTaskIndex(0);
               await tester.pumpAndSettle();
+            }
+            // With the real font every selected-project action is on screen
+            // inside the Projects pane, even at 720 pixels.
+            final pane = tester.getRect(find.byType(ViewerProjectsPane));
+            for (final label in <String>[
+              'Copy project ID (Alt+Y)',
+              'Enrich clipboard (Alt+E)',
+              'Preview enrichment (Alt+P)',
+            ]) {
+              final rect = tester.getRect(
+                find.widgetWithText(FilledButton, label),
+              );
+              expect(
+                rect.bottom,
+                lessThanOrEqualTo(pane.bottom),
+                reason: label,
+              );
+              expect(rect.top, greaterThanOrEqualTo(pane.top), reason: label);
             }
             await expectLater(
               find.byType(TasksViewerApp),

@@ -49,7 +49,7 @@ void main() {
       );
       await pressKey(tester, LogicalKeyboardKey.escape);
 
-      await tester.tap(find.text('Filters (Open tasks)'));
+      await tester.tap(find.byTooltip('Show filters (Alt+F)'));
       await tester.pumpAndSettle();
       final projectState = find.descendant(
         of: find.byType(ViewerProjectsPane),

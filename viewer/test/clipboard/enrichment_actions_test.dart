@@ -63,7 +63,7 @@ Future<ClipboardViewer> launchClipboardViewer(
 }
 
 /// One toolbar button of the selected project summary.
-Finder toolbarButton(String label) => find.widgetWithText(TextButton, label);
+Finder toolbarButton(String label) => find.widgetWithText(FilledButton, label);
 
 /// Puts the keyboard in the Projects list, the one region Ctrl+E serves.
 Future<void> focusProjectsList(
@@ -108,7 +108,7 @@ void main() {
       viewer.enricher.answer = testClipboardEnrichment(replacements: 1);
       await focusProjectsList(tester, viewer);
 
-      final button = toolbarButton('Enrich clipboard');
+      final button = toolbarButton('Enrich clipboard (Alt+E)');
       await tester.ensureVisible(button);
       await tester.pumpAndSettle();
       await tester.tap(button);
@@ -166,12 +166,12 @@ void main() {
 
       expect(find.textContaining('need the tasks CLI'), findsOneWidget);
       expect(
-        tester.widget<TextButton>(toolbarButton('Enrich clipboard')).onPressed,
+        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
         isNull,
       );
       expect(
         tester
-            .widget<TextButton>(toolbarButton('Preview enrichment'))
+            .widget<FilledButton>(toolbarButton('Preview enrichment (Alt+P)'))
             .onPressed,
         isNull,
       );
@@ -221,7 +221,7 @@ void main() {
       await focusProjectsList(tester, viewer);
 
       expect(
-        tester.widget<TextButton>(toolbarButton('Enrich clipboard')).onPressed,
+        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
         isNull,
       );
       await pressControl(tester, LogicalKeyboardKey.keyE);
@@ -230,13 +230,13 @@ void main() {
 
       // The store comes back; the row's own Retry re-reads it.
       projects[0] = testProjectItem(1);
-      final retry = find.widgetWithText(OutlinedButton, 'Retry');
+      final retry = find.widgetWithText(FilledButton, 'Retry');
       await tester.ensureVisible(retry);
       await tester.tap(retry);
       await tester.pumpAndSettle();
 
       expect(
-        tester.widget<TextButton>(toolbarButton('Enrich clipboard')).onPressed,
+        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
         isNotNull,
       );
 
@@ -265,7 +265,7 @@ void main() {
         isNull,
       );
       expect(
-        tester.widget<TextButton>(toolbarButton('Enrich clipboard')).onPressed,
+        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
         isNull,
       );
     });

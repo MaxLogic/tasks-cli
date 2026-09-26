@@ -241,6 +241,14 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
           contrastLevel: highContrast ? 1 : 0,
         ),
         dividerTheme: DividerThemeData(thickness: highContrast ? 2 : 1),
+        // The viewer's type scale: 13px secondary text stays readable on a
+        // dense ultrawide layout, titles step down so three pane headings
+        // fit. Row extents read these sizes (viewerRowExtent).
+        textTheme: const TextTheme(
+          bodySmall: TextStyle(fontSize: 13),
+          bodyMedium: TextStyle(fontSize: 14),
+          titleLarge: TextStyle(fontSize: 20),
+        ),
       );
 }
 

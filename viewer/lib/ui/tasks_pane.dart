@@ -434,13 +434,13 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             ),
           ),
           const SizedBox(width: 8),
-          TextButton.icon(
-            focusNode: _filtersToggleFocus,
-            onPressed: () => _toggleFilters(true),
-            icon: const Icon(Icons.tune),
-            label: Text(
-              'Filters (${tasks.scope.label}'
-              '${tasks.activeFilterCount == 0 ? '' : ', ${tasks.activeFilterCount} active'})',
+          Tooltip(
+            message: 'Show filters (Alt+F)',
+            child: TextButton.icon(
+              focusNode: _filtersToggleFocus,
+              onPressed: () => _toggleFilters(true),
+              icon: const Icon(Icons.tune),
+              label: _FiltersButtonLabel(tasks: tasks),
             ),
           ),
         ],
@@ -1066,6 +1066,58 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     } on Object catch (error) {
       widget.api.announce('Task action failed: $error', dynamic: true);
     }
+  }
+}
+
+/// "Filters", the active-filter count as a badge and the scope as a chip.
+///
+/// The screen reader hears the complete sentence, for example
+/// "Filters (Open tasks, 1 active)", instead of the pieces.
+class _FiltersButtonLabel extends StatelessWidget {
+  const _FiltersButtonLabel({required this.tasks});
+
+  final TaskController tasks;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final count = tasks.activeFilterCount;
+    final scope = tasks.scope.label;
+    return Semantics(
+      label: 'Filters ($scope${count == 0 ? '' : ', $count active'})',
+      excludeSemantics: true,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Text('Filters'),
+          if (count > 0) ...<Widget>[
+            const SizedBox(width: ViewerSpace.xs),
+            Badge.count(
+              count: count,
+              backgroundColor: colors.primary,
+              textColor: colors.onPrimary,
+            ),
+          ],
+          const SizedBox(width: ViewerSpace.s),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: ViewerSpace.s,
+              vertical: 2,
+            ),
+            decoration: BoxDecoration(
+              border: Border.all(color: colors.outline),
+              borderRadius: BorderRadius.circular(ViewerSpace.s),
+            ),
+            child: Text(
+              scope,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

@@ -155,7 +155,7 @@ void main() {
       final harness = await pumpRealViewer(tester);
       harness.model.selectProjectIndex(0);
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Filters (Open tasks)'));
+      await tester.tap(find.byTooltip('Show filters (Alt+F)'));
       await tester.pumpAndSettle();
       expectAccessibleSemantics(tester);
 
