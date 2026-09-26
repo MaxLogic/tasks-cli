@@ -185,6 +185,48 @@ void main() {
     expect(page.nextAfter, 41);
   });
 
+  test('a lean history page decodes nested snapshots and changed fields', () {
+    final envelope = ViewerEnvelope.decode(
+      jsonEncode(<String, Object?>{
+        'schema_version': 1,
+        'project_id': projectUuid,
+        'data': <String, Object?>{
+          'command': 'history',
+          'id': 7,
+          'items': <Object?>[
+            <String, Object?>{
+              'event_id': 41,
+              'operation': 'create',
+              'resulting_version': 1,
+              'created_ms': 1700000000000,
+            },
+            <String, Object?>{
+              'event_id': 42,
+              'operation': 'update',
+              'resulting_version': 2,
+              'created_ms': 1700000002000,
+              'changed_fields': <Object?>['status', 'labels'],
+              'snapshot': <String, Object?>{'title': 'Fix import'},
+            },
+          ],
+          'has_more': false,
+          'next_after': 42,
+        },
+      }),
+      expectedCommands: <String>{'history'},
+    );
+
+    final page = TaskHistoryPage.fromJson(envelope.data);
+
+    expect(page.items.first.snapshotJson, isNull);
+    expect(page.items.first.changedFields, isNull);
+    expect(page.items.first.entityType, 'task');
+    expect(page.items.last.changedFields, <String>['status', 'labels']);
+    expect(jsonDecode(page.items.last.snapshotJson!), <String, Object?>{
+      'title': 'Fix import',
+    });
+  });
+
   test('one event document keeps the complete snapshot text', () {
     final snapshot = StringBuffer();
     while (snapshot.length < 100000) {
