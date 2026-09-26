@@ -9,6 +9,8 @@
 /// * duplicate object keys are rejected at every object level.
 library;
 
+import 'dart:convert';
+
 /// The only protocol version this client understands.
 const int viewerProtocolVersion = 1;
 
@@ -1446,6 +1448,11 @@ final class TaskDetail {
 }
 
 /// One append-only history event from the existing `history` command.
+///
+/// The CLI omits `task_id` and `entity_type` (the page names the task) and
+/// sends the selected event's snapshot as a nested `snapshot` value; older
+/// CLIs sent `task_id`, `entity_type` and a `snapshot_json` string, which are
+/// still accepted.
 final class HistoryEvent {
   const HistoryEvent({
     required this.eventId,
@@ -1455,6 +1462,7 @@ final class HistoryEvent {
     required this.resultingVersion,
     required this.createdMs,
     required this.snapshotJson,
+    this.changedFields,
   });
 
   final int eventId;
@@ -1467,20 +1475,52 @@ final class HistoryEvent {
   /// Complete stored snapshot text, or null for events without one.
   final String? snapshotJson;
 
+  /// Snapshot fields changed since the previous event, when the CLI reports
+  /// them; null for a create or an event without a comparable predecessor.
+  final List<String>? changedFields;
+
   factory HistoryEvent.fromJson(
     Map<String, Object?> json, {
     required String path,
   }) {
     return HistoryEvent(
       eventId: _requireInt(json, 'event_id', path),
-      taskId: _requiredNullableInt(json, 'task_id', path),
-      entityType: _requireString(json, 'entity_type', path),
+      taskId: json.containsKey('task_id')
+          ? _requiredNullableInt(json, 'task_id', path)
+          : null,
+      entityType: json.containsKey('entity_type')
+          ? _requireString(json, 'entity_type', path)
+          : 'task',
       operation: _requireString(json, 'operation', path),
       resultingVersion: _requireInt(json, 'resulting_version', path),
       createdMs: _requireInt(json, 'created_ms', path),
-      snapshotJson: _requiredNullableString(json, 'snapshot_json', path),
+      snapshotJson: _historySnapshot(json, path),
+      changedFields: json['changed_fields'] == null
+          ? null
+          : _requireStringList(json, 'changed_fields', path),
     );
   }
+}
+
+/// Snapshot text from a nested `snapshot` value (a JSON object, or a string
+/// for legacy non-JSON snapshots) or the older `snapshot_json` string.
+String? _historySnapshot(Map<String, Object?> json, String path) {
+  if (json.containsKey('snapshot')) {
+    final value = json['snapshot'];
+    if (value == null || value is String) {
+      return value as String?;
+    }
+    if (value is Map || value is List) {
+      return jsonEncode(value);
+    }
+    throw ViewerMalformedResponseFailure(
+      'field "$path.snapshot" must be an object, a string or null',
+    );
+  }
+  if (json.containsKey('snapshot_json')) {
+    return _requiredNullableString(json, 'snapshot_json', path);
+  }
+  return null;
 }
 
 /// One page of history events for a task, 100 per read.
