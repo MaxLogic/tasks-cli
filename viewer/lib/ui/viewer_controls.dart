@@ -14,6 +14,14 @@ import 'app_shell.dart';
 import 'viewer_format.dart';
 import 'workspace_model.dart';
 
+/// The viewer's spacing scale in logical pixels (design.md section 2).
+abstract final class ViewerSpace {
+  static const double xs = 4;
+  static const double s = 8;
+  static const double m = 12;
+  static const double l = 16;
+}
+
 /// Vertical caps for the scrolling regions of one pane body.
 ///
 /// A pane body is a column of a scrolling filter block, a status line, the
@@ -45,7 +53,14 @@ class ViewerPaneBudget {
 /// every pixel the other regions do not use: the caps below are generous, so
 /// a region that fits naturally is never cut. A pane too short for that
 /// degrades to one row, then to the rows alone, instead of overflowing.
-ViewerPaneBudget viewerPaneBudgetFor(BuildContext context, double height) {
+///
+/// [footerShare] is the part of the space left after the status line that
+/// the footer may take; a pane with a tall footer passes more.
+ViewerPaneBudget viewerPaneBudgetFor(
+  BuildContext context,
+  double height, {
+  double footerShare = 0.4,
+}) {
   if (height <= 0) {
     return const ViewerPaneBudget(header: 0, status: 0, footer: 0);
   }
@@ -57,9 +72,9 @@ ViewerPaneBudget viewerPaneBudgetFor(BuildContext context, double height) {
   final status = math.min(viewerStatusReserve(context), available * 0.25);
   final rest = available - status;
   return ViewerPaneBudget(
-    header: rest * 0.6,
+    header: rest * (1 - footerShare),
     status: status,
-    footer: rest * 0.4,
+    footer: rest * footerShare,
   );
 }
 

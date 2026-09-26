@@ -219,7 +219,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         final projects = _projects;
         return LayoutBuilder(
           builder: (context, constraints) {
-            final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
+            final budget = viewerPaneBudgetFor(
+              context,
+              constraints.maxHeight,
+              footerShare: 0.5,
+            );
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
@@ -232,15 +236,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   child: _buildStatusLine(context, projects),
                 ),
                 Expanded(child: _buildList(context, projects)),
-                ViewerPaneRegion(
-                  maxHeight: budget.footer,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: <Widget>[
-                      if (projects.totalCount > 0) const ViewerRule(),
-                      _buildSummary(context, projects),
-                    ],
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: budget.footer < 0 ? 0 : budget.footer,
                   ),
+                  child: _buildFooter(context, projects),
                 ),
               ],
             );
@@ -681,37 +681,90 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
   // -------------------------------------------------------------- summary
 
-  Widget _buildSummary(BuildContext context, ProjectController projects) {
-    final theme = Theme.of(context);
+  /// The selected-project footer: its details scroll, its actions stay put.
+  ///
+  /// The action row is laid out first, capped at 70% of the footer, and
+  /// pinned under the scrolling details, so Copy project ID and the
+  /// clipboard actions stay on screen in a 720-pixel window. A pane too
+  /// narrow for them scrolls the actions within their cap instead of
+  /// overflowing.
+  Widget _buildFooter(BuildContext context, ProjectController projects) {
     final item = projects.selectedItem;
-    final stats = item?.stats;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      child: Focus(
-        focusNode: _summaryFocus,
-        child: Semantics(
-          container: true,
-          explicitChildNodes: true,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return Focus(
+      focusNode: _summaryFocus,
+      child: Semantics(
+        container: true,
+        explicitChildNodes: true,
+        child: LayoutBuilder(
+          builder: (context, constraints) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Semantics(
-                header: true,
-                child: Text(
-                  'Selected project',
-                  style: theme.textTheme.titleSmall,
+              if (projects.totalCount > 0) const ViewerRule(),
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(
+                    ViewerSpace.m,
+                    ViewerSpace.s,
+                    ViewerSpace.m,
+                    ViewerSpace.xs,
+                  ),
+                  child: _buildSummary(context, item),
                 ),
               ),
-              if (item == null)
-                Text(
-                  'No project is selected. Choose a row to see its '
-                  'statistics and bound roots.',
-                  style: theme.textTheme.bodySmall,
-                )
-              else ...<Widget>[
-                Text(item.name, style: theme.textTheme.bodyMedium),
-                _summaryLine(
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: constraints.maxHeight.isFinite
+                      ? constraints.maxHeight * 0.7
+                      : double.infinity,
+                ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(
+                    ViewerSpace.m,
+                    ViewerSpace.xs,
+                    ViewerSpace.m,
+                    ViewerSpace.s,
+                  ),
+                  child: _buildClipboardActions(context, projects, item),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummary(BuildContext context, ProjectItem? item) {
+    final theme = Theme.of(context);
+    final stats = item?.stats;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Semantics(
+          header: true,
+          child: Text('Selected project', style: theme.textTheme.titleSmall),
+        ),
+        const SizedBox(height: ViewerSpace.xs),
+        if (item == null)
+          Text(
+            'No project is selected. Choose a row to see its statistics and '
+            'bound roots.',
+            style: theme.textTheme.bodySmall,
+          )
+        else ...<Widget>[
+          Text(item.name, style: theme.textTheme.bodyMedium),
+          const SizedBox(height: ViewerSpace.xs),
+          SelectionArea(
+            child: Table(
+              columnWidths: const <int, TableColumnWidth>{
+                0: IntrinsicColumnWidth(),
+                1: FlexColumnWidth(),
+              },
+              children: <TableRow>[
+                _summaryRow(
                   context,
+                  'Counts',
                   stats == null
                       ? 'Unavailable: '
                             '${item.error?.message ?? 'the project database '
@@ -719,38 +772,46 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                       : '${stats.open} open / ${stats.total} total / '
                             '${stats.blocked} blocked',
                 ),
-                _summaryLine(
+                _summaryRow(
                   context,
+                  'Progress',
                   stats == null || stats.progressPercent == null
                       ? 'Not applicable'
-                      : 'Progress ${viewerPercent(stats.progressPercent!)} '
-                            'percent',
+                      : '${viewerPercent(stats.progressPercent!)} percent',
                 ),
-                _summaryLine(
+                _summaryRow(
                   context,
-                  'Started (first task): ${_summaryDate(context, stats?.startedMs)}',
+                  'Started',
+                  stats?.startedMs == null
+                      ? 'No recorded tasks'
+                      : '${viewerDate(context, stats!.startedMs!)} '
+                            '(first task)',
                 ),
-                _summaryLine(
+                _summaryRow(
                   context,
-                  'Last task write: ${_summaryTimestamp(context, stats?.lastWriteMs)}',
+                  'Last task write',
+                  _summaryTimestamp(context, stats?.lastWriteMs),
                 ),
-                _summaryLine(
+                _summaryRow(
                   context,
-                  'Sample time: ${viewerTimestamp(context, item.sampledAtMs)}',
+                  'Sampled',
+                  viewerTimestamp(context, item.sampledAtMs),
                 ),
-                _summaryLine(context, 'UUID: ${item.projectId}'),
+                _summaryRow(context, 'UUID', item.projectId),
                 if (item.roots.isEmpty)
-                  _summaryLine(context, 'Root: no bound root')
+                  _summaryRow(context, 'Root', 'No bound root')
                 else
-                  for (final root in item.roots)
-                    _summaryLine(context, 'Root: ${viewerDisplayPath(root)}'),
+                  for (final (index, root) in item.roots.indexed)
+                    _summaryRow(
+                      context,
+                      item.roots.length == 1 ? 'Root' : 'Root ${index + 1}',
+                      viewerDisplayPath(root),
+                    ),
               ],
-              const SizedBox(height: 8),
-              _buildClipboardActions(context, projects, item),
-            ],
+            ),
           ),
-        ),
-      ),
+        ],
+      ],
     );
   }
 
@@ -769,20 +830,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        if (reason != null)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 2),
-            child: Text(
-              reason,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.error,
-              ),
-            ),
-          ),
         Wrap(
-          spacing: 8,
-          runSpacing: 4,
+          spacing: ViewerSpace.s,
+          runSpacing: ViewerSpace.s,
           children: <Widget>[
+            // One primary action; the rest are tonal, and every label names
+            // its shortcut.
             FilledButton(
               onPressed: item == null
                   ? null
@@ -790,7 +843,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               child: const Text('Copy project ID (Alt+Y)'),
             ),
             if (item != null && item.stats == null)
-              OutlinedButton(
+              FilledButton.tonal(
                 onPressed: () => unawaited(projects.retry()),
                 child: const Text('Retry'),
               ),
@@ -798,41 +851,72 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               message:
                   reason ??
                   'Enrich the clipboard in ${item?.name ?? 'the selected '
-                          'project'} and write the result back (Alt+E).',
-              child: TextButton(
+                          'project'} and write the result back.',
+              child: FilledButton.tonal(
                 onPressed: canEnrich
                     ? () => unawaited(_enrichClipboard())
                     : null,
-                child: const Text('Enrich clipboard'),
+                child: const Text('Enrich clipboard (Alt+E)'),
               ),
             ),
             Tooltip(
               message:
-                  reason ??
-                  'Preview enrichment without writing the clipboard (Alt+P).',
+                  reason ?? 'Preview enrichment without writing the clipboard.',
               child: Focus(
                 focusNode: _previewFocus,
-                child: TextButton(
+                child: FilledButton.tonal(
                   onPressed: canEnrich
                       ? () => unawaited(_previewEnrichment())
                       : null,
-                  child: const Text('Preview enrichment'),
+                  child: const Text('Preview enrichment (Alt+P)'),
                 ),
               ),
             ),
           ],
         ),
+        // The reason follows the buttons, so it never pushes them off a
+        // short footer; each disabled button's tooltip repeats it.
+        if (reason != null)
+          Padding(
+            padding: const EdgeInsets.only(top: ViewerSpace.xs),
+            child: Text(
+              reason,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ),
       ],
     );
   }
 
-  Widget _summaryLine(BuildContext context, String text) => Padding(
-    padding: const EdgeInsets.only(top: 2),
-    child: Text(text, style: Theme.of(context).textTheme.bodySmall),
-  );
-
-  String _summaryDate(BuildContext context, int? epochMs) =>
-      epochMs == null ? 'No recorded tasks' : viewerDate(context, epochMs);
+  /// One label/value pair; a screen reader hears "label: value" once.
+  TableRow _summaryRow(BuildContext context, String label, String value) {
+    final theme = Theme.of(context);
+    return TableRow(
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.only(top: 2, right: ViewerSpace.m),
+          child: ExcludeSemantics(
+            child: Text(
+              label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Semantics(
+            label: '$label: $value',
+            excludeSemantics: true,
+            child: Text(value, style: theme.textTheme.bodySmall),
+          ),
+        ),
+      ],
+    );
+  }
 
   String _summaryTimestamp(BuildContext context, int? epochMs) =>
       epochMs == null ? 'No recorded tasks' : viewerTimestamp(context, epochMs);

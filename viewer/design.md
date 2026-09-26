@@ -44,7 +44,7 @@ Pane separators support pointer dragging. Settings also supplies labelled width 
 
 Use the Flutter SDK theme and semantic controls, with system light/dark preference as default. Provide System, Light, Dark and follow-Windows-contrast-theme behavior. Do not invent a status palette that is the only way to distinguish states. Every status and priority is text. Progress always has a numeric or "Not applicable" label; the optional bar is redundant decoration for screen readers.
 
-Default body text is 14 logical pixels; headings are 18. In-app text-size choices are 100%, 125%, 150%, 175%, 200%, combined with OS scaling. Respect system contrast settings through the Windows integration where Flutter does not expose them. Use the contrast/focus/size targets in spec.md section 9. Focus has a visible outline distinct from selection. Selection stays visible when focus moves to details, with an unfocused selection treatment that remains legible.
+Default body text is 14 logical pixels, secondary text 13 and pane headings 20. Spacing uses a 4/8/12/16 scale; fields with helper text keep 12 pixels before the next floating label. In-app text-size choices are 100%, 125%, 150%, 175%, 200%, combined with OS scaling. Respect system contrast settings through the Windows integration where Flutter does not expose them. Use the contrast/focus/size targets in spec.md section 9. Focus has a visible outline distinct from selection. Selection stays visible when focus moves to details, with an unfocused selection treatment that remains legible.
 
 Task rows use two text lines at normal density; project rows use four in their default expanded view. Calculate row extent from the active text scale and row mode. Do not hard-code a pixel row height that clips scaled text. One-line title ellipsis is allowed only in collections; the complete title is in the accessible row name and details. Tooltip text is supplemental. Essential information must not require hover.
 
@@ -63,7 +63,7 @@ Started (first task): 12 Sep 2026
 Last task write: 21 Sep 2026, 10:30
 ```
 
-The selected-project summary shows all required statistics, Started (first recorded task), Last task write, sample time, UUID and every bound root. Project rows show started and last-write dates so dates can be compared without selecting each project. At larger text sizes use additional stacked lines. A "Copy project ID" button is available in the summary.
+The selected-project summary shows all required statistics, Started (first recorded task), Last task write, sample time, UUID and every bound root. Project rows show started and last-write dates so dates can be compared without selecting each project. At larger text sizes use additional stacked lines. The summary is a two-column table (muted label, selectable value). Its action row (Copy project ID as the one filled button; Retry, Enrich clipboard and Preview enrichment tonal; each label names its shortcut) is pinned under the scrolling details so it stays on screen at 720-800 pixel window heights.
 
 Accessible project row name includes name, open, total, blocked, progress, started and last write, with selected state and row position exposed separately where the Windows bridge supports them. Example content: "Parser tools. 4 open, 10 total, 1 blocked. Progress 50 percent. Started, first recorded task, 12 September 2026. Last task write, 21 September 2026, 10:30." Root and UUID are available in the summary rather than appended to every long announcement; duplicate names include the distinguishing root in their row names.
 

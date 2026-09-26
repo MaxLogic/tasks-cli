@@ -863,7 +863,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       builder: (context, _) {
         final state = widget.model.detail;
         if (state == null || state.taskId == null) {
-          return _buildMessage('Select a task to read its details.');
+          return _buildNoSelection(context);
         }
         final detail = state.detail;
         if (detail == null) {
@@ -943,7 +943,42 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     );
   }
 
-  /// Placeholder for "nothing selected yet" and "the first read is running".
+  /// Nothing selected yet: a top-aligned hint that says how to get a task
+  /// here, instead of one sentence floating in a blank pane.
+  Widget _buildNoSelection(BuildContext context) {
+    final theme = Theme.of(context);
+    return Align(
+      alignment: Alignment.topLeft,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(
+          ViewerSpace.m,
+          ViewerSpace.s,
+          ViewerSpace.m,
+          ViewerSpace.m,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Select a task to read its details.',
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: ViewerSpace.s),
+            Text(
+              'F2 moves to the task list. Up and Down show a task here; '
+              'Enter opens it at once. F3 reads the description and F4 '
+              'edits the task.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Placeholder for "the first read is running".
   Widget _buildMessage(String message) {
     return Center(
       child: Padding(

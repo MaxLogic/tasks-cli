@@ -114,7 +114,7 @@ void main() {
       expect(find.text('Tasks in Project 1'), findsOneWidget);
       expect(harness.model.tasks!.scope, TaskScope.open);
       expect(harness.model.tasks!.statuses, isEmpty);
-      await tester.tap(find.text('Filters (Open tasks)'));
+      await tester.tap(find.byTooltip('Show filters (Alt+F)'));
       await tester.pumpAndSettle();
 
       final allRow = find
@@ -140,7 +140,7 @@ void main() {
     'compact task filters leave search available and reveal shortcuts',
     (tester) async {
       final harness = await pumpTaskBrowser(tester);
-      expect(find.text('Filters (Open tasks)'), findsOneWidget);
+      expect(find.byTooltip('Show filters (Alt+F)'), findsOneWidget);
       expect(find.text('Search tasks (Ctrl+F)'), findsOneWidget);
       expect(find.text('Scope (Alt+S)'), findsNothing);
       await pressKey(tester, LogicalKeyboardKey.f2);
