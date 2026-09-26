@@ -166,7 +166,9 @@ void main() {
 
       expect(find.textContaining('need the tasks CLI'), findsOneWidget);
       expect(
-        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
+        tester
+            .widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)'))
+            .onPressed,
         isNull,
       );
       expect(
@@ -192,7 +194,9 @@ void main() {
       final viewer = await launchClipboardViewer(
         tester,
         reads: reads,
-        settings: const ViewerSettingsDraft(projectState: ProjectStateFilter.all),
+        settings: const ViewerSettingsDraft(
+          projectState: ProjectStateFilter.all,
+        ),
       );
       await focusProjectsList(tester, viewer);
 
@@ -216,12 +220,16 @@ void main() {
       final viewer = await launchClipboardViewer(
         tester,
         reads: reads,
-        settings: const ViewerSettingsDraft(projectState: ProjectStateFilter.all),
+        settings: const ViewerSettingsDraft(
+          projectState: ProjectStateFilter.all,
+        ),
       );
       await focusProjectsList(tester, viewer);
 
       expect(
-        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
+        tester
+            .widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)'))
+            .onPressed,
         isNull,
       );
       await pressControl(tester, LogicalKeyboardKey.keyE);
@@ -236,7 +244,9 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
+        tester
+            .widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)'))
+            .onPressed,
         isNotNull,
       );
 
@@ -265,7 +275,9 @@ void main() {
         isNull,
       );
       expect(
-        tester.widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)')).onPressed,
+        tester
+            .widget<FilledButton>(toolbarButton('Enrich clipboard (Alt+E)'))
+            .onPressed,
         isNull,
       );
     });

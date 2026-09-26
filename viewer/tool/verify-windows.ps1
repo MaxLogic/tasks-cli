@@ -986,6 +986,11 @@ function Invoke-VerifyWindows {
     $uiaFixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -RepositoryRoot $repositoryFull `
         -FixtureRoot "$fixtureResolved-uia"
 
+    # Dot-sourcing package.ps1 later rebinds its parameter names here. Capture
+    # the values the fixture cleanup needs now, so cleanup also works when an
+    # earlier gate fails.
+    $fixtureCleanupWorkingRoot = $WorkingRoot
+    $fixtureCleanupRepositoryRoot = $repositoryFull
     $findings = [System.Collections.Generic.List[string]]::new()
     $gates = [System.Collections.Generic.List[object]]::new()
     $fixture = $null
@@ -1206,10 +1211,6 @@ function Invoke-VerifyWindows {
             -Command 'flutter build windows --release' -Log $windowsLog -Detail "sha256 $(Get-FileSha256 -Path $viewerExe)"
 
         Write-VerifyMessage -Message 'verify: packaging the portable release bundle'
-        # package.ps1 declares its own parameters, and dot-sourcing it rebinds
-        # those names here: hold on to the values the fixture cleanup needs.
-        $fixtureCleanupWorkingRoot = $WorkingRoot
-        $fixtureCleanupRepositoryRoot = $repositoryFull
         . $PackageToolPath
         if ($null -eq (Get-Command -Name 'Invoke-PackageTool' -ErrorAction SilentlyContinue)) {
             throw "The packaging tool '$PackageToolPath' does not define Invoke-PackageTool."
