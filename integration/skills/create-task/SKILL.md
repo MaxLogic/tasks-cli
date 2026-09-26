@@ -3,7 +3,7 @@ name: create-task
 description: "Add, split, reword, reprioritize, block, complete, or otherwise maintain durable tasks in a shared SQLite backlog. Use for requested task management and independent follow-up or prerequisite work. During resolve-task, own formulation while the coordinator applies ledger edits. Do not invoke merely because a backlog exists."
 metadata:
   author: Pawel Piotrowski
-  version: "4.0.0"
+  version: "4.1.0"
   adapted-from: "D:/Pawel/Prompts/skills/create-task (3.5.0)"
 ---
 
@@ -11,14 +11,16 @@ metadata:
 
 Read [task-ledger](../task-ledger/SKILL.md) for identity, bounded reads,
 versioned writes, field semantics, and coordinator ownership. Load project rules
-and relevant repository/spec guidance before editing. Never bootstrap or migrate
+once per session (`rules show` or `show --rules`) and relevant repository/spec
+guidance before editing. Never bootstrap or migrate
 to make a helper work. SQLite owns lifecycle and task IDs; do not run the old
 Python Markdown ledger helpers or update an exported TASKS.md.
 
 Record work when requested, required by repository policy, or when an independent
 follow-up/prerequisite must survive the session. A self-contained change being
 completed now does not need invented bookkeeping. Search existing intent,
-including completed tasks, and show likely matches before creating a duplicate.
+including completed tasks, and show likely matches (several IDs in one `show`)
+before creating a duplicate.
 Update the task that already owns the outcome.
 
 ## Formulation
@@ -52,8 +54,10 @@ Set priority P0-P3, default P2, and existing-vocabulary labels through structure
 CLI fields. Use dependencies only for same-project IDs that truly must complete
 first. Do not place reasons, ranges or external project IDs into dependency
 arguments. A parent groups work and is not automatically a dependency.
-Let SQLite assign IDs. Use selected `show` plus `update --expect-version` to
-edit, and inspect the committed resulting record. Never silently retry conflicts.
+Let SQLite assign IDs. Pass bodies with `--body-file -` and a heredoc. Use
+`show` for content you rewrite, then `update --expect-version`; a status-only
+change can use the listed version. The write output reports the committed
+version, so skip a verifying `show`. Never silently retry conflicts.
 
 Do not schedule full/batch gates in each task. Resolve-task chooses cadence for
 the selected run. A proof-only task that finds missing behavior creates a defect
