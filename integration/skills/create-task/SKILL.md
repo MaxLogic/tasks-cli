@@ -3,7 +3,7 @@ name: create-task
 description: "Add, split, reword, reprioritize, block, complete, or otherwise maintain durable tasks in a shared SQLite backlog. Use for requested task management and independent follow-up or prerequisite work. During resolve-task, own formulation while the coordinator applies ledger edits. Do not invoke merely because a backlog exists."
 metadata:
   author: Pawel Piotrowski
-  version: "4.1.0"
+  version: "4.2.0"
   adapted-from: "D:/Pawel/Prompts/skills/create-task (3.5.0)"
 ---
 
@@ -43,6 +43,14 @@ Proof:
   Expect: <exit code, output, result, or measured condition>
 ```
 
+Proof names targeted checks only: the exact new or changed tests, the owning
+fixture or module, and a compile of the changed surface. Never write "full suite
+passes", "all tests green", a full build or project-wide analysis into a task's
+Proof or Outcome. Those run once per group of tasks at the batch and final gates
+that resolve-task schedules. A task that genuinely needs a broad run (it changes
+the test runner, build graph, shared runtime or public contract) states that as
+`Cadence exception: <command> because <reason>`.
+
 Include only useful optional fields: Touches, Parent, Verify, Review, Expected
 gate cost, Risk, Production changes (`allowed` or `proof-only`), and Notes.
 Manual proof must be named honestly. Use ordinary, specific prose; preserve
@@ -59,8 +67,8 @@ Let SQLite assign IDs. Pass bodies with `--body-file -` and a heredoc. Use
 change can use the listed version. The write output reports the committed
 version, so skip a verifying `show`. Never silently retry conflicts.
 
-Do not schedule full/batch gates in each task. Resolve-task chooses cadence for
-the selected run. A proof-only task that finds missing behavior creates a defect
+Resolve-task chooses batch and final cadence for the selected run. A proof-only
+task that finds missing behavior creates a defect
 prerequisite; it does not quietly absorb a redesign. Completion requires actual
 acceptance/proof, not a progress label. Archived Markdown is migration input or
 an export, not live authority; do not archive merely because work is complete.

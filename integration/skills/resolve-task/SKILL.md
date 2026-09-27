@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.2.0"
+  version: "6.3.0"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
