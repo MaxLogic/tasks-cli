@@ -75,7 +75,26 @@ enum _Scene {
 
   /// The selected project lists tasks and one is open in Task details.
   taskOpen,
+
+  /// A task waits only on a to-verify prerequisite; Mark done was refused.
+  verifyRefused,
 }
+
+/// Window sizes each scene renders at; the refusal scene needs only the
+/// smaller reference size.
+List<Size> _sizes(_Scene scene) => scene == _Scene.verifyRefused
+    ? const <Size>[Size(1280, 720)]
+    : const <Size>[Size(2000, 800), Size(1280, 720)];
+
+/// The completion guard's structured refusal for T-002.
+const ViewerCliErrorFailure _refusal = ViewerCliErrorFailure(
+  code: 'validation',
+  message: 'validation: update T-002: cannot mark done',
+  exitCode: 2,
+  openPrerequisites: <ViewerOpenPrerequisite>[
+    ViewerOpenPrerequisite(id: 1, status: 'to-verify'),
+  ],
+);
 
 FakeWorkspaceReads _reads(_Scene scene) {
   final projects = <ProjectItem>[
@@ -83,6 +102,47 @@ FakeWorkspaceReads _reads(_Scene scene) {
     _project(2, 'tasks-cli', 42.5),
     _project(3, 'DelphiAiKit', 12),
   ];
+  if (scene == _Scene.verifyRefused) {
+    return fakeWorkspaceReads(
+      projects: projects,
+      tasks: <String, List<TaskItem>>{
+        for (final project in projects)
+          project.projectId: <TaskItem>[
+            testTaskItem(
+              2,
+              title: 'Build on the verified status',
+              status: 'in-progress',
+              priority: 'P1',
+              dependencyCount: 1,
+              waitingDependencyCount: 1,
+              verifyingDependencyCount: 1,
+            ),
+            testTaskItem(
+              1,
+              title: 'Add the to-verify status',
+              status: 'to-verify',
+            ),
+          ],
+      },
+      details: <int, TaskDetail>{
+        2: testTaskDetail(
+          2,
+          title: 'Build on the verified status',
+          status: 'in-progress',
+          priority: 'P1',
+          body: 'Waits for the batch gate of T-001.',
+          deps: const <int>[1],
+          dependencySummaries: <DependencySummary>[
+            testDependency(
+              1,
+              title: 'Add the to-verify status',
+              status: 'to-verify',
+            ),
+          ],
+        ),
+      },
+    );
+  }
   final tasks = scene == _Scene.noMatches
       ? <TaskItem>[testTaskItem(1, title: 'Shipped task', status: 'done')]
       : <TaskItem>[
@@ -126,7 +186,7 @@ void main() {
 
   for (final scene in _Scene.values) {
     for (final highContrast in <bool>[false, true]) {
-      for (final size in const <Size>[Size(2000, 800), Size(1280, 720)]) {
+      for (final size in _sizes(scene)) {
         final name =
             '${scene.name}_${highContrast ? 'hc' : 'std'}_'
             '${size.width.toInt()}x${size.height.toInt()}';
@@ -154,6 +214,7 @@ void main() {
                   tasks: reads,
                   detail: reads,
                   probe: reads.probe,
+                  update: FakeTaskWriter()..persistentFailure = _refusal,
                 ),
                 initialSettings: ViewerSettingsDraft(
                   themeMode: highContrast
@@ -173,6 +234,28 @@ void main() {
               await tester.pumpAndSettle();
               await model.openTaskIndex(0);
               await tester.pumpAndSettle();
+            }
+            if (scene == _Scene.verifyRefused) {
+              await model.selectTaskRow(0);
+              await tester.pumpAndSettle();
+              await model.openTaskIndex(0);
+              await tester.pumpAndSettle();
+              await tester.tap(
+                find.ancestor(
+                  of: find.text('Mark done'),
+                  matching: find.byWidgetPredicate(
+                    (widget) => widget is ButtonStyleButton,
+                  ),
+                ),
+              );
+              await tester.pumpAndSettle();
+              expect(
+                find.textContaining(
+                  'T-002 was not marked done. Finish or cancel T-001 '
+                  '(To verify) first.',
+                ),
+                findsWidgets,
+              );
             }
             // With the real font every selected-project action is on screen
             // inside the Projects pane, even at 720 pixels.

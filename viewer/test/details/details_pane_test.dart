@@ -233,6 +233,46 @@ void main() {
       }
     });
 
+    testWidgets('a to-verify dependency does not block starting', (
+      WidgetTester tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        final reads = fakeWorkspaceReads(
+          details: <int, TaskDetail>{
+            1: testTaskDetail(
+              1,
+              title: 'First task',
+              deps: <int>[9],
+              dependencySummaries: <DependencySummary>[
+                testDependency(9, title: 'Await the gate', status: 'to-verify'),
+              ],
+            ),
+          },
+        );
+        await pumpTaskDetails(tester, reads: reads);
+        await pressKey(tester, LogicalKeyboardKey.f3);
+        await pressAlt(tester, LogicalKeyboardKey.digit2);
+
+        expect(
+          detailsRow(
+            RegExp(
+              r'^T-009, To verify, Await the gate\. '
+              r'Awaiting verification; does not block starting$',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Awaiting verification; does not block starting'),
+          findsOneWidget,
+        );
+        expect(find.text('Waiting for this dependency'), findsNothing);
+      } finally {
+        semantics.dispose();
+      }
+    });
+
     testWidgets('Alt+L reaches the list; Alt+O opens it and Alt+Left returns', (
       WidgetTester tester,
     ) async {

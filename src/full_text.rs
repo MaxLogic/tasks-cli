@@ -11,15 +11,22 @@ pub struct RankedMatch {
 }
 
 pub fn create_index(conn: &Connection) -> Result<(), AppError> {
-    conn.execute_batch("CREATE VIRTUAL TABLE tasks_fts USING fts5(title,body,content='tasks',content_rowid='id',tokenize='unicode61',prefix='2 3');
-        CREATE TRIGGER tasks_fts_insert AFTER INSERT ON tasks BEGIN
+    conn.execute_batch("CREATE VIRTUAL TABLE tasks_fts USING fts5(title,body,content='tasks',content_rowid='id',tokenize='unicode61',prefix='2 3');")?;
+    create_triggers(conn)?;
+    conn.execute_batch("INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');")?;
+    Ok(())
+}
+
+/// Triggers that keep `tasks_fts` in the task transaction. Separate from the
+/// index so a `tasks` rebuild can restore them without reindexing.
+pub fn create_triggers(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch("CREATE TRIGGER tasks_fts_insert AFTER INSERT ON tasks BEGIN
           INSERT INTO tasks_fts(rowid,title,body) VALUES(new.id,new.title,new.body); END;
         CREATE TRIGGER tasks_fts_delete AFTER DELETE ON tasks BEGIN
           INSERT INTO tasks_fts(tasks_fts,rowid,title,body) VALUES('delete',old.id,old.title,old.body); END;
         CREATE TRIGGER tasks_fts_update AFTER UPDATE OF title,body ON tasks WHEN new.title != old.title OR new.body != old.body BEGIN
           INSERT INTO tasks_fts(tasks_fts,rowid,title,body) VALUES('delete',old.id,old.title,old.body);
-          INSERT INTO tasks_fts(rowid,title,body) VALUES(new.id,new.title,new.body); END;
-        INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild');")?;
+          INSERT INTO tasks_fts(rowid,title,body) VALUES(new.id,new.title,new.body); END;")?;
     Ok(())
 }
 

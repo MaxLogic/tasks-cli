@@ -254,6 +254,30 @@ void main() {
       expect(failure.isStaleSnapshot, isFalse);
     });
 
+    test('carries the completion guard prerequisites structurally', () {
+      final decoded = ViewerErrorEnvelope.tryDecode(
+        '{"schema_version":1,"error":{"code":"validation",'
+        '"message":"validation: update T-012: cannot mark done",'
+        '"open_prerequisites":{"task":12,"prerequisites":'
+        '[{"id":9,"status":"to-verify"},{"id":10,"status":"todo"}]}}}',
+      );
+      final failure = decoded!.asFailure(2);
+      expect(failure.code, 'validation');
+      expect(
+        failure.openPrerequisites.map((p) => '${p.canonicalId} ${p.status}'),
+        <String>['T-009 to-verify', 'T-010 todo'],
+      );
+      expect(
+        viewerOpenPrerequisitesMessage('T-012', failure.openPrerequisites),
+        'T-012 was not marked done. Finish or cancel T-009 (To verify) and '
+        'T-010 (Todo) first.',
+      );
+      final plain = ViewerErrorEnvelope.tryDecode(
+        '{"schema_version":1,"error":{"code":"validation","message":"bad"}}',
+      );
+      expect(plain!.openPrerequisites, isEmpty);
+    });
+
     test('recognises a stale snapshot and refuses a non-error document', () {
       final decoded = ViewerErrorEnvelope.tryDecode(
         '{"schema_version":1,"error":{"code":"stale_snapshot",'

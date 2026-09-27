@@ -453,7 +453,7 @@ class FakeWorkspaceReads
     return switch (query.readiness) {
       TaskReadiness.any => true,
       TaskReadiness.waiting => item.waitingDependencyCount > 0,
-      TaskReadiness.runnable => item.waitingDependencyCount == 0,
+      TaskReadiness.runnable => item.blockingDependencyCount == 0,
     };
   }
 
@@ -664,6 +664,7 @@ TaskItem testTaskItem(
   List<String> labels = const <String>[],
   int dependencyCount = 0,
   int waitingDependencyCount = 0,
+  int verifyingDependencyCount = 0,
 }) => TaskItem(
   id: id,
   title: title ?? 'Task $id',
@@ -673,6 +674,7 @@ TaskItem testTaskItem(
   labels: labels,
   dependencyCount: dependencyCount,
   waitingDependencyCount: waitingDependencyCount,
+  verifyingDependencyCount: verifyingDependencyCount,
   createdMs: 1700000000000 + id,
   updatedMs: 1700000001000 + id,
 );

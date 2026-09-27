@@ -875,6 +875,18 @@ class ViewerEditorController extends ChangeNotifier {
       if (failure.code == 'version_conflict') {
         return _enterConflict(failure.message);
       }
+      if (failure.openPrerequisites.isNotEmpty) {
+        // The completion guard refused `done` before writing anything, so the
+        // draft and the editor stay exactly as they were.
+        _notify();
+        return EditorSaveResult(
+          EditorSaveOutcome.failed,
+          message: viewerOpenPrerequisitesMessage(
+            base.canonicalId,
+            failure.openPrerequisites,
+          ),
+        );
+      }
       if (failure.code == 'unparsed_error') {
         // The process ran and exited without a usable answer: the write may or
         // may not have committed, so this is an unknown outcome, not a failure.

@@ -73,6 +73,7 @@ final class ViewerCliErrorFailure extends ViewerFailure {
     required this.exitCode,
     this.conflictExpected,
     this.conflictCurrent,
+    this.openPrerequisites = const <ViewerOpenPrerequisite>[],
   });
 
   final String code;
@@ -84,12 +85,26 @@ final class ViewerCliErrorFailure extends ViewerFailure {
   final int? conflictExpected;
   final int? conflictCurrent;
 
+  /// Prerequisites that made the store refuse `done`; empty otherwise.
+  final List<ViewerOpenPrerequisite> openPrerequisites;
+
   bool get isStaleSnapshot => code == 'stale_snapshot';
   bool get isNoStore =>
       code == 'no_store' ||
       code == 'registry' ||
       code == 'invalid_path' ||
       code == 'not_found';
+}
+
+/// One prerequisite that is neither done nor cancelled, from the structured
+/// `open_prerequisites` detail of the store's completion-guard refusal.
+final class ViewerOpenPrerequisite {
+  const ViewerOpenPrerequisite({required this.id, required this.status});
+
+  final int id;
+  final String status;
+
+  String get canonicalId => viewerCanonicalTaskId(id);
 }
 
 /// The CLI process did not finish within the client read timeout.
@@ -672,12 +687,14 @@ final class ViewerErrorEnvelope {
     required this.message,
     this.conflictExpected,
     this.conflictCurrent,
+    this.openPrerequisites = const <ViewerOpenPrerequisite>[],
   });
 
   final String code;
   final String message;
   final int? conflictExpected;
   final int? conflictCurrent;
+  final List<ViewerOpenPrerequisite> openPrerequisites;
 
   /// Decodes an error document, or null when [source] is not one.
   static ViewerErrorEnvelope? tryDecode(String source) {
@@ -712,11 +729,28 @@ final class ViewerErrorEnvelope {
         current = currentValue;
       }
     }
+    final open = <ViewerOpenPrerequisite>[];
+    final guard = error['open_prerequisites'];
+    if (guard is Map<String, Object?>) {
+      final items = guard['prerequisites'];
+      if (items is List<Object?>) {
+        for (final item in items) {
+          if (item is Map<String, Object?>) {
+            final id = item['id'];
+            final status = item['status'];
+            if (id is int && status is String) {
+              open.add(ViewerOpenPrerequisite(id: id, status: status));
+            }
+          }
+        }
+      }
+    }
     return ViewerErrorEnvelope(
       code: code,
       message: message,
       conflictExpected: expected,
       conflictCurrent: current,
+      openPrerequisites: open,
     );
   }
 
@@ -726,6 +760,7 @@ final class ViewerErrorEnvelope {
     exitCode: exitCode,
     conflictExpected: conflictExpected,
     conflictCurrent: conflictCurrent,
+    openPrerequisites: openPrerequisites,
   );
 }
 
@@ -1125,6 +1160,7 @@ const List<String> viewerTaskStatuses = <String>[
   'draft',
   'todo',
   'in-progress',
+  'to-verify',
   'blocked',
   'done',
   'cancelled',
@@ -1141,6 +1177,7 @@ String viewerStatusLabel(String wireValue) => switch (wireValue) {
   'draft' => 'Draft',
   'todo' => 'Todo',
   'in-progress' => 'In progress',
+  'to-verify' => 'To verify',
   'blocked' => 'Blocked',
   'done' => 'Done',
   'cancelled' => 'Cancelled',
@@ -1150,6 +1187,24 @@ String viewerStatusLabel(String wireValue) => switch (wireValue) {
 /// True for statuses that end the task without further work.
 bool viewerStatusIsTerminal(String wireValue) =>
     wireValue == 'done' || wireValue == 'cancelled';
+
+/// Viewer wording for the store refusing `done` because of [open]
+/// prerequisites, for example "T-012 was not marked done. Finish or cancel
+/// T-009 (To verify) first."
+String viewerOpenPrerequisitesMessage(
+  String canonicalTaskId,
+  List<ViewerOpenPrerequisite> open,
+) {
+  final names = <String>[
+    for (final item in open)
+      '${item.canonicalId} (${viewerStatusLabel(item.status)})',
+  ];
+  final listed = names.length <= 1
+      ? names.join()
+      : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+  return '$canonicalTaskId was not marked done. Finish or cancel $listed '
+      'first.';
+}
 
 /// Canonical display form of a task ID: T-007, T-12000.
 String viewerCanonicalTaskId(int id) => 'T-${id.toString().padLeft(3, '0')}';
@@ -1234,6 +1289,7 @@ final class TaskItem {
     required this.labels,
     required this.dependencyCount,
     required this.waitingDependencyCount,
+    this.verifyingDependencyCount = 0,
     required this.createdMs,
     required this.updatedMs,
   });
@@ -1246,6 +1302,14 @@ final class TaskItem {
   final List<String> labels;
   final int dependencyCount;
   final int waitingDependencyCount;
+
+  /// Prerequisites in `to-verify`. They are part of [waitingDependencyCount]
+  /// because they still block completion, but they do not block starting.
+  final int verifyingDependencyCount;
+
+  /// Waiting prerequisites that also keep the task from starting.
+  int get blockingDependencyCount =>
+      waitingDependencyCount - verifyingDependencyCount;
   final int createdMs;
   final int updatedMs;
 
@@ -1269,6 +1333,11 @@ final class TaskItem {
       waitingDependencyCount: _requireInt(
         json,
         'waiting_dependency_count',
+        path,
+      ),
+      verifyingDependencyCount: _requireInt(
+        json,
+        'verifying_dependency_count',
         path,
       ),
       createdMs: _requireInt(json, 'created_ms', path),
@@ -1347,6 +1416,10 @@ final class DependencySummary {
   /// Dependency waiting is separate from an explicit blocked status, so a
   /// terminal dependency is shown but stops preventing readiness.
   bool get preventsReadiness => !viewerStatusIsTerminal(status);
+
+  /// True for a `to-verify` dependency: it still waits for its batch gate, so
+  /// it blocks completion, but it does not block starting the task.
+  bool get awaitsVerification => status == 'to-verify';
 
   factory DependencySummary.fromJson(
     Map<String, Object?> json, {

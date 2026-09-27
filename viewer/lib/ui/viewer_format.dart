@@ -112,14 +112,35 @@ String viewerTaskRowLabel(TaskItem item) {
       ..write('. Labels ')
       ..write(item.labels.join(', '));
   }
-  final waiting = item.waitingDependencyCount;
-  if (waiting > 0) {
+  for (final part in viewerDependencyCountParts(item)) {
     buffer
-      ..write('. Waiting on ')
-      ..write(waiting)
-      ..write(waiting == 1 ? ' dependency' : ' dependencies');
+      ..write('. ')
+      ..write(part);
   }
   return buffer.toString();
+}
+
+/// Row wording for a task's unfinished prerequisites: the ones that keep it
+/// from starting, then the `to-verify` ones that only block completion.
+List<String> viewerDependencyCountParts(TaskItem item) {
+  final blocking = item.blockingDependencyCount;
+  final verifying = item.verifyingDependencyCount;
+  return <String>[
+    if (blocking > 0)
+      'Waiting on $blocking ${blocking == 1 ? 'dependency' : 'dependencies'}',
+    if (verifying > 0)
+      '$verifying ${verifying == 1 ? 'dependency' : 'dependencies'} to verify',
+  ];
+}
+
+/// Readiness wording of one dependency row (design.md section 7).
+String viewerDependencyReadinessText(DependencySummary dependency) {
+  if (dependency.awaitsVerification) {
+    return 'Awaiting verification; does not block starting';
+  }
+  return dependency.preventsReadiness
+      ? 'Waiting for this dependency'
+      : 'Does not withhold readiness';
 }
 
 /// Accessible name of one dependency row (design.md section 7).
@@ -130,11 +151,9 @@ String viewerDependencyRowLabel(DependencySummary dependency) {
     ..write(viewerStatusLabel(dependency.status))
     ..write(', ')
     ..write(dependency.title);
-  buffer.write(
-    dependency.preventsReadiness
-        ? '. Waiting for this dependency'
-        : '. Does not withhold readiness',
-  );
+  buffer
+    ..write('. ')
+    ..write(viewerDependencyReadinessText(dependency));
   return buffer.toString();
 }
 

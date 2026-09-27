@@ -54,7 +54,7 @@ pub enum Command {
         #[arg(long)]
         project: String,
     },
-    /// List runnable tasks (todo/in-progress, dependencies done), priority then ID.
+    /// List runnable tasks (todo/in-progress, dependencies done or to-verify), priority then ID.
     List {
         /// Include every nonterminal task, regardless of readiness.
         #[arg(long, conflicts_with = "needs_human")]

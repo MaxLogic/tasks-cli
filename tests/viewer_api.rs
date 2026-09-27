@@ -408,6 +408,7 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
             "draft",
             "todo",
             "in-progress",
+            "to-verify",
             "blocked",
             "done",
             "cancelled"
@@ -794,7 +795,7 @@ fn enum_offset_and_limit_bounds_are_rejected() {
         ),
         (
             json!({"statuses": ["finished"]}),
-            "supported values are draft, todo, in-progress, blocked, done, cancelled",
+            "supported values are draft, todo, in-progress, to-verify, blocked, done, cancelled",
         ),
         (
             json!({"priorities": ["P4"]}),
@@ -1601,6 +1602,7 @@ fn task_pages_return_the_documented_fields_without_bodies() {
             "status",
             "title",
             "updated_ms",
+            "verifying_dependency_count",
             "version",
             "waiting_dependency_count",
         ],
@@ -2757,4 +2759,69 @@ fn viewer_query_index_audit() {
             );
         }
     }
+}
+
+#[test]
+fn to_verify_status_is_filterable_sorted_and_satisfies_runnable_readiness() {
+    let project = Project::new();
+    let draft = project.add_plain("draft", TaskStatus::Backlog);
+    let blocked = project.add_plain("blocked", TaskStatus::Blocked);
+    let verify = project.add_plain("awaiting gate", TaskStatus::ToVerify);
+    let progress = project.add_plain("progress", TaskStatus::InProgress);
+    let dependent = project.add(
+        "dependent",
+        TaskStatus::Ready,
+        Priority::P2,
+        &[],
+        vec![verify],
+    );
+    let query = |document: Value| ids(&project.tasks(document));
+
+    assert_eq!(
+        query(json!({"statuses": ["to-verify"], "sort": "id"})),
+        [verify],
+        "to-verify is open and filterable"
+    );
+    assert_eq!(
+        query(json!({"sort": "status", "direction": "asc", "limit": 200})),
+        [draft, dependent, progress, verify, blocked],
+        "status order is draft, todo, in-progress, to-verify, blocked"
+    );
+    assert_eq!(
+        query(json!({"readiness": "runnable", "sort": "id"})),
+        [progress, dependent],
+        "a to-verify prerequisite satisfies runnable readiness"
+    );
+    assert_eq!(
+        query(json!({"readiness": "waiting", "sort": "id"})),
+        [dependent],
+        "it still counts as waiting, because completion stays blocked"
+    );
+    let item = project.tasks(json!({"statuses": ["to-verify"]}))["items"][0].clone();
+    assert_eq!(item["status"], "to-verify");
+    assert_eq!(item["verifying_dependency_count"], 0);
+    let row = project.tasks(json!({"statuses": ["todo"]}))["items"][0].clone();
+    assert_eq!(row["id"], dependent);
+    assert_eq!(row["waiting_dependency_count"], 1);
+    assert_eq!(row["verifying_dependency_count"], 1);
+
+    // The completion guard reaches the viewer as structured data, exit 2.
+    let refused = update(
+        project.data_root.path(),
+        &project.id,
+        json!({"id": dependent, "expect_version": 1, "changes": {"status": "done"}}),
+    );
+    let error = refused.fails(2, "validation");
+    assert_eq!(
+        error["open_prerequisites"],
+        json!({"task": dependent, "prerequisites": [{"id": verify, "status": "to-verify"}]})
+    );
+    assert_eq!(
+        project
+            .store()
+            .show_task(&format!("T-{dependent}"))
+            .unwrap()
+            .version,
+        1
+    );
 }
