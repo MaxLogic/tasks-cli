@@ -12,16 +12,19 @@ The installed paths are now symlinks to release builds instead of copies.
   - SHA-256 at install: `2b81b99b6d7620cc38c6568be60ebf44d4e9f19ac502e8d81d36c770b58e1962`.
     Later `verify-windows.ps1` runs rebuilt the same source through the
     symlink at later commits that do not touch the CLI, so the hash and the
-    `--version` commit change with each rebuild.
-  - Previous copy: `F:\CliTools\tasks.exe.pre-20260926`
-    (`92793db00a29e723f26d221a6a7e6e29a282c10542b71395b027f81c94a3b3d2`, commit `8b1dabd`)
+    `--version` commit change with each rebuild. Since 2026-09-27 that script
+    builds into `target/verify-cli` and no longer touches the installed binary.
+  - Previous copy (`92793db00a29e723f26d221a6a7e6e29a282c10542b71395b027f81c94a3b3d2`,
+    commit `8b1dabd`) was kept as `F:\CliTools\tasks.exe.pre-20260926` and
+    deleted on request on 2026-09-27.
 - Ubuntu/WSL: `/home/pawel/.local/bin/tasks` → `/home/pawel/.local/share/tasks-cli/target/release/tasks`
   - SHA-256: `dcdede23034a2cd4280caa0bf81e7ca93bb5cc06d607a02e1bbcc42b1ae34ae6`
-  - Previous copy: `/home/pawel/.local/bin/tasks.pre-20260926`
-    (`607d1841e23ba93c2713466606dfcf1973b77a468d4e80e36f195976dcd2848c`, commit `8b1dabd`)
+  - Previous copy (`607d1841e23ba93c2713466606dfcf1973b77a468d4e80e36f195976dcd2848c`,
+    commit `8b1dabd`) was kept as `/home/pawel/.local/bin/tasks.pre-20260926`
+    and deleted on request on 2026-09-27.
 
-To roll back, delete the symlink itself (not its target) and rename the
-`.pre-20260926` file back to its original name.
+The backups are gone, so rolling back means checking out an older commit and
+rebuilding into the linked target directory.
 
 ## Viewer
 

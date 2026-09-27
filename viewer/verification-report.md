@@ -1,5 +1,48 @@
 # Tasks Viewer verification report
 
+## 2026-09-27: verification no longer rebuilds the installed CLI
+
+`F:\CliTools\tasks.exe` links to `target\release\tasks.exe`. Before this change,
+every `verify-windows.ps1` run rebuilt that file three times, once as a
+test-hooks build. Now its plain, test-hooks and restore builds, and those of
+`measure.ps1`, go to `target\verify-cli`. `real_cli_editor_test.dart` and
+`real_cli_clipboard_test.dart` receive that build through
+`--dart-define=TASKS_VIEWER_TEST_CLI=<path>`. Without the define they still
+fall back to `target\release`. Two related fixes:
+
+- Dot-sourcing `package.ps1` rebound `$CliExecutable` to package.ps1's
+  default, so G10 bundled `target\release\tasks.exe` instead of the verify
+  build. This went unnoticed while both paths were the same file. Verify now
+  captures the value before the dot-source.
+- `package.ps1` now refuses to replace a bundle that a running process was
+  started from. It used to delete part of the folder, then fail on the locked
+  DLL, leaving the running viewer without its `data\` folder.
+
+`verify-windows.ps1` ran on `9bbd937` with these edits uncommitted and passed
+**12/12 gates**:
+
+- G05: 547 passed, with 1 documented skip closed by G06 (3 passed).
+- G08: 5 passed.
+- G11: 70 UIA nodes.
+- G10: the bundled `tasks.exe` matched the verify build (`e6ba248e…`).
+- The installed `target\release\tasks.exe` kept its SHA-256
+  (`0b96f3ea…`) and timestamp across all four runs below.
+- Evidence: `viewer/target/evidence/viewer/2026-09-27-103917-verify-windows/`.
+
+Three earlier runs from the same day are kept:
+
+- `2026-09-27-102610-verify-windows`: G10 failed because the running viewer
+  locked its DLL. That failure led to the new `package.ps1` guard.
+- `2026-09-27-103136-verify-windows`: G00–G11 passed, but the run reported the
+  bundle/verify-CLI hash mismatch that exposed the rebinding bug.
+- `2026-09-27-103510-verify-windows`: G11 failed with a `FLUTTERVIEW`-only
+  UIA snapshot, the known intermittent exposure. The next run passed G11.
+
+Pester passes 65/65, and PSScriptAnalyzer reports no findings for the three
+scripts. `measure.ps1` was not run, because it is a long benchmark. Afterwards,
+`target\viewer-release` was repackaged with the installed CLI and the viewer
+was restarted.
+
 ## 2026-09-26: UI polish, Ctrl+V list search and lean CLI output
 
 Covers `7dfbbd1`, `a1985d4` and `dc98db6`: list layout and spacing, Clear

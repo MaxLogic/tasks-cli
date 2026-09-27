@@ -43,10 +43,11 @@ authorization, because it replaces the in-use executable for every project.
   links to `integration/skills/`. Committed edits are live immediately, so
   change them together with the installed CLI they describe.
 - `cargo clean` removes the installed binaries; rebuild right after it.
-  Any Windows `cargo build --release` replaces the installed `tasks.exe`,
-  including `viewer/tool/verify-windows.ps1`. That script briefly ships a
-  test-hooks build before it restores the plain one. Do not let agents use the
-  live backlog while it runs.
+  Any Windows `cargo build --release` into the default target directory
+  replaces the installed `tasks.exe`. Build test-only variants (for example
+  `--features test-hooks`) with another `--target-dir`, as
+  `viewer/tool/verify-windows.ps1` and `measure.ps1` do with
+  `target/verify-cli`.
 - Record each install in `integration/deployment-<date>.md`.
 
 ## Architecture and performance

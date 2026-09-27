@@ -14,7 +14,9 @@ keyboard or pointer input, does not drive NVDA, and does not access the real
 clipboard:
 
   1. records the source commit, the dirty state and the toolchains;
-  2. builds the matching `tasks.exe` from the current source and hashes it;
+  2. builds the matching `tasks.exe` from the current source and hashes it.
+     Every CLI build goes to `target/verify-cli`, never `target/release`,
+     because the installed `tasks` command links to `target/release`;
   3. seeds one throwaway CLI store in a unique temporary root outside the
      repository (two projects, every status and priority, labels, dependencies,
      Unicode text, a literal `%_` search case and one done row) and writes
@@ -24,8 +26,8 @@ clipboard:
   5. runs the end-to-end viewer cases that drive the real widgets over that
      real store (`test/integration/viewer_e2e_headless_test.dart`);
   6. rebuilds the CLI with `--features test-hooks`, closes the one known skip in
-     `test/integration/real_cli_editor_test.dart` and restores the plain
-     binary;
+     `test/integration/real_cli_editor_test.dart` and rebuilds the plain
+     binary; both Flutter runs get that CLI through `--dart-define`;
   7. builds the Windows release and packages it with `package.ps1`, which
      launch-tests the copy from a path with spaces and non-ASCII characters;
   8. launches the packaged release and checks its external Windows UIA tree;
@@ -957,9 +959,17 @@ function Invoke-VerifyWindows {
     if ([string]::IsNullOrWhiteSpace($WorkingRoot)) {
         $WorkingRoot = [System.IO.Path]::GetTempPath()
     }
+    # The installed tasks command links to target/release, so the plain and
+    # test-hooks builds of this run use their own target directory.
+    $cliTargetDir = Join-Path -Path $repositoryFull -ChildPath 'target/verify-cli'
     if ([string]::IsNullOrWhiteSpace($CliExecutable)) {
-        $CliExecutable = Join-Path -Path $repositoryFull -ChildPath 'target/release/tasks.exe'
+        $CliExecutable = Join-Path -Path $cliTargetDir -ChildPath 'release/tasks.exe'
     }
+    $plainBuildArgs = @('build', '--release', '--locked', '--target-dir', $cliTargetDir)
+    $hookBuildArgs = $plainBuildArgs + @('--features', 'test-hooks')
+    $plainBuildCommand = "cargo $($plainBuildArgs -join ' ')"
+    $hookBuildCommand = "cargo $($hookBuildArgs -join ' ')"
+    $cliDefine = "TASKS_VIEWER_TEST_CLI=$CliExecutable"
     if ([string]::IsNullOrWhiteSpace($PackageToolPath)) {
         $PackageToolPath = Join-Path -Path $viewerFull -ChildPath 'tool/package.ps1'
     }
@@ -986,9 +996,12 @@ function Invoke-VerifyWindows {
     $uiaFixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -RepositoryRoot $repositoryFull `
         -FixtureRoot "$fixtureResolved-uia"
 
-    # Dot-sourcing package.ps1 later rebinds its parameter names here. Capture
-    # the values the fixture cleanup needs now, so cleanup also works when an
-    # earlier gate fails.
+    # Dot-sourcing package.ps1 later rebinds its parameter names here
+    # (CliExecutable, WorkingRoot, ...) to its own defaults. Capture the values
+    # packaging and the fixture cleanup need now, so both use this run's CLI and
+    # roots, and cleanup also works when an earlier gate fails.
+    $packageCliExecutable = $CliExecutable
+    $packageWorkingRoot = $WorkingRoot
     $fixtureCleanupWorkingRoot = $WorkingRoot
     $fixtureCleanupRepositoryRoot = $repositoryFull
     $findings = [System.Collections.Generic.List[string]]::new()
@@ -1018,20 +1031,20 @@ function Invoke-VerifyWindows {
             -Command 'flutter --version; git rev-parse HEAD; git status --porcelain; cargo --version; rustc --version' `
             -Log $toolchainLog
 
-        Write-VerifyMessage -Message 'verify: cargo build --release --locked'
-        $buildResult = Invoke-CapturedProcess -FilePath 'cargo' -Arguments @('build', '--release', '--locked') `
+        Write-VerifyMessage -Message "verify: $plainBuildCommand"
+        $buildResult = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $plainBuildArgs `
             -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
         $buildLog = Write-GateLog -EvidenceRoot $evidence -Name '01-cargo-build-release.txt' `
-            -Text (Format-GateLog -Command 'cargo build --release --locked' -Result $buildResult -Header "repository: $repositoryFull")
+            -Text (Format-GateLog -Command $plainBuildCommand -Result $buildResult -Header "repository: $repositoryFull")
         if ($buildResult.TimedOut -or $buildResult.ExitCode -ne 0) {
-            throw "cargo build --release --locked failed with exit code $($buildResult.ExitCode); see $buildLog"
+            throw "$plainBuildCommand failed with exit code $($buildResult.ExitCode); see $buildLog"
         }
         if (-not (Test-Path -LiteralPath $CliExecutable -PathType Leaf)) {
             throw "The release build did not produce '$CliExecutable'."
         }
         $plainCliHash = Get-FileSha256 -Path $CliExecutable
         Add-VerifyGate -Gates $gates -Id 'G01' -Name 'release CLI build' -Status 'passed' `
-            -Command 'cargo build --release --locked' -Log $buildLog -Detail "sha256 $plainCliHash"
+            -Command $plainBuildCommand -Log $buildLog -Detail "sha256 $plainCliHash"
 
         Write-VerifyMessage -Message "verify: seeding the throwaway store in '$fixtureResolved'"
         $fixture = Initialize-ViewerVerifyFixture -FixtureRoot $fixtureResolved -CliExecutable $CliExecutable `
@@ -1091,10 +1104,10 @@ function Invoke-VerifyWindows {
         $fixtureDefine = "TASKS_VIEWER_E2E_FIXTURE=$($fixture.ManifestPath)"
         Write-VerifyMessage -Message 'verify: flutter test (full suite against the shipped CLI)'
         $fullResult = Invoke-FlutterCommand -Launcher $launcher `
-            -Arguments @('test', '--reporter', 'expanded', "--dart-define=$fixtureDefine") `
+            -Arguments @('test', '--reporter', 'expanded', "--dart-define=$fixtureDefine", "--dart-define=$cliDefine") `
             -WorkingDirectory $viewerFull -TimeoutSeconds $GateTimeoutSeconds
         $fullLog = Write-GateLog -EvidenceRoot $evidence -Name '05-flutter-test-full.txt' `
-            -Text (Format-GateLog -Command "flutter test --reporter expanded --dart-define=$fixtureDefine" -Result $fullResult)
+            -Text (Format-GateLog -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Result $fullResult)
         $fullCounts = Get-FlutterTestCount -Text ($fullResult.StdOut + "`n" + $fullResult.StdErr)
         if ($fullResult.TimedOut) {
             throw "The full Flutter suite did not finish within $GateTimeoutSeconds s; see $fullLog"
@@ -1113,16 +1126,15 @@ function Invoke-VerifyWindows {
             throw "The full Flutter suite skipped $($fullCounts.Skipped) cases and only the documented test-hooks skip is accepted here (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
         }
         Add-VerifyGate -Gates $gates -Id 'G05' -Name 'flutter test (full suite)' -Status 'passed' `
-            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine" -Log $fullLog -Detail $fullDetail
+            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Log $fullLog -Detail $fullDetail
 
-        Write-VerifyMessage -Message 'verify: cargo build --release --locked --features test-hooks'
-        $hookBuild = Invoke-CapturedProcess -FilePath 'cargo' `
-            -Arguments @('build', '--release', '--locked', '--features', 'test-hooks') `
+        Write-VerifyMessage -Message "verify: $hookBuildCommand"
+        $hookBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $hookBuildArgs `
             -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
         $hookBuildLog = Write-GateLog -EvidenceRoot $evidence -Name '06-cargo-build-test-hooks.txt' `
-            -Text (Format-GateLog -Command 'cargo build --release --locked --features test-hooks' -Result $hookBuild -Header "repository: $repositoryFull")
+            -Text (Format-GateLog -Command $hookBuildCommand -Result $hookBuild -Header "repository: $repositoryFull")
         if ($hookBuild.TimedOut -or $hookBuild.ExitCode -ne 0) {
-            throw "cargo build --release --locked --features test-hooks failed with exit code $($hookBuild.ExitCode); see $hookBuildLog"
+            throw "$hookBuildCommand failed with exit code $($hookBuild.ExitCode); see $hookBuildLog"
         }
         $hookedCliText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($CliExecutable))
         foreach ($hook in @('TASKS_PRECOMMIT_READY_FILE', 'TASKS_HOLD_PRECOMMIT_MS')) {
@@ -1132,13 +1144,13 @@ function Invoke-VerifyWindows {
         }
         Write-VerifyMessage -Message 'verify: the acknowledgement-loss case with the test-hooks CLI'
         $hookResult = Invoke-FlutterCommand -Launcher $launcher `
-            -Arguments @('test', 'test/integration/real_cli_editor_test.dart', '--reporter', 'expanded') `
+            -Arguments @('test', 'test/integration/real_cli_editor_test.dart', '--reporter', 'expanded', "--dart-define=$cliDefine") `
             -WorkingDirectory $viewerFull -TimeoutSeconds $GateTimeoutSeconds
         $hookLog = Write-GateLog -EvidenceRoot $evidence -Name '07-flutter-test-test-hooks.txt' `
             -Text (@(
-                (Format-GateLog -Command 'cargo build --release --locked --features test-hooks' -Result $hookBuild)
+                (Format-GateLog -Command $hookBuildCommand -Result $hookBuild)
                 ''
-                (Format-GateLog -Command 'flutter test test/integration/real_cli_editor_test.dart --reporter expanded' -Result $hookResult)
+                (Format-GateLog -Command "flutter test test/integration/real_cli_editor_test.dart --reporter expanded --dart-define=$cliDefine" -Result $hookResult)
             ) -join "`n")
         $hookCounts = Get-FlutterTestCount -Text ($hookResult.StdOut + "`n" + $hookResult.StdErr)
         if ($hookResult.TimedOut -or $hookResult.ExitCode -ne 0 -or $hookCounts.Failed -gt 0 -or -not $hookCounts.Succeeded -or $hookCounts.Passed -eq 0) {
@@ -1148,15 +1160,15 @@ function Invoke-VerifyWindows {
             throw "The test-hooks run still skipped $($hookCounts.Skipped) case(s); see $hookLog"
         }
         Add-VerifyGate -Gates $gates -Id 'G06' -Name 'test-hooks CLI closes the skip' -Status 'passed' `
-            -Command 'cargo build --release --locked --features test-hooks; flutter test test/integration/real_cli_editor_test.dart' `
+            -Command "$hookBuildCommand; flutter test test/integration/real_cli_editor_test.dart --dart-define=$cliDefine" `
             -Log $hookLog -Detail "passed $($hookCounts.Passed), skipped 0"
 
         Write-VerifyMessage -Message 'verify: restoring the plain release CLI'
-        $restoreBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments @('build', '--release', '--locked') `
+        $restoreBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $plainBuildArgs `
             -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
-        $restoreText = Format-GateLog -Command 'cargo build --release --locked' -Result $restoreBuild -Header 'restoring the shipped CLI after the test-hooks build'
+        $restoreText = Format-GateLog -Command $plainBuildCommand -Result $restoreBuild -Header 'restoring the shipped CLI after the test-hooks build'
         if ($restoreBuild.TimedOut -or $restoreBuild.ExitCode -ne 0) {
-            throw "The restoring cargo build --release --locked failed with exit code $($restoreBuild.ExitCode)."
+            throw "The restoring $plainBuildCommand failed with exit code $($restoreBuild.ExitCode)."
         }
         $restoredCliHash = Get-FileSha256 -Path $CliExecutable
         $restoredBytesText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($CliExecutable))
@@ -1170,7 +1182,7 @@ function Invoke-VerifyWindows {
         $restoreLog = Write-GateLog -EvidenceRoot $evidence -Name '08-cargo-build-release-restore.txt' `
             -Text ($restoreText + "`ncli_sha256_after_restore: $restoredCliHash`ncli_sha256_before_test_hooks: $plainCliHash")
         Add-VerifyGate -Gates $gates -Id 'G07' -Name 'shipped CLI restored' -Status 'passed' `
-            -Command 'cargo build --release --locked' -Log $restoreLog -Detail $restoreDetail
+            -Command $plainBuildCommand -Log $restoreLog -Detail $restoreDetail
 
         Write-VerifyMessage -Message "verify: seeding the pristine end-to-end store in '$e2eFixtureResolved'"
         $e2eFixture = Initialize-ViewerVerifyFixture -FixtureRoot $e2eFixtureResolved -CliExecutable $CliExecutable `
@@ -1216,7 +1228,7 @@ function Invoke-VerifyWindows {
             throw "The packaging tool '$PackageToolPath' does not define Invoke-PackageTool."
         }
         $packageResult = Invoke-PackageTool -ViewerRoot $viewerFull -RepositoryRoot $repositoryFull `
-            -CliExecutable $CliExecutable -EvidenceRoot $evidence -WorkingRoot $WorkingRoot
+            -CliExecutable $packageCliExecutable -EvidenceRoot $evidence -WorkingRoot $packageWorkingRoot
         $packageHash = Assert-BundleHash -BundleRoot $packageResult.OutputRoot
         $packageFindings = @($packageResult.Findings)
         $hashFindings = @($packageHash.Findings)

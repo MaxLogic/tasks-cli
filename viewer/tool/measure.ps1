@@ -862,14 +862,17 @@ function Invoke-Measure {
         [pscustomobject]@{ Id = 'M10'; Name = 'release process peak working set'; Reason = 'needs the launched viewer process on a live desktop; the packaged launch test exercises only the no-window startup opt-out' },
         [pscustomobject]@{ Id = 'M11'; Name = 'frame and memory rows with NVDA enabled and disabled'; Reason = 'needs a live NVDA session; the automated semantics suites run headless in verify-windows.ps1 gate G05' }
     )
+    # The installed tasks command links to target/release, so this run builds
+    # into its own target directory.
+    $cliTargetDir = Join-Path -Path $repositoryFull -ChildPath 'target/verify-cli'
     $outcome = 1
     try {
         if (-not $SkipBuild) {
             $cargoPath = (Get-Command -Name cargo -ErrorAction Stop).Source
             $buildLog = [System.Collections.Generic.List[string]]::new()
             $buildPlan = @(
-                [pscustomobject]@{ Args = @('build', '--release', '--locked', '--features', 'test-hooks'); Purpose = 'build the test-hooks fixture binary' },
-                [pscustomobject]@{ Args = @('build', '--release', '--locked'); Purpose = 'restore the shipped CLI without test hooks' }
+                [pscustomobject]@{ Args = @('build', '--release', '--locked', '--target-dir', $cliTargetDir, '--features', 'test-hooks'); Purpose = 'build the test-hooks fixture binary' },
+                [pscustomobject]@{ Args = @('build', '--release', '--locked', '--target-dir', $cliTargetDir); Purpose = 'rebuild the plain CLI without test hooks' }
             )
             foreach ($target in $buildPlan) {
                 Write-MeasureMessage -Message ("cargo {0} ({1})" -f ($target.Args -join ' '), $target.Purpose)
@@ -895,13 +898,13 @@ function Invoke-Measure {
         }
 
         $shippedCli = if ([string]::IsNullOrWhiteSpace($CliExecutable)) {
-            Join-Path -Path $repositoryFull -ChildPath 'target/release/tasks.exe'
+            Join-Path -Path $cliTargetDir -ChildPath 'release/tasks.exe'
         }
         else {
             [System.IO.Path]::GetFullPath($CliExecutable)
         }
         $fixtureTool = if ([string]::IsNullOrWhiteSpace($FixtureBinary)) {
-            Join-Path -Path $repositoryFull -ChildPath 'target/release/tasks-perf-fixture.exe'
+            Join-Path -Path $cliTargetDir -ChildPath 'release/tasks-perf-fixture.exe'
         }
         else {
             [System.IO.Path]::GetFullPath($FixtureBinary)

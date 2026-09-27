@@ -474,6 +474,16 @@ function Invoke-PackageTool {
     }
 
     if (Test-Path -LiteralPath $outputFull -PathType Container) {
+        # A running viewer locks its DLLs, so deleting the folder would fail
+        # halfway and leave that viewer without its data folder.
+        $outputPrefix = $outputFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                $null -ne $_.Path -and $_.Path.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+        if ($running.Count -gt 0) {
+            $names = ($running | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" }) -join ', '
+            throw "Cannot replace '$outputFull' while $names runs from it; close it and package again."
+        }
         Write-PackageMessage -Message "package: replacing '$outputFull'"
         Remove-Item -LiteralPath $outputFull -Recurse -Force
     }
