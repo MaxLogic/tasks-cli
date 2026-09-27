@@ -279,6 +279,107 @@ void main() {
         semantics.dispose();
       }
     });
+
+    testWidgets('a task waiting only on a to-verify prerequisite says so', (
+      WidgetTester tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await pumpTaskBrowser(
+          tester,
+          reads: fakeWorkspaceReads(
+            tasks: {
+              firstProjectId: [
+                testTaskItem(
+                  12,
+                  title: 'Build on the parser',
+                  dependencyCount: 1,
+                  waitingDependencyCount: 1,
+                  verifyingDependencyCount: 1,
+                ),
+                testTaskItem(
+                  13,
+                  title: 'Mixed prerequisites',
+                  dependencyCount: 3,
+                  waitingDependencyCount: 3,
+                  verifyingDependencyCount: 2,
+                ),
+              ],
+            },
+          ),
+        );
+        final row = find.bySemanticsLabel(
+          RegExp(r'^T-012, P2, Todo, Build on the parser'),
+        );
+        expect(row, findsOneWidget);
+        expect(
+          tester.getSemantics(row).label,
+          'T-012, P2, Todo, Build on the parser. 1 dependency to verify',
+        );
+        expect(find.text('1 dependency to verify'), findsOneWidget);
+        expect(find.textContaining('Waiting on'), findsOneWidget);
+        expect(
+          find.text('Waiting on 1 dependency, 2 dependencies to verify'),
+          findsOneWidget,
+        );
+      } finally {
+        semantics.dispose();
+      }
+    });
+
+    testWidgets('a to-verify row shows its status and the filter selects it', (
+      WidgetTester tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        final harness = await pumpTaskBrowser(
+          tester,
+          reads: fakeWorkspaceReads(
+            tasks: {
+              firstProjectId: [
+                testTaskItem(
+                  9,
+                  title: 'Await the batch gate',
+                  status: 'to-verify',
+                  priority: 'P2',
+                ),
+              ],
+            },
+          ),
+        );
+        expect(
+          find.bySemanticsLabel(
+            RegExp(r'^T-009, P2, To verify, Await the batch gate'),
+          ),
+          findsOneWidget,
+        );
+
+        await pressKey(tester, LogicalKeyboardKey.f2);
+        await pressAlt(tester, LogicalKeyboardKey.keyT);
+        final checkbox = find.byWidgetPredicate(
+          (widget) =>
+              widget is Checkbox &&
+              widget.focusNode?.debugLabel == 'tasks status to-verify',
+        );
+        expect(checkbox, findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.ancestor(
+              of: checkbox,
+              matching: find.byType(MergeSemantics),
+            ),
+            matching: find.text('To verify'),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(checkbox);
+        await tester.pumpAndSettle();
+        expect(harness.reads.lastTaskRequest.statuses, <String>['to-verify']);
+        expect(harness.reads.lastTaskRequest.scope, TaskScope.open);
+      } finally {
+        semantics.dispose();
+      }
+    });
   });
 
   group('keyboard path', () {

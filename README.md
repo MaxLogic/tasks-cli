@@ -106,12 +106,16 @@ returns its complete `snapshot` as a nested JSON object.
 Event IDs and task version numbers are different. Reading an old snapshot does
 not restore it or change the current task.
 
-Statuses are `draft`, `todo`, `in-progress`, `blocked`, `done`, and
-`cancelled`. Bodies come from a file, and `-` reads standard input. Page limits
-run from 1 to 100, and `--after` continues from the cursor the previous page
-reported. `rules` holds the shared text that `show --rules` prints once after
-the tasks, which makes it the natural home for conventions that apply to the
-whole backlog. Plain `show` leaves the rules out.
+Statuses are `draft`, `todo`, `in-progress`, `to-verify`, `blocked`, `done`, and
+`cancelled`. `to-verify` marks work that is implemented and focused-tested but
+waits for a batch gate; collect the group with `list --status to-verify`.
+`update --status done` exits 2 without writing while any prerequisite is not
+done or cancelled, so complete a verified group in dependency order. Bodies come
+from a file, and `-` reads standard input. Page limits run from 1 to 100, and
+`--after` continues from the cursor the previous page reported. `rules` holds
+the shared text that `show --rules` prints once after the tasks, which makes it
+the natural home for conventions that apply to the whole backlog. Plain `show`
+leaves the rules out.
 
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
@@ -141,18 +145,22 @@ as literal terms, not interpreted as FTS operators. Ranked queries are limited t
 64 whitespace-separated terms and 4096 UTF-8 bytes. This is lexical retrieval,
 without typo correction, synonyms or embeddings.
 
-Ranked results use `next_offset` and `--offset`, not the ID-based `--after` cursor.
-Both search modes return bounded summaries and may include done/cancelled tasks.
-Ordinary `list` shows runnable todo/in-progress tasks, excluding unmet dependencies
-and needs-human. Use `--open` for every unfinished task, including drafts/blocked,
-or `--needs-human` for the decision queue. Explicit `--status` bypasses readiness.
-Every page is internally consistent; changes between requests can move ranked
-results, so restart pagination after relevant edits.
+Ranked results use `next_offset` and `--offset`, not the ID-based `--after`
+cursor. Both search modes return bounded summaries and may include
+done/cancelled tasks. Ordinary `list` shows runnable todo/in-progress tasks,
+excluding unmet dependencies and needs-human; a `to-verify` prerequisite counts
+as met, but `to-verify` tasks themselves are not listed. Use `--open` for every
+unfinished task, including drafts/blocked, or `--needs-human` for the decision
+queue. Explicit `--status` bypasses readiness. Every page is internally
+consistent; changes between requests can move ranked results, so restart
+pagination after relevant edits.
 
-Existing databases require explicit `tasks migrate`: schema 4 adds priority; schema 3 adds labels and
-builds the search index after a validated backup. Schema 1 states become
-`draft`/`todo`; existing history snapshots remain unchanged. New databases start
-at schema 4. No live project is migrated automatically.
+Existing databases require explicit `tasks migrate`: schema 5 adds the
+`to-verify` status by rebuilding the tasks table; schema 4 adds priority; schema
+3 adds labels and builds the search index after a validated backup. Schema 1
+states become `draft`/`todo`; existing history snapshots remain unchanged. New
+databases start at schema 5. Older binaries refuse a schema 5 database. No live
+project is migrated automatically.
 
 ## Priority and selecting work
 

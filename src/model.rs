@@ -98,6 +98,11 @@ pub enum TaskStatus {
     #[value(name = "in-progress")]
     #[serde(rename = "in-progress")]
     InProgress,
+    /// Implemented and focused-tested, waiting for its group's broad gate.
+    /// Nonterminal; satisfies dependents' readiness but not completion.
+    #[value(name = "to-verify")]
+    #[serde(rename = "to-verify")]
+    ToVerify,
     #[value(name = "blocked")]
     Blocked,
     #[value(name = "done")]
@@ -112,6 +117,7 @@ impl Display for TaskStatus {
             Self::Backlog => "draft",
             Self::Ready => "todo",
             Self::InProgress => "in-progress",
+            Self::ToVerify => "to-verify",
             Self::Blocked => "blocked",
             Self::Done => "done",
             Self::Cancelled => "cancelled",
@@ -129,11 +135,12 @@ impl FromStr for TaskStatus {
             "draft" | "backlog" => Ok(Self::Backlog),
             "todo" | "ready" => Ok(Self::Ready),
             "in-progress" | "inprogress" => Ok(Self::InProgress),
+            "to-verify" | "toverify" => Ok(Self::ToVerify),
             "blocked" => Ok(Self::Blocked),
             "done" => Ok(Self::Done),
             "cancelled" | "canceled" => Ok(Self::Cancelled),
             _ => Err(format!(
-                "invalid status '{value}'; expected one of draft, todo, in-progress, blocked, done, cancelled"
+                "invalid status '{value}'; expected one of draft, todo, in-progress, to-verify, blocked, done, cancelled"
             )),
         }
     }

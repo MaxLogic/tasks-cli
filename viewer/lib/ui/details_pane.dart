@@ -1574,9 +1574,7 @@ class _DependencyRowTile extends StatelessWidget {
             ],
           ),
           Text(
-            dependency.preventsReadiness
-                ? 'Waiting for this dependency'
-                : 'Does not withhold readiness',
+            viewerDependencyReadinessText(dependency),
             style: theme.textTheme.bodySmall,
           ),
         ],

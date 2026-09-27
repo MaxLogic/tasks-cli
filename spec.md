@@ -174,7 +174,7 @@ one-line `--help` description.
 | --- | --- |
 | `init --root PATH` | Create project, binding and exact root identity; accept a matching identity unchanged and refuse malformed or conflicting files without overwriting them |
 | `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
-| `list [--open | --needs-human] [--status STATUS] [--label LABEL] [--after CURSOR] [--limit N]` | Default runnable todo/in-progress; priority then ID; default 20, max 100 |
+| `list [--open | --needs-human] [--status STATUS] [--label LABEL] [--after CURSOR] [--limit N]` | Default runnable todo/in-progress (prerequisites done or to-verify); priority then ID; default 20, max 100 |
 | `unlocks [--offset N] [--limit N]` | Open prerequisites ranked by immediately runnable then direct open dependents |
 | `enrich [--file PATH]` | Enrich UTF-8 text task references; stdin by default, exact text to stdout |
 | `enrich-clipboard` | Enrich clipboard text and replace it after checking the original still matches |
@@ -194,8 +194,17 @@ one-line `--help` description.
 Define `update --deps T-1,T-2` as complete replacement; `--clear-deps` means empty,
 and omission preserves dependencies. They are mutually exclusive. The same
 optional dependency flags apply to create. Status values: draft, todo,
-in-progress, blocked, done, cancelled. All explicit status transitions are allowed;
-done/cancelled are terminal. Default lists additionally require readiness. No hard-delete command in v1.
+in-progress, to-verify, blocked, done, cancelled; done/cancelled are terminal and
+the others nonterminal. `to-verify` means implemented and focused-tested, waiting
+for a scheduled batch gate. Every explicit status transition is allowed except
+one completion guard: `update --status` moving a task to done fails with exit 2
+(validation) and writes nothing while any prerequisite in the dependency set the
+update would commit is nonterminal (draft, todo, in-progress, to-verify or
+blocked); the message names each such prerequisite and its status. Done and
+cancelled prerequisites never block. The guard applies only to the transition
+into done (an already-done task can still be edited), not to create, import or
+other transitions, and a later change to a prerequisite never reopens a done
+task. Default lists additionally require readiness. No hard-delete command in v1.
 
 Schema 2 stores and emits canonical `draft` and `todo` names. Explicit migration
 from schema 1 changes `backlog` to `draft` and `ready` to `todo` atomically after
@@ -243,8 +252,24 @@ optimistic version check, no-op detection, event snapshot, import and export as
 other task fields. Old snapshots are unchanged. Explicit backed-up migration
 from schemas 0–3 supplies P2 without changing task versions or other records.
 
+Schema 5 adds `to-verify` to the task status CHECK constraint. SQLite cannot
+alter a CHECK in place, so explicit `migrate` rebuilds `tasks` after the verified
+pre-upgrade backup, in one transaction with foreign keys disabled: drop the FTS
+triggers, copy every column into a new table with the widened constraint and a
+fresh-schema column order (priority last), swap it in, and recreate the three
+task indexes and FTS triggers. Task IDs are unchanged, so the external-content
+FTS index stays valid without a rebuild. Dependencies, labels, events, imports,
+rules, versions and timestamps are untouched; validation and foreign_key_check
+run before COMMIT and any failure rolls back to schema 4. Upgrades from schemas
+0–3 pass through the same steps. Schema-4 binaries refuse schema 5 through the
+existing newer-schema check.
+
 Default list selects only todo/in-progress tasks without `needs-human`, and all
-prerequisites must be done. Cancelled prerequisites remain unsatisfied. `--open`
+prerequisites must be done or to-verify. A to-verify prerequisite counts as
+satisfied only for this readiness and for `unlocks`; completion (the done guard)
+and every other rule still require done. Cancelled prerequisites remain
+unsatisfied. Default list never shows to-verify tasks themselves, since they are
+not runnable work; `--open` and `--status to-verify` do. `--open`
 selects every nonterminal task. `--needs-human` selects nonterminal tasks with
 that label. These flags conflict; explicit `--status` bypasses default readiness,
 while `--needs-human` still restricts to its nonterminal decision queue. Optional
@@ -258,9 +283,11 @@ The older library `list_tasks` wrappers retain ID-paged open semantics; CLI
 selection uses `select_tasks`.
 
 `unlocks` returns bounded summary rows with `direct_open_dependents` and
-`immediately_runnable`. Include only nonterminal prerequisites and nonterminal
-dependents. A dependent is immediately runnable when todo/in-progress, without
-needs-human, and every other prerequisite is done. Count distinct dependency
+`immediately_runnable`. Include only nonterminal prerequisites that are not
+to-verify (a to-verify prerequisite already satisfies readiness, so it has
+nothing left to unlock) and nonterminal dependents. A dependent is immediately
+runnable when todo/in-progress, without needs-human, and every other
+prerequisite is done or to-verify. Count distinct dependency
 edges enforced by the composite key. Order by immediately runnable descending,
 direct count descending, priority then ID. Use `next_offset`/`--offset`, limits
 20/default and 100/max. This is direct impact, not transitive scoring or an
@@ -420,7 +447,7 @@ titles, section/status mappings, duplicate IDs, ambiguous content and every
 unassigned non-whitespace range. Provide an explicit mapping file option
 `--map-file PATH` for section-to-status choices; do not guess ambiguous statuses.
 The map is UTF-8 JSON `{"sections":{"In Progress":"in-progress","Next - Today":"ready"}}`;
-keys are exact level-two heading text, values are the six supported statuses.
+keys are exact level-two heading text, values are the seven supported statuses.
 Every section containing tasks needs an explicit mapping, except exact headings
 equal to a canonical status. Preview may suggest mappings but apply never accepts
 an unconfirmed suggestion. Unknown keys/values and conflicting mappings fail.

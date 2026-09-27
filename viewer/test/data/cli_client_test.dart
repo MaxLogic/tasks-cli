@@ -176,7 +176,7 @@ String tasksDocument({String projectId = projectUuid}) =>
     '{"schema_version":1,"project_id":"$projectId","data":{"command":'
     '"viewer_tasks","protocol_version":1,"items":[{"id":42,'
     '"title":"Parser rewrite","status":"todo","priority":"P1","version":7,'
-    '"labels":["ui"],"dependency_count":2,"waiting_dependency_count":1,'
+    '"labels":["ui"],"dependency_count":2,"waiting_dependency_count":1,"verifying_dependency_count":0,'
     '"created_ms":1700000000000,"updated_ms":1700000001000}],'
     '"total_count":1,"offset":0,"limit":100,"has_more":false,'
     '"next_offset":null,"snapshot":"t1.abc"}}';

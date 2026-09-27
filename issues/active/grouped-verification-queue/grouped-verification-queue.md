@@ -75,3 +75,18 @@ No new tables, commands, groups, fingerprints or check tracking.
 Recording checks, runs, coverage or input fingerprints in SQLite; cross-project
 verification groups; stale-evidence detection. Proof stays in session notes and a
 one-line Notes entry. Reconsider only if repeated broad runs persist after this.
+
+## Follow-ups from review
+
+Recorded during the implementation review, 2026-09-27; not part of this change.
+
+- Mark done could show a hint such as "Needs T-009 done first", computed from
+  the loaded dependencies, before the user tries it (UX, P3).
+- Existing mismatch: `RUNNABLE_PREDICATE` treats a cancelled prerequisite as
+  unsatisfied, while the viewer's dependency row says it "does not withhold
+  readiness".
+- Existing scaling issue: `unlocks` scans every open dependency edge, about
+  2.4 s at 100k tasks and 150k edges. Add a dense-edge profile to the perf
+  fixture and a separate `unlocks` budget.
+- After install, check the spoken refusal of Mark done with NVDA through
+  `viewer/tool/verify-windows.ps1`.

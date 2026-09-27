@@ -36,10 +36,11 @@ pub const DEFAULT_LIMIT: u64 = 100;
 pub const MAX_LIMIT: u64 = 200;
 
 const SNAPSHOT_PREFIX: &str = "v1:";
-const STATUS_VALUES: [&str; 6] = [
+const STATUS_VALUES: [&str; 7] = [
     "draft",
     "todo",
     "in-progress",
+    "to-verify",
     "blocked",
     "done",
     "cancelled",
@@ -164,6 +165,9 @@ pub struct TaskItem {
     pub labels: Vec<String>,
     pub dependency_count: u64,
     pub waiting_dependency_count: u64,
+    /// Prerequisites in `to-verify`: counted in `waiting_dependency_count`
+    /// (they still block completion) but they do not block starting.
+    pub verifying_dependency_count: u64,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -569,6 +573,7 @@ fn parse_canonical_status(value: &str) -> Option<TaskStatus> {
         "draft" => Some(TaskStatus::Backlog),
         "todo" => Some(TaskStatus::Ready),
         "in-progress" => Some(TaskStatus::InProgress),
+        "to-verify" => Some(TaskStatus::ToVerify),
         "blocked" => Some(TaskStatus::Blocked),
         "done" => Some(TaskStatus::Done),
         "cancelled" => Some(TaskStatus::Cancelled),
@@ -591,9 +596,10 @@ fn status_rank(status: &TaskStatus) -> u8 {
         TaskStatus::Backlog => 0,
         TaskStatus::Ready => 1,
         TaskStatus::InProgress => 2,
-        TaskStatus::Blocked => 3,
-        TaskStatus::Done => 4,
-        TaskStatus::Cancelled => 5,
+        TaskStatus::ToVerify => 3,
+        TaskStatus::Blocked => 4,
+        TaskStatus::Done => 5,
+        TaskStatus::Cancelled => 6,
     }
 }
 
@@ -1741,7 +1747,7 @@ fn task_order_by(sort: TaskSort, direction: Direction) -> String {
         // SQLite to use the existing priority index for ascending pages.
         TaskSort::Priority => format!("t.priority {way}, t.id ASC"),
         TaskSort::Status => format!(
-            "CASE t.status WHEN 'draft' THEN 0 WHEN 'todo' THEN 1 WHEN 'in-progress' THEN 2 WHEN 'blocked' THEN 3 WHEN 'done' THEN 4 WHEN 'cancelled' THEN 5 ELSE 6 END {way}, t.id ASC"
+            "CASE t.status WHEN 'draft' THEN 0 WHEN 'todo' THEN 1 WHEN 'in-progress' THEN 2 WHEN 'to-verify' THEN 3 WHEN 'blocked' THEN 4 WHEN 'done' THEN 5 WHEN 'cancelled' THEN 6 ELSE 7 END {way}, t.id ASC"
         ),
         TaskSort::Title => {
             format!("lower(t.title) {way}, t.title COLLATE BINARY {way}, t.id ASC")
@@ -1802,6 +1808,7 @@ fn read_task_item(row: &rusqlite::Row<'_>) -> Result<TaskItem, AppError> {
         labels: Vec::new(),
         dependency_count: 0,
         waiting_dependency_count: 0,
+        verifying_dependency_count: 0,
         created_ms,
         updated_ms,
     })
@@ -1835,22 +1842,28 @@ fn populate_task_items(conn: &Connection, items: &mut [TaskItem]) -> Result<(), 
     let mut counts = dependency_counts(conn, &ids)?;
     for item in items {
         item.labels = labels_by_id.remove(&item.id).unwrap_or_default();
-        if let Some((total, waiting)) = counts.remove(&item.id) {
+        if let Some((total, waiting, verifying)) = counts.remove(&item.id) {
             item.dependency_count = total;
             item.waiting_dependency_count = waiting;
+            item.verifying_dependency_count = verifying;
         }
     }
     Ok(())
 }
 
-fn dependency_counts(conn: &Connection, ids: &[u64]) -> Result<HashMap<u64, (u64, u64)>, AppError> {
+/// Per task: (all prerequisites, nonterminal ones, to-verify ones).
+fn dependency_counts(
+    conn: &Connection,
+    ids: &[u64],
+) -> Result<HashMap<u64, (u64, u64, u64)>, AppError> {
     let mut out = HashMap::new();
     if ids.is_empty() {
         return Ok(out);
     }
     let sql = format!(
         "SELECT d.task_id, COUNT(*),
-                COALESCE(SUM(CASE WHEN p.status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN p.status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.status = 'to-verify' THEN 1 ELSE 0 END), 0)
          FROM dependencies d JOIN tasks p ON p.id = d.depends_on_id
          WHERE d.task_id IN ({})
          GROUP BY d.task_id",
@@ -1862,7 +1875,11 @@ fn dependency_counts(conn: &Connection, ids: &[u64]) -> Result<HashMap<u64, (u64
     while let Some(row) = rows.next()? {
         out.insert(
             row.get::<_, i64>(0)? as u64,
-            (row.get::<_, i64>(1)? as u64, row.get::<_, i64>(2)? as u64),
+            (
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, i64>(3)? as u64,
+            ),
         );
     }
     Ok(out)

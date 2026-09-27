@@ -28,6 +28,14 @@ pub enum AppError {
     InvalidPath(String),
     #[error("validation: {0}")]
     Validation(String),
+    /// The completion guard refused `done`: a validation error (exit 2) that
+    /// also carries the blocking prerequisites for structured JSON output.
+    #[error("validation: {message}")]
+    OpenPrerequisites {
+        task: u64,
+        prerequisites: Vec<(u64, String)>,
+        message: String,
+    },
     #[error("registry: {0}")]
     Registry(String),
     #[error("interop: {0}")]
@@ -80,7 +88,7 @@ impl AppError {
             Self::Database(_) => "database",
             Self::Io(_) => "io",
             Self::InvalidPath(_) => "invalid_path",
-            Self::Validation(_) => "validation",
+            Self::Validation(_) | Self::OpenPrerequisites { .. } => "validation",
             Self::Registry(_) => "registry",
             Self::Interop(_) => "interop",
             Self::ShaMismatch { .. } => "source_hash_mismatch",
@@ -95,7 +103,10 @@ impl AppError {
             Self::VersionConflict { .. } => 4,
             Self::StaleSnapshot(_) => 4,
             Self::LockTimeout(_) | Self::Busy(_) => 5,
-            Self::InvalidPath(_) | Self::Validation(_) | Self::ShaMismatch { .. } => 2,
+            Self::InvalidPath(_)
+            | Self::Validation(_)
+            | Self::OpenPrerequisites { .. }
+            | Self::ShaMismatch { .. } => 2,
             Self::Database(_)
             | Self::Io(_)
             | Self::Registry(_)
@@ -159,6 +170,21 @@ impl AppError {
             error.insert(
                 "conflict".to_string(),
                 serde_json::json!({"expected": expected, "current": current}),
+            );
+        }
+        if let Self::OpenPrerequisites {
+            task,
+            prerequisites,
+            ..
+        } = self
+        {
+            let items = prerequisites
+                .iter()
+                .map(|(id, status)| serde_json::json!({"id": id, "status": status}))
+                .collect::<Vec<_>>();
+            error.insert(
+                "open_prerequisites".to_string(),
+                serde_json::json!({"task": task, "prerequisites": items}),
             );
         }
         serde_json::json!({"schema_version": 1, "error": error}).to_string()

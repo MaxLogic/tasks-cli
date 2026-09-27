@@ -326,6 +326,32 @@ void main() {
       },
     );
 
+    test('to-verify is an open status filter with a readable label', () async {
+      final reader = FakeTaskReader(catalogResponder(0));
+      final controller = buildTaskController(reader);
+      addTearDown(controller.dispose);
+
+      expect(viewerTaskStatuses, contains('to-verify'));
+      expect(
+        viewerTaskStatuses.indexOf('to-verify'),
+        viewerTaskStatuses.indexOf('in-progress') + 1,
+      );
+      expect(viewerStatusLabel('to-verify'), 'To verify');
+      expect(viewerStatusIsTerminal('to-verify'), isFalse);
+      expect(
+        controller.toggleStatus('to-verify'),
+        isFalse,
+        reason: 'a nonterminal status keeps the open scope',
+      );
+      await pumpEventQueue();
+      reader.requests.clear();
+
+      await controller.reload();
+
+      expect(reader.requests.single.scope, TaskScope.open);
+      expect(reader.requests.single.statuses, <String>['to-verify']);
+    });
+
     test(
       'All status selects every status and clearing it restores open tasks',
       () async {

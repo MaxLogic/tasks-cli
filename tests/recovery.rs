@@ -184,12 +184,12 @@ fn explicit_migration_keeps_a_verified_pre_upgrade_backup() {
     drop(raw);
     let mut store = Store::open_for_migration(temp.path(), &id.to_string()).expect("old open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 4));
+    assert_eq!((from, to), (0, 5));
     let backup_path = backup_path.expect("backup path");
     assert!(backup_path.is_file());
     assert!(backup_path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("v0-pre-migrate-")));
-    assert_eq!(store.doctor().expect("doctor").2, 4);
+    assert_eq!(store.doctor().expect("doctor").2, 5);
 }

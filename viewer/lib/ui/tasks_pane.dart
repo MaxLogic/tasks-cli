@@ -1171,7 +1171,7 @@ class _TaskRowTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final waiting = item.waitingDependencyCount;
+    final dependencyParts = viewerDependencyCountParts(item);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Column(
@@ -1199,27 +1199,38 @@ class _TaskRowTile extends StatelessWidget {
               ),
             ],
           ),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  item.labels.isEmpty
-                      ? 'No labels'
-                      : 'Labels ${item.labels.join(', ')}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall,
+          LayoutBuilder(
+            builder: (context, constraints) => Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    item.labels.isEmpty
+                        ? 'No labels'
+                        : 'Labels ${item.labels.join(', ')}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
                 ),
-              ),
-              if (waiting > 0) ...<Widget>[
-                const SizedBox(width: 8),
-                Text(
-                  'Waiting on $waiting '
-                  '${waiting == 1 ? 'dependency' : 'dependencies'}',
-                  style: theme.textTheme.bodySmall,
-                ),
+                if (dependencyParts.isNotEmpty) ...<Widget>[
+                  const SizedBox(width: 8),
+                  // Natural width when it fits; a narrow pane shortens only
+                  // the visible copy, and the row's accessible name keeps the
+                  // full wording.
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: constraints.maxWidth * 0.6,
+                    ),
+                    child: Text(
+                      dependencyParts.join(', '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ],
       ),

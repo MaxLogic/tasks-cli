@@ -64,7 +64,7 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
     let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 4));
+    assert_eq!((from, to), (0, 5));
     let backup = backup_path.expect("backup path");
     assert!(backup.is_file());
 

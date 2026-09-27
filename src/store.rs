@@ -20,14 +20,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+pub const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// The authoritative runnable-readiness predicate. Callers that build their own
 /// task SQL must splice this exact text, so the store and the viewer cannot
-/// drift into two different definitions of "runnable".
+/// drift into two different definitions of "runnable". A `to-verify`
+/// prerequisite counts as satisfied here (and in `unlocks`) only; completion
+/// still requires terminal prerequisites (see `update_task`).
 pub(crate) const RUNNABLE_PREDICATE: &str = "t.status IN ('todo','in-progress')
                    AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
-                   AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status!='done')";
+                   AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status NOT IN ('done','to-verify'))";
 
 fn create_selection_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'));
@@ -231,7 +233,7 @@ fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError>
             created_ms INTEGER NOT NULL,
             updated_ms INTEGER NOT NULL,
             CHECK (version > 0),
-            CHECK (status IN ('draft','todo','in-progress','blocked','done','cancelled'))
+            CHECK (status IN ('draft','todo','in-progress','to-verify','blocked','done','cancelled'))
         );
         CREATE TABLE dependencies(
             task_id INTEGER NOT NULL,
@@ -815,6 +817,42 @@ fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
         CREATE INDEX idx_tasks_status_id ON tasks(status,id);
         PRAGMA user_version = 2;",
     )?;
+    Ok(())
+}
+
+fn migrate_v4_to_v5(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    // Rebuild tasks to widen its status CHECK with `to-verify`, keeping the
+    // column order of a fresh schema 5 store (priority last). The caller
+    // disables foreign keys before BEGIN so DROP cannot cascade into
+    // dependencies, labels or history; the FTS triggers are dropped and
+    // recreated around the swap, and the external-content index keeps its
+    // rowids because task IDs are copied unchanged.
+    tx.execute_batch(
+        "DROP TRIGGER tasks_fts_insert;
+        DROP TRIGGER tasks_fts_delete;
+        DROP TRIGGER tasks_fts_update;
+        CREATE TABLE tasks_v5(
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            created_ms INTEGER NOT NULL,
+            updated_ms INTEGER NOT NULL,
+            priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3')),
+            CHECK (version > 0),
+            CHECK (status IN ('draft','todo','in-progress','to-verify','blocked','done','cancelled'))
+        );
+        INSERT INTO tasks_v5(id,title,body,status,version,created_ms,updated_ms,priority)
+        SELECT id,title,body,status,version,created_ms,updated_ms,priority FROM tasks;
+        DROP TABLE tasks;
+        ALTER TABLE tasks_v5 RENAME TO tasks;
+        CREATE INDEX idx_tasks_status_id ON tasks(status,id);
+        CREATE INDEX idx_tasks_priority_id ON tasks(priority,id);
+        CREATE INDEX idx_tasks_status_priority_id ON tasks(status,priority,id);",
+    )?;
+    crate::full_text::create_triggers(tx)?;
+    tx.execute_batch("PRAGMA user_version = 5;")?;
     Ok(())
 }
 
@@ -1478,10 +1516,10 @@ impl Store {
                     SUM(CASE WHEN t.status IN ('todo','in-progress')
                       AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
                       AND NOT EXISTS(SELECT 1 FROM dependencies other JOIN tasks prerequisite ON prerequisite.id=other.depends_on_id
-                          WHERE other.task_id=t.id AND other.depends_on_id!=p.id AND prerequisite.status!='done')
+                          WHERE other.task_id=t.id AND other.depends_on_id!=p.id AND prerequisite.status NOT IN ('done','to-verify'))
                       THEN 1 ELSE 0 END) AS runnable_count
              FROM tasks p JOIN dependencies d ON d.depends_on_id=p.id JOIN tasks t ON t.id=d.task_id
-             WHERE p.status NOT IN ('done','cancelled') AND t.status NOT IN ('done','cancelled')
+             WHERE p.status NOT IN ('done','cancelled','to-verify') AND t.status NOT IN ('done','cancelled')
              GROUP BY p.id ORDER BY runnable_count DESC,direct_count DESC,p.priority,p.id
              LIMIT ?1 OFFSET ?2"
         )?;
@@ -2293,6 +2331,14 @@ impl Store {
             Self::validate_task_dependencies_exist(&tx, id, replacement, &HashSet::new())?;
             Self::validate_dependency_cycle(&tx, id, replacement)?;
         }
+        if next_status_value == TaskStatus::Done && cur_status != "done" {
+            let resulting_deps = match (&requested_deps, changes.clear_deps) {
+                (Some(deps), _) => deps.as_slice(),
+                (None, true) => &[],
+                (None, false) => current_deps.as_slice(),
+            };
+            Self::refuse_done_with_open_prerequisites(&tx, id, resulting_deps, &project_id)?;
+        }
         tx.execute(
             "UPDATE tasks
              SET title = ?1, body = ?2, status = ?3, version = version + 1, updated_ms = ?4, priority = ?7
@@ -2352,6 +2398,40 @@ impl Store {
             new_version as u64,
             Some(event_id as u64),
         ))
+    }
+
+    /// Completion guard: a task moves to done only when every prerequisite is
+    /// done or cancelled. `deps` is the dependency set the update would commit.
+    fn refuse_done_with_open_prerequisites(
+        tx: &Connection,
+        id: u64,
+        deps: &[u64],
+        project_id: &Uuid,
+    ) -> Result<(), AppError> {
+        let mut statement = tx.prepare_cached("SELECT status FROM tasks WHERE id=?1")?;
+        let mut open = Vec::new();
+        for dep in deps {
+            let status: String = statement.query_row([*dep as i64], |r| r.get(0))?;
+            if status != "done" && status != "cancelled" {
+                open.push((*dep, status));
+            }
+        }
+        if open.is_empty() {
+            return Ok(());
+        }
+        let listed = open
+            .iter()
+            .map(|(dep, status)| format!("{} ({status})", render_task_id(*dep)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(AppError::OpenPrerequisites {
+            task: id,
+            message: format!(
+                "update {}: cannot mark done while prerequisites are not done or cancelled: {listed}; complete or cancel them first, in dependency order (project {project_id})",
+                render_task_id(id)
+            ),
+            prerequisites: open,
+        })
     }
 
     pub(crate) fn import_report(parsed: &ParsedImport) -> ImportReport {
@@ -2702,6 +2782,7 @@ impl Store {
             "draft",
             "todo",
             "in-progress",
+            "to-verify",
             "blocked",
             "done",
             "cancelled",
@@ -2803,7 +2884,12 @@ impl Store {
             if current < 3 {
                 crate::labels::create_schema(&tx)?;
             }
-            create_selection_schema(&tx)?;
+            if current < 4 {
+                create_selection_schema(&tx)?;
+            }
+            if current < 5 {
+                migrate_v4_to_v5(&tx)?;
+            }
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;
             let mut foreign_rows = tx.prepare("PRAGMA foreign_key_check")?;

@@ -301,6 +301,90 @@ void main() {
       expect(harness.statusText, 'T-001 is done, version 2');
     });
 
+    group('refused by the completion guard', () {
+      const refusal = ViewerCliErrorFailure(
+        code: 'validation',
+        message:
+            'validation: update T-001: cannot mark done while prerequisites '
+            'are not done or cancelled: T-009 (to-verify); complete or cancel '
+            'them first, in dependency order (project '
+            '00000000-0000-4000-8000-000000000001)',
+        exitCode: 2,
+        openPrerequisites: <ViewerOpenPrerequisite>[
+          ViewerOpenPrerequisite(id: 9, status: 'to-verify'),
+        ],
+      );
+      const expected =
+          'T-001 was not marked done. Finish or cancel T-009 (To verify) '
+          'first.';
+
+      /// Focuses the header's Mark done button and activates it by keyboard.
+      Future<void> activateMarkDone(WidgetTester tester) async {
+        final button = tester.widget<ButtonStyleButton>(
+          find.ancestor(
+            of: find.text('Mark done'),
+            matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+          ),
+        );
+        button.focusNode!.requestFocus();
+        await tester.pumpAndSettle();
+        await pressKey(tester, LogicalKeyboardKey.enter);
+      }
+
+      testWidgets('Mark done speaks viewer text and keeps focus', (
+        WidgetTester tester,
+      ) async {
+        final reads = fakeWorkspaceReads();
+        final writer = FakeTaskWriter()..failure = refusal;
+        final harness = await openFirstTask(
+          tester,
+          reads: reads,
+          update: writer,
+        );
+
+        await activateMarkDone(tester);
+
+        expect(writer.requests, hasLength(1));
+        expect(writer.lastRequest.changes.status, 'done');
+        expect(harness.statusText, expected);
+        expect(harness.statusText, isNot(contains('project')));
+        expect(harness.statusText, isNot(contains('to-verify')));
+        expect(harness.model.detail!.detail!.version, 1);
+        expect(harness.model.detail!.detail!.status, 'todo');
+        expect(harness.focusedDebugLabel, 'details mark done');
+      });
+
+      testWidgets(
+        'Save and mark done keeps the draft, editor and field focus',
+        (WidgetTester tester) async {
+          final writer = FakeTaskWriter()..failure = refusal;
+          final harness = await openFirstTask(tester, update: writer);
+
+          await pressKey(tester, LogicalKeyboardKey.f4);
+          await tester.enterText(editorField('Title (Alt+T)'), 'Renamed task');
+          await tester.pumpAndSettle();
+          // The edit form replaces the header buttons, so Ctrl+D is the path.
+          expect(harness.focusedDebugLabel, 'editor title');
+          await pressControl(tester, LogicalKeyboardKey.keyD);
+          expect(
+            find.text('Mark task done with unsaved changes?'),
+            findsOneWidget,
+          );
+          await pressAlt(tester, LogicalKeyboardKey.keyS);
+
+          expect(writer.requests, hasLength(1));
+          expect(writer.lastRequest.changes.title, 'Renamed task');
+          expect(writer.lastRequest.changes.status, 'done');
+          expect(harness.statusText, expected);
+          expect(harness.model.editor.isEditing, isTrue);
+          expect(harness.model.editor.isDirty, isTrue);
+          expect(harness.model.editor.draft?.title, 'Renamed task');
+          expect(harness.model.editor.base?.version, 1);
+          expect(harness.focusedDebugLabel, 'editor title');
+        },
+      );
+    });
+
     testWidgets('a failed mark done keeps the draft and the editor', (
       WidgetTester tester,
     ) async {
