@@ -33,21 +33,29 @@ the ID identifies project and task in one token: `DAK-212`, `DS-640`.
 
 ## Assigning keys
 
-- `init --root PATH [--key KEY]`:
-  - With `--key`: use it; if another project owns it, exit 2 naming that
-    project and a free suggestion. Nothing is created.
-  - Without `--key`: propose one from the root folder name (capitals of a
-    CamelCase name, `DelphiAiKit` -> `DAK`; otherwise the first letters of the
-    words or the first 3-4 letters), then extend it until it is free. Print the
-    chosen key in the result.
-- Existing projects: `project-key` prints the key; `project-key --suggest`
-  prints a free proposal; `project-key --set KEY` sets or changes it under the
-  same uniqueness rule and registry lock. Projects without a key keep working
-  with `T-N`; setting one is explicit.
+Keys are always chosen by a person; the CLI never invents one.
+
+- `init --root PATH --key KEY`: `--key` is required. A missing, malformed or
+  taken key exits 2 and creates nothing; a taken key names the owning project.
+- `project-key` prints the current key; `project-key --set KEY` sets or changes
+  it under the same uniqueness rule and registry lock.
 - Changing a key does not rewrite task bodies. Old `OLDKEY-N` mentions stay as
   written and no longer resolve.
-- `bulk-import --apply` assigns proposed keys the same way and lists them in its
-  report.
+- `bulk-import --apply` requires a key for every project it creates, from a
+  `--key-map FILE` (root to key). The dry-run report lists roots still lacking
+  one; apply refuses until all are mapped.
+- Projects without a key (migrated databases before assignment) keep working
+  with `T-N`.
+
+## Migrating existing projects
+
+The maintainer reviewed keys for all registered projects in
+`%LOCALAPPDATA%\MaxLogic\tasks-cli\project-keys.csv` (columns `key`,
+`project_name`, `project_path`, `project_id`). After the release is installed:
+back up each database, run `migrate`, then `project-key --set KEY --project
+UUID` for each row. Check first that every key is valid and unique; stop on the
+first failure and report it. Projects whose root no longer exists are keyed by
+UUID the same way.
 
 ## Schema and compatibility
 
@@ -62,10 +70,10 @@ accept `T-N` in old text, never rewrite old notes just to change IDs.
 
 ## Proof
 
-- Temporary data roots only. Key derivation cases (`DelphiAiKit`,
-  `tasks-cli`, `SkillSync`, collisions, a folder name with no letters).
+- Temporary data roots only. Key validation: length, leading digit, reserved
+  `T`, case folding; `init` without `--key` exits 2 and creates nothing.
 - Uniqueness: explicit conflicting `--key` refused with nothing written; two
-  concurrent `init`s get different keys.
+  concurrent `init`s with the same key: exactly one succeeds.
 - Parsing: `KEY-N`, `key-n`, `T-N`, `N` accepted; foreign key exits 3.
 - Output: text, JSON and export show `KEY-N`; projects without a key still
   show `T-N`.
