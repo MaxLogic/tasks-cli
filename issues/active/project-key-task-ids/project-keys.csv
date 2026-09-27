@@ -1,0 +1,54 @@
+key,project_name,project_path,project_id
+ACV,ActiveAppView,F:\projects\ActiveAppView,973b97c0-d88d-4e46-9f84-885c5a84a559
+A11Y,Accessibility-Framework,F:\projects\MaxLogic\Accessibility-Framework,348fbf67-5320-49b1-b49f-75574ed98dcb
+ABMC,AudioBookMetadataCollector,F:\projects\MaxLogic\AudioBookMetadataCollector,f8fbc96a-5ac5-49c7-bdbc-822a7018909a
+CNR,CodexNotificationsReceiver,F:\projects\MaxLogic\CodexNotificationsReceiver,0d8c6517-f086-4d17-bb30-188cafb1b7c4
+DAK,DelphiAiKit,F:\projects\MaxLogic\DelphiAiKit,d48b3ab5-a027-4acf-94d7-d8adaf9938db
+DCO,DelphiCompanion,F:\projects\MaxLogic\DelphiCompanion,4300fdf3-b658-4371-902a-b8d5ddbc8485
+DS,DelphiSemantics,F:\projects\MaxLogic\DelphiSemantics,e56126d2-2e3c-4730-a86e-d3b94f4febbe
+ENC,EncodingFix,F:\projects\MaxLogic\EncodingFix,0ad305a9-7416-47d4-b5bc-ffbc1d8be3c6
+MLF,MaxLogicFoundation,F:\projects\MaxLogic\MaxLogicFoundation,2adeca08-618b-4f98-8701-2fd567342c27
+CLIP,clipboard-insight-nvda,F:\projects\MaxLogic\NVDA MaxLogic Plugins\clipboard-insight-nvda,445cbf4d-85f8-4bf4-b919-fc412acd811c
+KOKO,kokoro-tts-nvda,F:\projects\MaxLogic\NVDA MaxLogic Plugins\kokoro-tts-nvda,d20f3c94-8954-43a4-918b-a2578e9510fe
+VSW,voice-switcher,F:\projects\MaxLogic\NVDA MaxLogic Plugins\voice-switcher,1e954363-dada-4ad3-8745-23f9a9dfcd6c
+XTTS,xtts-v2-nvda,F:\projects\MaxLogic\NVDA MaxLogic Plugins\xtts-v2-nvda,1c022f7a-f4b0-40db-8236-11c09caa4360
+SBV,SplitByVoices,F:\projects\MaxLogic\PY-SCRIPTS\SplitByVoices,09ab49cd-93ea-46ec-9237-5285d14b7302
+PSJ,PawelsPersonalShadowJourney,F:\projects\MaxLogic\PawelsPersonalShadowJourney,2476549b-ab44-4725-8536-1f29c3c6358f
+RP,RepoPulse,F:\projects\MaxLogic\RepoPulse,7b70f453-0e10-457b-82a6-8db0184c6144
+SV,SecretVault,F:\projects\MaxLogic\SecretVault,a12de652-4783-4675-a440-68328c0d25bd
+SKS,SkillSearch,F:\projects\MaxLogic\SkillSearch,aa294804-9826-4257-ab10-812836ee5572
+SYNC,SkillSync,F:\projects\MaxLogic\SkillSync,bfd283a0-3852-47dd-af36-cffa2958c129
+SA,SpeakAloud,F:\projects\MaxLogic\SpeakAloud,01c85e6d-e566-40df-aee3-a9027f6ac512
+TODO,ToDoApp,F:\projects\MaxLogic\ToDoApp,df8cdbe2-50e9-4ef9-9a54-3dac496aede7
+TS,TreeSize,F:\projects\MaxLogic\TreeSize,9f771ecd-f945-4429-93d7-a51226b28c78
+YTD,YoutubeTranscriptionDownloader,F:\projects\MaxLogic\YoutubeTranscriptionDownloader,e2b7b004-500f-48f7-81c9-45be45d3fec3
+ALAC,alacritty-group,F:\projects\MaxLogic\alacritty-group,40d8ef66-3378-489f-9a74-0df568d9c360
+AUTH,betterAuth-VPS,F:\projects\MaxLogic\betterAuth-VPS,e53eb78e-9f70-49fb-b64b-bc74961c34d8
+CXV,codex-sessions-viewer,F:\projects\MaxLogic\codex-sessions-viewer,98972be8-de3e-44d8-906e-ddaf7757a234
+EYE,eye-health-training,F:\projects\MaxLogic\eye-health-training,78ced2fd-0703-43d2-82ba-0dd3fe9962a5
+GAMES,games-small,F:\projects\MaxLogic\games-small,bcd3db4d-6342-4315-95ed-2b2d507dcf84
+CRON,maxCron,F:\projects\MaxLogic\maxCron\maxCron,30b049fb-f9c5-489d-a471-fa91655428a4
+NEXUS,maxEventNexus,F:\projects\MaxLogic\maxEventNexus,ba0bf55c-07c7-4b38-9924-175cab7f6acf
+PFM,pfm,F:\projects\MaxLogic\pfm,70f4bba9-b5bc-4e01-a010-7177e4bac0f3
+PROF,profiling,F:\projects\MaxLogic\profiling,1f000c23-79c6-4599-84b4-0eecca98d621
+RPG,rpg-dice,F:\projects\MaxLogic\rpg-dice,fe64da70-86da-46e3-a47e-bd721b7e8727
+RPGB,rpg-dice backend,F:\projects\MaxLogic\rpg-dice\backend,d3454552-1d58-43bb-9943-6240cbc3a0d2
+RPGF,rpg-dice frontend,F:\projects\MaxLogic\rpg-dice\frontend,6fdc2881-316a-4685-8f0e-c5198f48b222
+WWW,www.maxlogic.eu,F:\projects\MaxLogic\www.maxlogic.eu,0084f526-20dc-4359-8185-da1ba929aa9a
+FTP,ftpSmartClient,F:\projects\OEC\TE5\OEC-Tools\ftpSmartClient,08fef74d-7bc7-42ad-83a4-ed419c5b25e3
+MDC,mod-dependency-checker,F:\projects\OEC\TE5\OEC-Tools\mod-dependency-checker,8bec84d8-83a6-47bc-8916-c1459ab60b64
+MXTDB,maxTdb,F:\projects\OEC\TE5\maxTdb,fb3f3915-69d7-43c9-bad4-0db2a485306b
+TE5,TE5,F:\projects\OEC\_git\TE5,77052e9d-49d8-438f-bbe1-1d997146b850
+DAC,duplicate_account_cleaner,F:\projects\OEC\_git\TE5\duplicate_account_cleaner,0d95d79e-f454-4d0c-a1fa-be843140e238
+OAC,order_access_cli,F:\projects\OEC\_git\TE5\order_access_cli,502f610c-16da-40c5-a9b9-7f1caf4f9c6b
+TE5B,te5-backend,F:\projects\OEC\_git\TE5\te5-backend,d680d85d-c0b6-422c-bf37-54f9e0953923
+TE5S,te5stock,F:\projects\OEC\_git\TE5\te5stock,9ac76c3f-ee5f-49d7-85e5-c0c5e876bd85
+T5AI,teaccounts_importer_cli,F:\projects\OEC\_git\teaccounts_importer_cli,4da0441c-3782-4992-b715-c0d87fbedc04
+FDS,FlexDocServer,F:\projects\Osyon\_svn\Flexdoc-Group\FlexDocServer,791e5575-c7b4-4e53-924e-f69904aa62ef
+FD,Flexdoc,F:\projects\Osyon\_svn\Flexdoc-Group\Flexdoc,ff1fe730-a3a2-4ab4-8d90-231fd75e6c6a
+MMS,monitor-msgsend,F:\projects\Osyon\_svn\Monitoring\monitor-msgsend,f3182305-04b8-475b-8d35-f80d926bb2c4
+DBML,DeviceBridge_MaxLogic,F:\projects\Statuspro\_git\DeviceBridge_MaxLogic,94aceb9c-9d1c-430b-b769-95e21e27e4c5
+DBSP,DeviceBridge_StatusPro,F:\projects\Statuspro\_git\DeviceBridge_StatusPro,59888d34-763a-49f5-9060-327309b87da4
+KFZ,Kfzmeister_workCopy,F:\projects\mecMeister\_SVN\Kfzmeister_workCopy,37f1ae5b-5fa4-43b1-8b00-514a6d824220
+INIA,ini2json-tests a-op5.5med,F:\projects\MaxLogic\LLM-testing\delphi\ini2json-tests\a-op5.5med,9e5772e9-2c63-4013-8698-245635e0fbad
+INIG,ini2json-tests g-s6-med,F:\projects\MaxLogic\LLM-testing\delphi\ini2json-tests\g-s6-med,154503d2-5835-462b-a18a-7b0a5f5b5336

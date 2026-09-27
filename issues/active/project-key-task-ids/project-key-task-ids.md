@@ -50,8 +50,8 @@ Keys are always chosen by a person; the CLI never invents one.
 ## Migrating existing projects
 
 The maintainer reviewed keys for all registered projects in
-`%LOCALAPPDATA%\MaxLogic\tasks-cli\project-keys.csv` (columns `key`,
-`project_name`, `project_path`, `project_id`). After the release is installed:
+[project-keys.csv](project-keys.csv), next to this issue (columns `key`,
+`project_name`, `project_path`, `project_id`; migrate by `project_id`). After the release is installed:
 back up each database, run `migrate`, then `project-key --set KEY --project
 UUID` for each row. Check first that every key is valid and unique; stop on the
 first failure and report it. Projects whose root no longer exists are keyed by
