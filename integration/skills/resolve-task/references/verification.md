@@ -70,7 +70,9 @@ diff/resource hygiene.
 5. Validate touched UI resources, schemas, migrations, or generated contracts.
 6. Satisfy the task's reconciled `Proof` requirements. Execute literal commands
    or record an approved, input-matched coverage mapping; never list a command
-   as executed merely because another run covers its requirement.
+   as executed merely because another run covers its requirement. A broad
+   command in a task's Proof (full suite, full build, project-wide analysis)
+   moves to the next batch gate unless the task states a `Cadence exception`.
 7. Check diff, encoding, and staged scope.
 8. Repeat affected checks after the last code change.
 
@@ -84,8 +86,11 @@ text/schema/build check and state why behavioral TDD does not apply.
 
 ## Batch tier
 
-Run after about 3–4 related tasks, before moving across a dependency boundary,
-or immediately after changes to shared infrastructure:
+Run once for a named group of related tasks after implementation, focused
+tests and review have stabilized, normally after 3–4 tasks or before crossing
+a dependency boundary. A shared-infrastructure change advances this checkpoint
+to the end of that coherent change; it does not require a full rerun after each
+edit or cleanup within the change:
 
 - broad/full product tests;
 - production/Release build;
@@ -109,7 +114,7 @@ defect task referencing the originating task. Do not rewrite history silently.
 A runner that stops at the first failing unit hides the rest: `cargo test`
 stops at the first failing test binary, and that hid a second failure for a
 whole batch. Run batch and final gates so that one failure does not stop the
-others, and list every failure in the gate record:
+others, and list every failure in the evidence record:
 
 - use the runner's keep-going mode (`cargo test --no-fail-fast`, `go test`
   without `-failfast`, `pytest` without `-x`, `make -k`, `ctest` without
@@ -120,6 +125,18 @@ others, and list every failure in the gate record:
 
 Fail-fast remains right for the task tier, where the first failure is the one
 being worked on.
+
+## Noninteractive subprocesses
+
+Tests, builds and analysis must not open foreground terminals or steal focus
+unless interactive UI behavior is explicitly under test. Apply this at every
+process-launch boundary: hiding the parent and redirecting stdout/stderr do
+not prevent a child console. On Windows use `CREATE_NO_WINDOW` for unattended
+console children and appropriate hidden startup settings (`SW_HIDE`); for
+PowerShell/.NET use `UseShellExecute=false` and `CreateNoWindow=true`.
+Preserve output capture, exit codes, timeout and cleanup behavior. Check the
+actual child path with a bounded headless probe before launching a large suite;
+inspect descendant launchers as well when the workflow starts further tools.
 
 ## Environment gaps
 
@@ -192,7 +209,15 @@ valid.
 
 ## Gate reuse and invalidation
 
-Before an expensive rerun, use the existing gate record to answer:
+Before launching an expensive command, record the covered task IDs, consumed
+input fingerprint, expected cost, and due checkpoint or concrete exception in
+the evidence record. Invalidated proof is no longer usable, but invalidation
+alone does not make a broad run due during an unfinished implementation loop.
+Keep focused RED/GREEN feedback immediate. Diagnose broad failures with focused
+reproductions and rerun the broad gate after the cause is fixed and the group
+has stabilized. Never defer a required boundary or exact-candidate Final gate.
+
+Before an expensive rerun, use the evidence record to answer:
 
 1. Which consumed input, tool version, or option changed?
 2. Which concrete unresolved risk requires this command?
