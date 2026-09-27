@@ -385,11 +385,17 @@ String? _missingPrecommitHooks() {
 
 /// Absolute path of the release CLI this run must exercise.
 ///
-/// `flutter test` runs with the viewer package as the working directory, which
-/// puts the binary one directory up; running from the repository root is
-/// accepted as well, and the expected path is returned when neither exists so
-/// the skip reason names it.
+/// `--dart-define=TASKS_VIEWER_TEST_CLI=<path>` wins; `verify-windows.ps1`
+/// passes its own build so it never rebuilds the installed `target/release`
+/// binary. Otherwise `flutter test` runs with the viewer package as the working
+/// directory, which puts the binary one directory up; running from the
+/// repository root is accepted as well, and the expected path is returned when
+/// neither exists so the skip reason names it.
 String _releaseExecutablePath() {
+  const override = String.fromEnvironment('TASKS_VIEWER_TEST_CLI');
+  if (override.isNotEmpty) {
+    return override;
+  }
   final cwd = Directory.current.path;
   final candidates = <String>[
     _join(_join(cwd, '..'), _join('target', 'release')),
