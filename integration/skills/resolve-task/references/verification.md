@@ -86,7 +86,8 @@ text/schema/build check and state why behavioral TDD does not apply.
 
 ## Batch tier
 
-Run once for a named group of related tasks after implementation, focused
+Start from `list --status to-verify`: those tasks form the group. Run once for
+a named group of related tasks after implementation, focused
 tests and review have stabilized, normally after 3–4 tasks or before crossing
 a dependency boundary. A shared-infrastructure change advances this checkpoint
 to the end of that coherent change; it does not require a full rerun after each
@@ -105,6 +106,11 @@ leaf changes only when repository policy allows.
 Do not classify fixture registration, manifest entries, or a new test file as
 shared infrastructure by itself. Escalate when runner selection, common helper
 behavior, process/resource ownership, or a production boundary changes.
+
+On pass, move each `to-verify` task to `done` in dependency order with one
+Notes line naming the gate command, exit code and test count; the CLI refuses
+`done` while a prerequisite is still open. On failure, move only the affected
+tasks back to `in-progress`.
 
 If a batch gate finds a regression in an earlier completed task, create a new
 defect task referencing the originating task. Do not rewrite history silently.
