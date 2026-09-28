@@ -243,6 +243,8 @@ fn init_can_write_an_identity_and_route_with_it() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
+            "--key",
+            "RT",
         ])
         .output()
         .expect("tasks executable");
@@ -278,6 +280,8 @@ fn init_can_write_an_identity_and_route_with_it() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
+            "--key",
+            "RT",
         ])
         .output()
         .expect("tasks executable");
@@ -311,6 +315,8 @@ fn init_refuses_a_conflicting_identity_before_initializing() {
             "init",
             "--root",
             workspace.path().to_str().expect("UTF-8 workspace"),
+            "--key",
+            "RT",
         ])
         .output()
         .expect("tasks executable");

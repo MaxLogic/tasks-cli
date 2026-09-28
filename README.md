@@ -21,7 +21,7 @@ in the current crate, not a claim to bundle the latest upstream SQLite patch.
 ## Sixty-second tour
 
 ```text
-tasks init --root "D:\Work\Project"
+tasks init --root "D:\Work\Project" --key APP
 tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
@@ -29,27 +29,33 @@ tasks list
 That gives you a project, a task, and a backlog you can read at a glance:
 
 ```text
-T-001	P2	todo	v1	Write release notes
+APP-001	P2	todo	v1	Write release notes
 has_more: false
 ```
 
 `show` is where the full text lives, along with whatever the task is waiting on:
 
 ```text
-$ tasks show T-2
-id: T-002
+$ tasks show APP-2
+id: APP-002
 status: draft
 priority: P2
 version: 1
-depends_on: T-001	todo	v2	Write release notes
+depends_on: APP-001	todo	v2	Write release notes
 title:
 Tag the release
 body:
 Ship it.
 ```
 
-IDs render as `T-001` and accept either spelling on input, so `T-1` and `T-001`
-reach the same task.
+IDs render as `KEY-001` with the project's key, which you choose at `init`
+(2-6 letters or digits, starting with a letter; `T` and `T` plus digits are reserved). Input accepts
+`APP-1`, `app-001`, the legacy `T-1` and a bare `1` for the same task, so old
+notes keep working. Another project's key fails with exit 3 and names that
+project. Keys are unique within a data root; `tasks project-key` prints the key
+and `tasks project-key --set NEW` changes it without rewriting task bodies. A
+database migrated from before keys has none and keeps showing `T-001` until a
+key is set. JSON keeps the numeric `id` and adds `display_id`.
 
 ## Finding the right project
 
@@ -60,7 +66,7 @@ registry picks the longest registered ancestor. Unknown projects fail loudly
 instead of creating a second backlog.
 
 ```text
-tasks init --root "D:\Work\Project"
+tasks init --root "D:\Work\Project" --key APP
 tasks bind --root "D:\Work\Project\subdir" --project UUID
 tasks --project UUID doctor
 ```
@@ -188,8 +194,10 @@ tasks enrich < response.txt
 tasks enrich-clipboard
 ```
 
-`T001` becomes `T001 (Task title)`, and `T-001` keeps its hyphen. Every reference
-is enriched. Unknown IDs are unchanged and reported on stderr. An exact existing
+`T001` becomes `T001 (Task title)`, and `T-001` keeps its hyphen. `APP-001`
+resolves in this project, and another project's `DS-640` resolves read-only in
+the project with key `DS` under the same data root. Every reference is
+enriched; a key that no project has (such as `UTF-8`) is left alone. Unknown IDs are unchanged and reported on stderr. An exact existing
 annotation is not duplicated. The input file is never overwritten. UTF-8 text,
 line endings and trailing newlines are preserved; text output has no banner.
 Use `--format json` for text plus replacement counts and unknown IDs.

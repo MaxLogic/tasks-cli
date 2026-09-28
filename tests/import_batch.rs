@@ -158,6 +158,8 @@ fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
         "init",
         "--root",
         project_dir.to_str().unwrap(),
+        "--key",
+        "IB",
     ]);
     assert!(
         init.status.success(),
@@ -343,7 +345,7 @@ fn cli_requires_one_hash_per_file_in_order_and_previews_each_file() {
         "--open",
     ]);
     let list_text = String::from_utf8_lossy(&list.stdout).to_string();
-    assert!(list_text.contains("T-001"));
-    assert!(list_text.contains("T-002"));
-    assert!(!list_text.contains("T-009"));
+    assert!(list_text.contains("IB-001"));
+    assert!(list_text.contains("IB-002"));
+    assert!(!list_text.contains("IB-009"));
 }

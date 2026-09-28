@@ -133,7 +133,7 @@ executable must fail, never fall back to a local store.
 Use `std::process::Command`, never a shell command string. Preserve stdin,
 stdout, stderr and child exit code. Convert filesystem-valued arguments (`--root`,
 `--data-root`, `--body-file` except `-`, `--map-file`, `--file`, `--out`,
-`--scan-root`, `--report-dir`, `--quarantine-dir`) with
+`--scan-root`, `--report-dir`, `--quarantine-dir`, `--key-map`) with
 `wslpath -w` as argument arrays; leave task text, IDs and search strings untouched.
 Stop option processing at `--`; consume option values as values even when they
 resemble flags. Only actual delegation options are removed from the child argv.
@@ -172,20 +172,21 @@ one-line `--help` description.
 
 | Command | Required behavior |
 | --- | --- |
-| `init --root PATH` | Create project, binding and exact root identity; accept a matching identity unchanged and refuse malformed or conflicting files without overwriting them |
+| `init --root PATH --key KEY` | Create project with its key, binding and exact root identity; accept a matching identity unchanged and refuse malformed or conflicting files without overwriting them |
+| `project-key [--set KEY]` | Print the project key; `--set` assigns or changes it under the uniqueness rule |
 | `bind --root PATH --project UUID` | Validate database/schema/embedded UUID, then register another root without duplicating tasks |
 | `list [--open | --needs-human] [--status STATUS] [--label LABEL] [--after CURSOR] [--limit N]` | Default runnable todo/in-progress (prerequisites done or to-verify); priority then ID; default 20, max 100 |
 | `unlocks [--offset N] [--limit N]` | Open prerequisites ranked by immediately runnable then direct open dependents |
 | `enrich [--file PATH]` | Enrich UTF-8 text task references; stdin by default, exact text to stdout |
 | `enrich-clipboard` | Enrich clipboard text and replace it after checking the original still matches |
-| `show T-N... [--rules]` | Full task(s), version and direct dependency summaries; shared rules only with `--rules`, printed once |
+| `show ID... [--rules]` | Full task(s), version and direct dependency summaries; shared rules only with `--rules`, printed once |
 | `search TEXT [--label LABEL] [--after N] [--limit N]` | Literal case-insensitive ASCII substring search of title/body; numeric ID cursor, same page limits |
 | `create --title TEXT --body-file PATH` | Optional `--status`, default draft; `--priority P0..P3`, default P2; allocate next ID atomically |
-| `update T-N --expect-version N ...` | At least one of title, body-file, status, priority, labels (replace, clear, add or remove) or full dependency replacement |
-| `history T-N [--after N] [--limit N]` | Metadata and changed field names by default; `--event N` returns complete selected event |
+| `update ID --expect-version N ...` | At least one of title, body-file, status, priority, labels (replace, clear, add or remove) or full dependency replacement |
+| `history ID [--after N] [--limit N]` | Metadata and changed field names by default; `--event N` returns complete selected event |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
-| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
+| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME] [--key-map FILE]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
 | `export --out PATH` | Deterministic readable Markdown snapshot; refuse existing destination |
 | `backup --out PATH` | Consistent SQLite backup; refuse existing destination |
 | `migrate` | Explicit schema upgrade, with verified pre-upgrade backup |
@@ -264,6 +265,49 @@ run before COMMIT and any failure rolls back to schema 4. Upgrades from schemas
 0–3 pass through the same steps. Schema-4 binaries refuse schema 5 through the
 existing newer-schema check.
 
+Schema 6 adds the nullable project key (`project.project_key`, CHECK: 2-6
+uppercase ASCII letters/digits starting with a letter, not `T<digits>`). Explicit backed-up
+`migrate` adds the column and leaves it unset, so migrated projects keep
+working with `T-N` until a person assigns a key; schemas 0-4 pass through the
+earlier steps. Schema-5 binaries refuse schema 6 through the newer-schema check.
+
+Project keys. Each project has at most one key, always chosen by a person: the
+CLI never invents one. Input is case-insensitive and stored uppercase; `T` and
+`T` followed only by digits (`T12`) are reserved for the legacy form. `init --key` is required: a missing, malformed or
+taken key exits 2 and creates nothing (no project directory, binding or
+identity file). Re-running `init` on a bound root must name the key the project
+already has; init never changes a key. `project-key` prints the key (`none`
+when unset); `project-key --set KEY` changes it without rewriting task bodies,
+so old `OLDKEY-N` mentions stay as written and no longer resolve. Keys are
+unique within a data root: while holding the registry lock, `init`,
+`project-key --set` and `bulk-import --apply` check the key against every
+project database under `<data-root>/projects/` and refuse a taken key with
+exit 2 naming the owning project and its root. The key lives only in the
+project database, so backups carry it. Uniqueness checks always open and read
+every project database directly. Reference lookups (`enrich`, naming the
+owner of a foreign `KEY-N`, import's foreign-heading check) instead use
+`<data-root>/project-keys.json`, which caches each database's key next to its
+fingerprint (file identity, size and mtime of the database and of a non-empty
+WAL or journal), because opening every database costs about 2-6 ms each on
+Windows. A database whose fingerprint changed is opened again, a read is
+cached only when the fingerprint was the same before and after it, and a
+damaged cache is ignored. The cache is derived data, rewritten atomically only
+by those lookups; `init`, `project-key --set` and bulk-import never write it,
+so a bulk dry run and a refused or rolled-back apply leave the data root
+unchanged.
+
+Task IDs display as `KEY-N` (at least three digits, `DAK-007`) in a keyed
+project and `T-N` otherwise, in text output, `list`/`search`/`show`/`history`/
+`unlocks`, create/update results, dependency summaries, error messages,
+Markdown export and the viewer. JSON keeps each numeric `id` and adds
+`display_id` beside it (task rows, show, dependency summaries, create, update,
+history, viewer rows, `open_prerequisites` items and `task_display_id`); `deps`
+arrays stay numeric. List `next_after` cursors keep the `P2:T-123` form. Input
+accepts `KEY-N` with this project's key, `T-N` and bare `N`, forever, in any
+case and with or without leading zeros. A `KEY-N` with another key exits 3
+naming the project that owns it and its root, or saying that no project has
+that key; dependencies stay within one project.
+
 Default list selects only todo/in-progress tasks without `needs-human`, and all
 prerequisites must be done or to-verify. A to-verify prerequisite counts as
 satisfied only for this readiness and for `unlocks`; completion (the done guard)
@@ -293,10 +337,15 @@ direct count descending, priority then ID. Use `next_offset`/`--offset`, limits
 20/default and 100/max. This is direct impact, not transitive scoring or an
 authorization to close the prerequisite.
 
-Enrichment recognizes standalone uppercase T001 and T-001 spellings, preserving
-the original ID text. Append ` (current task title)` after every known reference,
+Enrichment recognizes standalone uppercase T001, T-001 and KEY-001 spellings,
+preserving the original ID text. `T-N` and this project's `KEY-N` resolve in the
+current project; another `KEY-N` resolves read-only in the project under the
+same data root that owns that key, found through the key scan above only when
+the text names a foreign key. A `KEY-N` whose key no project has (often a word
+such as `UTF-8`) is left unchanged and not reported. Append ` (current task title)` after every known reference,
 including terminal tasks, without inserting task bodies. Unknown IDs are left
-unchanged and reported on stderr (and `unknown_ids` in JSON). Invalid/out-of-range
+unchanged and reported on stderr (and `unknown_ids` for this project's IDs plus
+`unknown_refs` for every unknown reference in JSON). Invalid/out-of-range
 numbers remain untouched. Exact existing annotations are skipped, including IDs
 inside that annotation; arbitrary pre-existing prose is not deduplicated. Obvious
 URL/path components are skipped; slash-separated task references such as
@@ -306,7 +355,8 @@ Read requested ID/title pairs in batches under one read snapshot; release it
 before rendering. Limit input to 16 MiB, distinct valid IDs to 10,000 and output
 to 64 MiB; fail instead of truncating. Preserve Unicode, line endings and trailing
 newlines; `--file` never overwrites the input. Text output adds no banner. JSON
-uses command `enrich` with text, replacements, unknown_ids and clipboard.
+uses command `enrich` with text, replacements, unknown_ids, unknown_refs and
+clipboard.
 
 Clipboard support uses Windows PowerShell STA/System.Windows.Forms on Windows
 and WSL; native Linux uses wl-clipboard for Wayland or xclip for X11. Missing
@@ -319,7 +369,7 @@ WSL delegation runs this command wholly through tasks.exe for Windows-owned stor
 
 List/search rows contain only ID, status, version, title (display bounded to 120
 Unicode characters), priority, dependency IDs and normalized labels. Text rows
-are tab-separated `T-N, priority, status, vN, title`, followed by `[T-A,T-B]`
+are tab-separated `ID, priority, status, vN, title`, followed by `[ID-A,ID-B]`
 only when the task has dependencies and `labels=[a,b]` only when it has labels. Include `has_more` and `next_after`; read
 limit+1 rows, do not COUNT(*) on each request. For plain search, `--after` is the numeric ID from the
 last result. Pagination is a fresh snapshot per call, not a persistent snapshot;
@@ -386,8 +436,10 @@ Minimum tables:
 - `project`: singleton UUID, rules Markdown, rules version, next task number.
 - `tasks`: numeric primary key, title, body Markdown, constrained status, positive
   version, created/updated UTC timestamps stored consistently as integer millis.
-  Render IDs as `T-<number>` with at least three digits; accept T-1 and T-001 as
-  the same ID. Never reuse IDs; imports advance the counter past the maximum.
+  Render IDs as `KEY-<number>` (or `T-<number>` without a key) with at least
+  three digits; accept T-1, T-001, KEY-1 and 1 as the same ID. Never reuse IDs;
+  imports advance the counter past the maximum. `project` also holds the
+  optional project key (schema 6).
 - `dependencies`: task_id, depends_on_id; composite primary key and foreign keys.
 - `events`: monotonic event_id, optional task_id, entity type task/rules,
   operation, resulting entity version, timestamp, complete resulting snapshot JSON.
@@ -438,7 +490,12 @@ validate -> perform one store operation -> close transaction -> render result.
 ## Migration, export and recovery
 
 Initial importer supports the existing `### T-N ...` task layout with surrounding
-`##` status sections. Use Markdown-aware heading recognition (including fenced
+`##` status sections. For a target project with a key, `### KEY-N` headings and
+`Depends on:` IDs with that key are accepted as well. A `### OTHER-N` heading
+whose key belongs to another project in the data root is a blocking problem
+rather than silently becoming rules or body text; any other key-shaped heading
+(`### ISO-8601 dates`) is ordinary text. The create-task `Deps:`
+grammar stays `T-N` only. Use Markdown-aware heading recognition (including fenced
 code handling), not a broad regex that mistakes code examples for task boundaries.
 Preserve each task's content and capture original bytes. A leading UTF-8 BOM at
 byte 0 is structural input: preview reports `has_bom: true`, while the original
@@ -611,7 +668,8 @@ sidecar and rechecks those sidecars immediately before publication, preserving
 any pre-existing sidecar bytes.
 
 Export contains a snapshot warning, project UUID, shared rules, all tasks ordered
-by ID, status, version, dependency IDs and complete bodies. It is human-readable,
+by ID (headings and `Depends on:` in display form), status, version,
+dependency IDs and complete bodies. It is human-readable,
 not a live authority or full-fidelity database backup. No generated-at timestamp
 in deterministic export content. Exact native recovery uses database backups.
 
@@ -704,6 +762,16 @@ Migration is an offline operation: stop all Markdown writers and task workers
 before apply, and keep them stopped through verification and quarantine. Do not
 edit source ledgers or address an unpublished new project UUID during this window.
 This prerequisite avoids adding a second live-source coordination protocol.
+
+Every project `--apply` would create needs a key from `--key-map FILE`: one
+JSON object mapping a project root (absolute, or relative to `--scan-root`) to
+its key. Malformed or duplicate keys fail at load with exit 2. A candidate bound
+to an existing project keeps that project's key and needs no entry; entries for
+roots that are not candidates are ignored. The dry run reports each
+candidate's `project_key` and a `key_problem` for every root still lacking a
+key or mapped to a key another project has; `--apply` refuses the whole run
+(exit 2, nothing written) until every such problem is fixed, and re-checks
+uniqueness under the registry lock before creating each database.
 
 A dry run performs stages 1 to 4 and reports exactly what stages 5 to 7 would
 do, including the project UUID it would create, the per-section status

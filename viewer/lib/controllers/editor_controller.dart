@@ -234,7 +234,12 @@ class ViewerEditorController extends ChangeNotifier {
 
   /// Canonical form of [taskId].
   String? get canonicalTaskId =>
-      _taskId == null ? null : viewerCanonicalTaskId(_taskId!);
+      _taskId == null ? null : viewerCanonicalTaskId(_taskId!, _projectKey);
+
+  /// Key of the project the confirmed record belongs to, if it has one.
+  String? get projectKey => _base?.projectKey;
+
+  String? get _projectKey => projectKey;
 
   /// Confirmed record the draft is based on.
   TaskDetail? get base => _base;
@@ -253,7 +258,11 @@ class ViewerEditorController extends ChangeNotifier {
     if (base == null || draft == null || !_editing) {
       return false;
     }
-    return EditorFieldChanges.between(base, draft).isNotEmpty;
+    return EditorFieldChanges.between(
+      base,
+      draft,
+      projectKey: _projectKey,
+    ).isNotEmpty;
   }
 
   /// Fields a save would send, normalized.
@@ -263,7 +272,7 @@ class ViewerEditorController extends ChangeNotifier {
     if (base == null || draft == null) {
       return const EditorFieldChanges();
     }
-    return EditorFieldChanges.between(base, draft);
+    return EditorFieldChanges.between(base, draft, projectKey: _projectKey);
   }
 
   bool get isSaving => _saving;
@@ -428,7 +437,11 @@ class ViewerEditorController extends ChangeNotifier {
     if (fields == null) {
       return;
     }
-    final message = validateEditorFields(fields, taskId: _taskId).errors[field];
+    final message = validateEditorFields(
+      fields,
+      taskId: _taskId,
+      projectKey: _projectKey,
+    ).errors[field];
     final next = Map<EditorField, String>.of(_errors);
     if (message == null) {
       next.remove(field);
@@ -672,7 +685,11 @@ class ViewerEditorController extends ChangeNotifier {
         message: validation.summary,
       );
     }
-    final changes = EditorFieldChanges.between(baseFields, draft);
+    final changes = EditorFieldChanges.between(
+      baseFields,
+      draft,
+      projectKey: _projectKey,
+    );
     if (changes.isEmpty) {
       return EditorSaveResult(
         EditorSaveOutcome.noop,
@@ -739,6 +756,7 @@ class ViewerEditorController extends ChangeNotifier {
       changes = EditorFieldChanges.between(
         baseFields,
         _draft!,
+        projectKey: _projectKey,
       ).copyWith(status: 'done');
     }
     return _write(
@@ -780,11 +798,17 @@ class ViewerEditorController extends ChangeNotifier {
     final currentFields = conflict.currentFields;
     var next = draft;
     for (final field in EditorField.values) {
-      final userChanged = _differs(conflict.baseFields, draft, field);
+      final userChanged = _differs(
+        conflict.baseFields,
+        draft,
+        field,
+        _projectKey,
+      );
       final currentChanged = _differs(
         conflict.baseFields,
         currentFields,
         field,
+        _projectKey,
       );
       final choice = choices[field] ?? conflict.choices[field];
       if (!userChanged) {
@@ -1048,8 +1072,8 @@ class ViewerEditorController extends ChangeNotifier {
     final changed = <EditorField>[];
     final conflicting = <EditorField>[];
     for (final field in EditorField.values) {
-      final userChanged = _differs(base, draft, field);
-      final currentChanged = _differs(base, currentFields, field);
+      final userChanged = _differs(base, draft, field, _projectKey);
+      final currentChanged = _differs(base, currentFields, field, _projectKey);
       if (userChanged || currentChanged) {
         changed.add(field);
       }
@@ -1076,7 +1100,11 @@ class ViewerEditorController extends ChangeNotifier {
         normalizedDeps: <int>[],
       );
     }
-    final result = validateEditorFields(draft, taskId: _taskId);
+    final result = validateEditorFields(
+      draft,
+      taskId: _taskId,
+      projectKey: _projectKey,
+    );
     _errors = result.errors;
     _notify();
     return result;
@@ -1105,7 +1133,9 @@ class ViewerEditorController extends ChangeNotifier {
     }
     if (changes.deps != null) {
       next = next.copyWith(
-        depsText: changes.deps!.map(viewerCanonicalTaskId).join(', '),
+        depsText: changes.deps!
+            .map((id) => viewerCanonicalTaskId(id, _projectKey))
+            .join(', '),
       );
     }
     return next;
@@ -1151,7 +1181,12 @@ class ViewerEditorController extends ChangeNotifier {
     TaskEditFields base,
     TaskEditFields other,
     EditorField field,
-  ) => EditorFieldChanges.between(base, other).fields.contains(field);
+    String? projectKey,
+  ) => EditorFieldChanges.between(
+    base,
+    other,
+    projectKey: projectKey,
+  ).fields.contains(field);
 
   void _notify() {
     if (!_disposed) {

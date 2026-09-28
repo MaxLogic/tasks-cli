@@ -665,8 +665,10 @@ TaskItem testTaskItem(
   int dependencyCount = 0,
   int waitingDependencyCount = 0,
   int verifyingDependencyCount = 0,
+  String? displayId,
 }) => TaskItem(
   id: id,
+  displayId: displayId,
   title: title ?? 'Task $id',
   status: status,
   priority: priority,
@@ -692,8 +694,10 @@ TaskDetail testTaskDetail(
   List<DependencySummary> dependencySummaries = const <DependencySummary>[],
   int ruleVersion = 3,
   String rules = '# Project rules',
+  String? projectKey,
 }) => TaskDetail(
   id: id,
+  projectKey: projectKey,
   title: title ?? 'Task $id',
   body: body,
   status: status,
@@ -904,11 +908,13 @@ ClipboardEnrichment testClipboardEnrichment({
   String text = '',
   int replacements = 0,
   List<int> unknownIds = const <int>[],
+  List<String> unknownRefs = const <String>[],
   bool clipboard = false,
 }) => ClipboardEnrichment(
   text: text,
   replacements: replacements,
   unknownIds: List<int>.unmodifiable(unknownIds),
+  unknownRefs: List<String>.unmodifiable(unknownRefs),
   clipboard: clipboard,
 );
 

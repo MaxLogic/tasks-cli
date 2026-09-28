@@ -49,7 +49,13 @@ Future<void> _loadFonts() async {
   await icons.load();
 }
 
-ProjectItem _project(int index, String name, double progress) => ProjectItem(
+ProjectItem _project(
+  int index,
+  String name,
+  double progress, {
+  String? projectKey,
+}) => ProjectItem(
+  projectKey: projectKey,
   archivedAtMs: null,
   projectId: '00000000-0000-4000-8000-${index.toString().padLeft(12, '0')}',
   name: name,
@@ -78,13 +84,79 @@ enum _Scene {
 
   /// A task waits only on a to-verify prerequisite; Mark done was refused.
   verifyRefused,
+
+  /// [taskOpen] in a project with the longest key and 5-digit task IDs.
+  taskOpenKeyed,
 }
 
-/// Window sizes each scene renders at; the refusal scene needs only the
-/// smaller reference size.
-List<Size> _sizes(_Scene scene) => scene == _Scene.verifyRefused
+/// File-name stem of a scene's goldens.
+String _sceneName(_Scene scene) =>
+    scene == _Scene.taskOpenKeyed ? 'taskOpen_keyed' : scene.name;
+
+/// Window sizes each scene renders at; the refusal and keyed scenes need only
+/// the smaller reference size.
+List<Size> _sizes(_Scene scene) =>
+    scene == _Scene.verifyRefused || scene == _Scene.taskOpenKeyed
     ? const <Size>[Size(1280, 720)]
     : const <Size>[Size(2000, 800), Size(1280, 720)];
+
+/// A 6-character key with 5-digit IDs: the widest keyed ID the CLI renders.
+FakeWorkspaceReads _keyedReads() {
+  const key = 'ABCDEF';
+  String id(int number) => viewerCanonicalTaskId(number, key);
+  final projects = <ProjectItem>[
+    _project(1, 'eye-health-training', 85.8, projectKey: key),
+    _project(2, 'tasks-cli', 42.5, projectKey: 'TCLI'),
+    _project(3, 'DelphiAiKit', 12),
+  ];
+  final tasks = <TaskItem>[
+    testTaskItem(
+      12000,
+      title: 'Render goldens on Windows',
+      priority: 'P1',
+      dependencyCount: 1,
+      displayId: id(12000),
+    ),
+    testTaskItem(
+      12001,
+      title: 'Paste a ticket ID into the task search',
+      labels: const <String>['viewer', 'keyboard'],
+      displayId: id(12001),
+    ),
+    testTaskItem(
+      12002,
+      title: 'Wait for the CLI protocol change',
+      status: 'blocked',
+      waitingDependencyCount: 1,
+      displayId: id(12002),
+    ),
+  ];
+  return fakeWorkspaceReads(
+    projects: projects,
+    tasks: <String, List<TaskItem>>{
+      for (final project in projects) project.projectId: tasks,
+    },
+    details: <int, TaskDetail>{
+      12000: testTaskDetail(
+        12000,
+        title: 'Render goldens on Windows',
+        priority: 'P1',
+        body: 'Keep the layout regression deterministic. See ${id(12001)}.',
+        deps: const <int>[12001],
+        projectKey: key,
+        dependencySummaries: <DependencySummary>[
+          DependencySummary(
+            id: 12001,
+            displayId: id(12001),
+            title: 'Paste a ticket ID into the task search',
+            status: 'todo',
+            version: 1,
+          ),
+        ],
+      ),
+    },
+  );
+}
 
 /// The completion guard's structured refusal for T-002.
 const ViewerCliErrorFailure _refusal = ViewerCliErrorFailure(
@@ -97,6 +169,9 @@ const ViewerCliErrorFailure _refusal = ViewerCliErrorFailure(
 );
 
 FakeWorkspaceReads _reads(_Scene scene) {
+  if (scene == _Scene.taskOpenKeyed) {
+    return _keyedReads();
+  }
   final projects = <ProjectItem>[
     _project(1, 'eye-health-training', 85.8),
     _project(2, 'tasks-cli', 42.5),
@@ -188,7 +263,7 @@ void main() {
     for (final highContrast in <bool>[false, true]) {
       for (final size in _sizes(scene)) {
         final name =
-            '${scene.name}_${highContrast ? 'hc' : 'std'}_'
+            '${_sceneName(scene)}_${highContrast ? 'hc' : 'std'}_'
             '${size.width.toInt()}x${size.height.toInt()}';
         testWidgets(
           'layout $name',
@@ -229,7 +304,7 @@ void main() {
                 .model;
             model.selectProjectIndex(0);
             await tester.pumpAndSettle();
-            if (scene == _Scene.taskOpen) {
+            if (scene == _Scene.taskOpen || scene == _Scene.taskOpenKeyed) {
               await model.selectTaskRow(0);
               await tester.pumpAndSettle();
               await model.openTaskIndex(0);
@@ -256,6 +331,11 @@ void main() {
                 ),
                 findsWidgets,
               );
+            }
+            if (scene == _Scene.taskOpenKeyed) {
+              expect(find.textContaining('ABCDEF-12000'), findsWidgets);
+              expect(find.textContaining('ABCDEF-12001'), findsWidgets);
+              expect(find.textContaining('T-12000'), findsNothing);
             }
             // With the real font every selected-project action is on screen
             // inside the Projects pane, even at 720 pixels.

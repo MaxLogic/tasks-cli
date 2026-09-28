@@ -3,6 +3,7 @@ pub mod bulk;
 pub mod cli;
 pub mod error;
 pub mod interop;
+pub mod keys;
 pub mod markdown;
 pub mod model;
 pub mod output;

@@ -49,7 +49,9 @@ final class TaskEditFields {
     status: detail.status,
     priority: detail.priority,
     labelsText: detail.labels.join(', '),
-    depsText: detail.deps.map(viewerCanonicalTaskId).join(', '),
+    depsText: detail.deps
+        .map((id) => viewerCanonicalTaskId(id, detail.projectKey))
+        .join(', '),
   );
 
   final String title;
@@ -160,6 +162,10 @@ List<String> normalizeEditorLabelsText(String text) {
   return List<String>.unmodifiable(sorted);
 }
 
+/// The accepted dependency spellings for help text: `DAK-7, T-7 or 7`.
+String viewerDependencyForms(String? projectKey) =>
+    projectKey == null ? 'T-7 or 7' : '$projectKey-7, T-7 or 7';
+
 /// One dependency entry that could not be parsed.
 final class DependencyTokenError {
   const DependencyTokenError(this.token);
@@ -175,23 +181,38 @@ final class DependencyTextParse {
   /// Distinct dependency IDs in first-seen order.
   final List<int> ids;
 
-  /// Entries that are not `T-<digits>` or a bare integer, in typed order.
+  /// Entries that are not `KEY-<digits>` (this project's key), `T-<digits>`
+  /// or a bare integer, in typed order.
   final List<DependencyTokenError> errors;
 
   bool get isValid => errors.isEmpty;
 }
 
-/// Parses comma- or whitespace-separated `T-123` / `123` dependency entries.
-DependencyTextParse parseEditorDependencyText(String text) {
+/// Parses comma- or whitespace-separated `DAK-123` / `T-123` / `123`
+/// dependency entries. A key is accepted only when it is [projectKey]
+/// (case-insensitive): dependencies stay within one project, so another
+/// project's key is an error rather than a silent renumbering.
+DependencyTextParse parseEditorDependencyText(
+  String text, {
+  String? projectKey,
+}) {
   final ids = <int>[];
   final seen = <int>{};
   final errors = <DependencyTokenError>[];
+  final keyed = projectKey == null
+      ? null
+      : RegExp(
+          '^${RegExp.escape(projectKey)}-0*(\\d+)\$',
+          caseSensitive: false,
+        );
   for (final raw in text.split(RegExp(r'[,\s]+'))) {
     final token = raw.trim();
     if (token.isEmpty) {
       continue;
     }
-    final match = RegExp(r'^[Tt]-?0*(\d+)$').firstMatch(token);
+    final match =
+        RegExp(r'^[Tt]-?0*(\d+)$').firstMatch(token) ??
+        keyed?.firstMatch(token);
     final int? id = match != null
         ? int.tryParse(match.group(1)!)
         : int.tryParse(token);
@@ -209,9 +230,13 @@ DependencyTextParse parseEditorDependencyText(String text) {
   );
 }
 
-_DependencyEquivalence _dependenciesEquivalent(String left, String right) {
-  final a = parseEditorDependencyText(left);
-  final b = parseEditorDependencyText(right);
+_DependencyEquivalence _dependenciesEquivalent(
+  String left,
+  String right,
+  String? projectKey,
+) {
+  final a = parseEditorDependencyText(left, projectKey: projectKey);
+  final b = parseEditorDependencyText(right, projectKey: projectKey);
   if (!a.isValid || !b.isValid) {
     return _DependencyEquivalence.incomparable;
   }
@@ -241,8 +266,9 @@ final class EditorFieldChanges {
 
   factory EditorFieldChanges.between(
     TaskEditFields base,
-    TaskEditFields draft,
-  ) {
+    TaskEditFields draft, {
+    String? projectKey,
+  }) {
     return EditorFieldChanges(
       title: draft.title == base.title ? null : draft.title,
       body: draft.body == base.body ? null : draft.body,
@@ -252,10 +278,13 @@ final class EditorFieldChanges {
           ? null
           : normalizeEditorLabelsText(draft.labelsText),
       deps:
-          _dependenciesEquivalent(base.depsText, draft.depsText) ==
+          _dependenciesEquivalent(base.depsText, draft.depsText, projectKey) ==
               _DependencyEquivalence.equal
           ? null
-          : parseEditorDependencyText(draft.depsText).ids,
+          : parseEditorDependencyText(
+              draft.depsText,
+              projectKey: projectKey,
+            ).ids,
     );
   }
 

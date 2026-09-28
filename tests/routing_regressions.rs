@@ -66,8 +66,10 @@ fn accepted_uuid_spellings_resolve_and_bind_the_canonical_database() {
 fn repeated_init_reuses_identity_and_does_not_create_orphans() {
     let data = tempfile::tempdir().expect("data root");
     let project_root = tempfile::tempdir().expect("project root");
-    let first = registry::init_root(data.path(), project_root.path(), None).expect("first init");
-    let second = registry::init_root(data.path(), project_root.path(), None).expect("second init");
+    let first =
+        registry::init_root(data.path(), project_root.path(), None, None).expect("first init");
+    let second =
+        registry::init_root(data.path(), project_root.path(), None, None).expect("second init");
     assert_eq!(first.project_id, second.project_id);
     let project_dirs = std::fs::read_dir(data.path().join("projects"))
         .expect("projects")
@@ -97,6 +99,8 @@ fn concurrent_init_processes_publish_one_binding_and_one_database() {
         "init",
         "--root",
         root_text,
+        "--key",
+        "RR",
     ];
     let first = Command::new(binary)
         .args(args)
@@ -150,7 +154,7 @@ fn concurrent_init_processes_publish_one_binding_and_one_database() {
 fn stale_binding_does_not_block_a_new_valid_binding() {
     let data = tempfile::tempdir().expect("data root");
     let old_root = tempfile::tempdir().expect("old root");
-    let old = registry::init_root(data.path(), old_root.path(), None).expect("old init");
+    let old = registry::init_root(data.path(), old_root.path(), None, None).expect("old init");
     let old_path = old_root.path().to_path_buf();
     drop(old_root);
     assert!(!old_path.exists());

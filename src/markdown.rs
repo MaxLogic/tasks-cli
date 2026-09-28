@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::model::{
-    parse_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, Priority, SchemaClass,
-    SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_OTHER,
+    parse_ledger_task_id, ImportProblem, ImportSectionPreview, ImportTaskPreview, Priority,
+    SchemaClass, SourceRange, SourceSchema, TaskStatus, PROBLEM_NONCONFORMING_DEPS, PROBLEM_OTHER,
     PROBLEM_SELF_DEPENDENCY, PROBLEM_UNKNOWN_DEPENDENCY,
 };
 use serde_json::Value;
@@ -330,13 +330,26 @@ fn update_fence(state: &mut Option<Fence>, line: &str) {
     }
 }
 
-fn parse_task_heading(text: &str) -> Option<(u64, String)> {
+/// `### T-N title`, or `### KEY-N title` when `key` is the target project's key.
+fn parse_task_heading(text: &str, key: Option<&str>) -> Option<(u64, String)> {
     let text = structural_text(text)?;
     let rest = text.strip_prefix("### ")?.trim();
     let mut pieces = rest.splitn(2, char::is_whitespace);
-    let id = parse_task_id(pieces.next()?).ok()?;
+    let id = parse_ledger_task_id(pieces.next()?, key).ok()?;
     let title = pieces.next().unwrap_or_default().trim().to_string();
     Some((id, title))
+}
+
+/// The key of a `### KEY-N title` heading that `parse_task_heading` did not
+/// accept and whose key belongs to another project in `other_keys`. Any other
+/// key-shaped heading (`### ISO-8601 dates`) is ordinary text.
+fn foreign_key_heading(text: &str, other_keys: &[String]) -> Option<String> {
+    let rest = text.strip_prefix("### ")?.trim();
+    let token = rest.split(char::is_whitespace).next()?;
+    crate::model::parse_task_ref(token)
+        .ok()?
+        .key
+        .filter(|key| other_keys.contains(key))
 }
 
 fn canonical_status(section: &str) -> Option<TaskStatus> {
@@ -373,6 +386,12 @@ pub(crate) struct SectionMap {
     relaxed_missing_sections: bool,
     /// The map file this map was loaded from, when it came from a file.
     pub(crate) path: Option<String>,
+    /// The target project's key: `### KEY-N` headings and `KEY-N` dependency
+    /// IDs are accepted for it, alongside the legacy `T-N` form.
+    id_key: Option<String>,
+    /// Keys of the other projects in the data root: a `### OTHER-N` heading
+    /// with one of them is reported instead of becoming body or rules text.
+    other_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -389,6 +408,20 @@ impl SectionMap {
     pub(crate) fn for_corpus(&self) -> SectionMap {
         let mut copy = self.clone();
         copy.relaxed_missing_sections = true;
+        copy
+    }
+
+    /// This map, accepting `KEY-N` IDs for the target project's `key`.
+    pub(crate) fn with_id_key(&self, key: Option<&str>) -> SectionMap {
+        let mut copy = self.clone();
+        copy.id_key = key.map(str::to_owned);
+        copy
+    }
+
+    /// This map, reporting `### KEY-N` headings of these other projects.
+    pub(crate) fn with_other_keys(&self, keys: Vec<String>) -> SectionMap {
+        let mut copy = self.clone();
+        copy.other_keys = keys;
         copy
     }
 
@@ -585,7 +618,7 @@ pub(crate) fn load_section_map(path: &Path) -> Result<SectionMap, AppError> {
     Ok(map)
 }
 
-fn parse_dependencies(value: &str) -> Result<Vec<u64>, String> {
+fn parse_dependencies(value: &str, key: Option<&str>) -> Result<Vec<u64>, String> {
     let value = value.trim();
     if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
         return Ok(Vec::new());
@@ -593,7 +626,7 @@ fn parse_dependencies(value: &str) -> Result<Vec<u64>, String> {
     let mut deps = value
         .split(',')
         .map(|raw| {
-            parse_task_id(raw.trim()).map_err(|error| {
+            parse_ledger_task_id(raw.trim(), key).map_err(|error| {
                 format!("{error}; expected a comma-separated list of T-<digits> IDs, '-' or 'none'")
             })
         })
@@ -904,6 +937,7 @@ fn metadata_block(
     end: usize,
     source_name: &str,
     frames: &HashMap<usize, CanonicalFrame>,
+    key: Option<&str>,
 ) -> Result<Option<MetadataBlock>, AppError> {
     let mut cursor = start;
     let mut title = None;
@@ -1024,7 +1058,7 @@ fn metadata_block(
     } else {
         cursor + 2
     };
-    let deps = parse_dependencies(deps_value).map_err(|message| {
+    let deps = parse_dependencies(deps_value, key).map_err(|message| {
         AppError::Validation(format!(
             "{source_name}:{deps_line}: invalid 'Depends on:' value '{deps_value}': {message}"
         ))
@@ -1154,11 +1188,31 @@ pub fn parse_with_schema(
     map_file: Option<&Path>,
     schema: SourceSchema,
 ) -> Result<ParsedImport, AppError> {
+    parse_for_project(source_name, source, map_file, schema, None, Vec::new())
+}
+
+/// Parses a ledger for a target project whose key is `key`: its headings and
+/// dependency lists may use `KEY-N` as well as `T-N`. `other_keys` are the
+/// keys of the other projects in the data root; a `### OTHER-N` heading with
+/// one of them is a blocking problem.
+pub fn parse_for_project(
+    source_name: impl Into<String>,
+    source: Vec<u8>,
+    map_file: Option<&Path>,
+    schema: SourceSchema,
+    key: Option<&str>,
+    other_keys: Vec<String>,
+) -> Result<ParsedImport, AppError> {
     let map = match map_file {
         Some(path) => load_section_map(path)?,
         None => SectionMap::default(),
     };
-    parse_with_map(source_name, source, &map, schema)
+    parse_with_map(
+        source_name,
+        source,
+        &map.with_id_key(key).with_other_keys(other_keys),
+        schema,
+    )
 }
 
 pub(crate) fn parse_with_map(
@@ -1168,6 +1222,7 @@ pub(crate) fn parse_with_map(
     schema: SourceSchema,
 ) -> Result<ParsedImport, AppError> {
     let source_name: String = source_name.into();
+    let id_key = map.id_key.as_deref();
     let text = std::str::from_utf8(&source).map_err(|error| {
         AppError::Validation(format!(
             "{source_name}: file is not valid UTF-8 (first invalid byte at offset {}); convert it to UTF-8",
@@ -1193,7 +1248,7 @@ pub(crate) fn parse_with_map(
             continue;
         };
         if structural.starts_with("## ")
-            || (structural.starts_with("### ") && parse_task_heading(structural).is_some())
+            || (structural.starts_with("### ") && parse_task_heading(structural, id_key).is_some())
         {
             saw_section_or_task = true;
         }
@@ -1308,8 +1363,32 @@ pub(crate) fn parse_with_map(
         if structural.starts_with("# ") {
             top_level_starts.push(index);
         }
-        if structural.starts_with("### ") && parse_task_heading(structural).is_some() {
+        if structural.starts_with("### ") && parse_task_heading(structural, id_key).is_some() {
             task_starts.push(index);
+        } else if let Some(foreign) = foreign_key_heading(structural, &map.other_keys) {
+            // A `### KEY-N` heading for another project would otherwise be
+            // imported silently as rules or body text.
+            let target = id_key
+                .map(|key| format!("project key {key}"))
+                .unwrap_or_else(|| "a project without a key".to_string());
+            frame_problems.push(ImportProblem {
+                kind: PROBLEM_OTHER.to_string(),
+                message: format!(
+                    "{source_name}:{}: heading '{structural}' uses project key {foreign}, but this import targets {target}; rename it to T-N{} or import the file into the {foreign} project",
+                    index + 1,
+                    id_key.map(|key| format!(" or {key}-N")).unwrap_or_default()
+                ),
+                file: Some(source_name.clone()),
+                line: Some(index + 1),
+                task_id: None,
+                value: Some(structural.to_string()),
+                keepable_ids: Vec::new(),
+                group: Vec::new(),
+                fix: Some(format!(
+                    "use T-N{} task headings for this project",
+                    id_key.map(|key| format!(" or {key}-N")).unwrap_or_default()
+                )),
+            });
         }
         index += 1;
     }
@@ -1349,7 +1428,7 @@ pub(crate) fn parse_with_map(
             .unwrap_or(lines.len());
         let end_index = next_task.min(next_section).min(next_top_level);
         let heading = lines[*start_index].text.trim();
-        let (id, mut title) = parse_task_heading(heading).ok_or_else(|| {
+        let (id, mut title) = parse_task_heading(heading, id_key).ok_or_else(|| {
             AppError::Validation(format!(
                 "{source_name}:{}: task heading '{heading}' is not '### T-<number> <title>'",
                 *start_index + 1
@@ -1376,6 +1455,7 @@ pub(crate) fn parse_with_map(
             end_index,
             &source_name,
             &canonical_frames,
+            id_key,
         ) {
             Ok(Some(metadata)) => {
                 if let Some(metadata_title) = metadata.title {

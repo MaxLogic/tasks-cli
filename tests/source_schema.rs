@@ -46,6 +46,8 @@ fn create_task_schema_applies_deps_additively_and_round_trips_the_body() {
         "init",
         "--root",
         root.to_str().unwrap(),
+        "--key",
+        "SS",
     ]);
     assert!(
         init.status.success(),
@@ -71,7 +73,7 @@ fn create_task_schema_applies_deps_additively_and_round_trips_the_body() {
     let preview_text = text_of(&preview);
     assert!(preview.status.success(), "{preview_text}");
     assert!(
-        preview_text.contains("deps=[T-002,T-003]"),
+        preview_text.contains("deps=[SS-002,SS-003]"),
         "{preview_text}"
     );
     assert!(preview_text.contains("consumed=[Deps]"), "{preview_text}");
@@ -126,6 +128,8 @@ fn create_task_schema_blocks_nonconforming_deps_before_apply() {
         "init",
         "--root",
         root.to_str().unwrap(),
+        "--key",
+        "SS",
     ]);
     assert!(
         init.status.success(),
@@ -222,6 +226,8 @@ fn create_task_schema_reports_every_cycle_and_unknown_id_in_one_run() {
         "init",
         "--root",
         root.to_str().unwrap(),
+        "--key",
+        "SS",
     ]);
     assert!(init.status.success());
     let project = text_of(&init)

@@ -53,6 +53,41 @@ void main() {
       expect(fields.depsText, 'T-002, T-004');
     });
 
+    test('a keyed project shows and parses KEY-N dependencies', () {
+      final detail = testTaskDetail(7, deps: <int>[2, 4], projectKey: 'DAK');
+      final fields = TaskEditFields.fromDetail(detail);
+      expect(fields.depsText, 'DAK-002, DAK-004');
+
+      final parsed = parseEditorDependencyText(
+        'DAK-2, dak-004 T-5 6',
+        projectKey: 'DAK',
+      );
+      expect(parsed.ids, <int>[2, 4, 5, 6]);
+      expect(parsed.isValid, isTrue);
+
+      final foreign = parseEditorDependencyText('DS-2', projectKey: 'DAK');
+      expect(foreign.errors.single.token, 'DS-2');
+      expect(parseEditorDependencyText('DAK-2').isValid, isFalse);
+
+      // Respelling DAK-002 as T-2 or 2 is not a change.
+      final respelled = fields.copyWith(depsText: 'T-2, 4');
+      expect(
+        EditorFieldChanges.between(fields, respelled, projectKey: 'DAK').deps,
+        isNull,
+      );
+      final result = validateEditorFields(
+        fields.copyWith(depsText: 'DS-2, DAK-7'),
+        taskId: 7,
+        projectKey: 'DAK',
+      );
+      expect(
+        result.errors[EditorField.deps],
+        'Dependencies: "DS-2" belongs to another project; dependencies must '
+        'be in this project (DAK-N, T-N or N). '
+        'the task cannot depend on itself (DAK-007).',
+      );
+    });
+
     test('treats reordered, recased or spaced labels as unchanged', () {
       final base = baseFields();
       final draft = base.copyWith(labelsText: '  ZETA ,needs-human ');

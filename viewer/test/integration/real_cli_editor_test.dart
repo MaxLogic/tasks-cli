@@ -671,6 +671,8 @@ final class _Slice5Harness {
       'init',
       '--root',
       project,
+      '--key',
+      'EDIT',
       '--data-root',
       store,
       '--format',

@@ -1,10 +1,10 @@
 use crate::error::AppError;
 use crate::markdown::{ParsedImport, ParsedTask};
 use crate::model::{
-    parse_task_id, render_task_id, DependencySummary, HistoryEvent, ImportProblem, ImportReport,
-    ListCursor, Pagination, Priority, RuleRecord, SelectionPage, ShowTask, TaskDetail, TaskStatus,
-    TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES, ID_PREFIX, MAX_DEPENDENCIES,
-    RULES_MAX_BYTES, TITLE_MAX_CHARS,
+    parse_task_ref, render_keyed_task_id, DependencySummary, HistoryEvent, ImportProblem,
+    ImportReport, ListCursor, Pagination, Priority, RuleRecord, SelectionPage, ShowTask,
+    TaskDetail, TaskStatus, TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES,
+    MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
 use crate::storage::{
     acquire_exclusive_lock, validate_storage_path, validate_storage_root, ExclusiveLock,
@@ -20,7 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
+
+/// Column definition of the optional project key (schema 6). The CHECK mirrors
+/// `model::parse_project_key`: 2-6 uppercase ASCII letters/digits starting
+/// with a letter; `T` alone is too short and so stays reserved.
+const PROJECT_KEY_DEFINITION: &str = "TEXT CHECK (project_key IS NULL OR (length(project_key) BETWEEN 2 AND 6 AND substr(project_key,1,1) BETWEEN 'A' AND 'Z' AND project_key NOT GLOB '*[^A-Z0-9]*' AND NOT (substr(project_key,1,1) = 'T' AND substr(project_key,2) NOT GLOB '*[^0-9]*')))";
 
 /// The authoritative runnable-readiness predicate. Callers that build their own
 /// task SQL must splice this exact text, so the store and the viewer cannot
@@ -43,12 +48,18 @@ pub struct Store {
     pub project_id: Uuid,
     pub db_path: PathBuf,
     pub conn: Connection,
+    /// Stored project key (schema 6); `None` before a person assigns one.
+    pub project_key: Option<String>,
+    /// Validated data root this store was opened from.
+    pub data_root: PathBuf,
     migration_lock: Option<ExclusiveLock>,
 }
 
 pub struct StoreInfo {
     pub project_id: Uuid,
     pub db_path: PathBuf,
+    /// The key stored in the database, which may predate the caller's request.
+    pub project_key: Option<String>,
 }
 
 pub fn data_root_project_path(data_root: &Path, project_id: &str) -> PathBuf {
@@ -58,7 +69,21 @@ pub fn data_root_project_path(data_root: &Path, project_id: &str) -> PathBuf {
         .join("TASKS.sqlite")
 }
 
+/// Creates (or validates) a project database without a key, the state of a
+/// database migrated from before project keys. The CLI always passes a key
+/// through [`create_project_db_with_key`].
 pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInfo, AppError> {
+    create_project_db_with_key(data_root, project_id, None)
+}
+
+/// Creates a project database holding `key`, or validates an existing one
+/// without changing its stored key (reported in the result). Key uniqueness is
+/// the caller's job, under the registry lock.
+pub fn create_project_db_with_key(
+    data_root: &Path,
+    project_id: &Uuid,
+    key: Option<&str>,
+) -> Result<StoreInfo, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
     // Check the actual database target before creating any descendant.  The
@@ -75,7 +100,7 @@ pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInf
         let version = schema_version(&conn)?;
         if version == 0 && !table_exists(&conn, "project")? && !table_exists(&conn, "tasks")? {
             configure_writer(&conn)?;
-            initialize_new_database(&mut conn, project_id)?;
+            initialize_new_database(&mut conn, project_id, key)?;
         } else {
             let info = verify_existing_project(&db_path, project_id)?;
             return Ok(info);
@@ -88,7 +113,7 @@ pub fn create_project_db(data_root: &Path, project_id: &Uuid) -> Result<StoreInf
             .map_err(|error| AppError::io_path("create the project database", &db_path, error))?;
         let mut conn = Connection::open(&db_path)?;
         configure_writer(&conn)?;
-        initialize_new_database(&mut conn, project_id)?;
+        initialize_new_database(&mut conn, project_id, key)?;
     }
     let info = verify_existing_project(&db_path, project_id)?;
     Ok(info)
@@ -216,13 +241,14 @@ fn validate_limit(limit: usize) -> Result<usize, AppError> {
 }
 
 fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
-    tx.execute_batch(
+    tx.execute_batch(&format!(
         "
         CREATE TABLE project(
             project_id TEXT PRIMARY KEY,
             rules_markdown TEXT NOT NULL DEFAULT '',
             rules_version INTEGER NOT NULL DEFAULT 1,
-            next_task_number INTEGER NOT NULL DEFAULT 1
+            next_task_number INTEGER NOT NULL DEFAULT 1,
+            project_key {PROJECT_KEY_DEFINITION}
         );
         CREATE TABLE tasks(
             id INTEGER PRIMARY KEY,
@@ -262,19 +288,23 @@ fn create_schema_objects(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError>
         CREATE INDEX idx_tasks_status_id ON tasks(status, id);
         CREATE INDEX idx_dependencies_depends_on_id ON dependencies(depends_on_id);
         CREATE INDEX idx_events_task_id ON events(task_id, event_id);
-        ",
-    )?;
+        "
+    ))?;
     Ok(())
 }
 
-fn initialize_new_database(conn: &mut Connection, project_id: &Uuid) -> Result<(), AppError> {
+fn initialize_new_database(
+    conn: &mut Connection,
+    project_id: &Uuid,
+    key: Option<&str>,
+) -> Result<(), AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     create_schema_objects(&tx)?;
     crate::labels::create_schema(&tx)?;
     create_selection_schema(&tx)?;
     tx.execute(
-        "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number) VALUES (?1, '', 1, 1)",
-        [project_id.to_string()],
+        "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number, project_key) VALUES (?1, '', 1, 1, ?2)",
+        params![project_id.to_string(), key],
     )?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     tx.commit()?;
@@ -317,6 +347,7 @@ fn validate_current_schema(
         "rules_markdown",
         "rules_version",
         "next_task_number",
+        "project_key",
     ] {
         if !column_exists(conn, "project", column)? {
             return Err(missing(&format!("the project.{column} column")));
@@ -424,6 +455,7 @@ fn verify_existing_project(db_path: &Path, expected: &Uuid) -> Result<StoreInfo,
     Ok(StoreInfo {
         project_id: *expected,
         db_path: db_path.to_path_buf(),
+        project_key: crate::keys::read_key(&conn)?,
     })
 }
 
@@ -658,9 +690,10 @@ fn migrate_v0_to_v1(
     }
     drop(cycle_statement);
     if !cycle_tasks.is_empty() {
+        let key = crate::keys::read_key(tx)?;
         let listed = cycle_tasks
             .iter()
-            .map(|id| format!("T-{id:03}"))
+            .map(|id| render_keyed_task_id(key.as_deref(), *id as u64))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(AppError::Database(format!(
@@ -853,6 +886,14 @@ fn migrate_v4_to_v5(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
     )?;
     crate::full_text::create_triggers(tx)?;
     tx.execute_batch("PRAGMA user_version = 5;")?;
+    Ok(())
+}
+
+fn migrate_v5_to_v6(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    // Additive: existing projects keep working with T-N until a person
+    // assigns a key with `project-key --set`.
+    ensure_column(tx, "project", "project_key", PROJECT_KEY_DEFINITION)?;
+    tx.execute_batch("PRAGMA user_version = 6;")?;
     Ok(())
 }
 
@@ -1170,7 +1211,7 @@ fn publish_export(out: &Path, bytes: &[u8]) -> Result<(), AppError> {
     result
 }
 
-fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid), AppError> {
+fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid, PathBuf), AppError> {
     let data_root = validate_storage_root(data_root)?;
     let project_id = Uuid::parse_str(project).map_err(|error| {
         AppError::Usage(format!(
@@ -1185,12 +1226,12 @@ fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid), A
             db_path.display()
         )));
     }
-    Ok((db_path, project_id))
+    Ok((db_path, project_id, data_root))
 }
 
 impl Store {
     pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let (db_path, project_id) = project_db_path(data_root, project)?;
+        let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -1209,30 +1250,36 @@ impl Store {
             )));
         }
         validate_current_schema(&conn, &project_id, &db_path)?;
+        let project_key = crate::keys::read_key(&conn)?;
         Ok(Self {
             project_id,
             db_path,
             conn,
+            project_key,
+            data_root,
             migration_lock: None,
         })
     }
 
     pub fn open_for_diagnostics(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let (db_path, project_id) = project_db_path(data_root, project)?;
+        let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        let project_key = crate::keys::read_key(&conn).ok().flatten();
         Ok(Self {
             project_id,
             db_path,
             conn,
+            project_key,
+            data_root,
             migration_lock: None,
         })
     }
 
     pub fn open_rw(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let (db_path, project_id) = project_db_path(data_root, project)?;
+        let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -1251,16 +1298,19 @@ impl Store {
             )));
         }
         validate_current_schema(&conn, &project_id, &db_path)?;
+        let project_key = crate::keys::read_key(&conn)?;
         Ok(Self {
             project_id,
             db_path,
             conn,
+            project_key,
+            data_root,
             migration_lock: None,
         })
     }
 
     pub fn open_for_migration(data_root: &Path, project: &str) -> Result<Self, AppError> {
-        let (db_path, project_id) = project_db_path(data_root, project)?;
+        let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let migration_lock = acquire_exclusive_lock(&db_path.with_extension("migrate.lock"))?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -1288,12 +1338,84 @@ impl Store {
                 }
             }
         }
+        let project_key = crate::keys::read_key(&conn).ok().flatten();
         Ok(Self {
             project_id,
             db_path,
             conn,
+            project_key,
+            data_root,
             migration_lock: Some(migration_lock),
         })
+    }
+
+    /// Display form of a task ID in this project: `KEY-001` or `T-001`.
+    pub fn display_id(&self, id: u64) -> String {
+        render_keyed_task_id(self.project_key.as_deref(), id)
+    }
+
+    fn stamp(&self, items: &mut [TaskSummary]) {
+        for item in items {
+            item.display_id = self.display_id(item.id);
+        }
+    }
+
+    /// Resolves `KEY-N`, `T-N` or `N` to a task number of this project. A
+    /// reference with another key fails with exit 3 naming its project.
+    pub fn resolve_ref(&self, raw: &str) -> Result<u64, AppError> {
+        let reference = parse_task_ref(raw).map_err(AppError::Validation)?;
+        reference
+            .resolve(self.project_key.as_deref())
+            .map_err(|key| {
+                crate::keys::foreign_reference_error(
+                    &self.data_root,
+                    &key,
+                    reference.id,
+                    &self.project_id,
+                    self.project_key.as_deref(),
+                )
+            })
+    }
+
+    /// Stores a new, already validated key and returns the previous one. The
+    /// caller holds the registry lock and has checked uniqueness. Task bodies
+    /// are not rewritten: old `OLDKEY-N` mentions stay as written.
+    pub fn set_project_key(&mut self, key: &str) -> Result<Option<String>, AppError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = crate::keys::read_key(&tx)?;
+        if previous.as_deref() != Some(key) {
+            let changed = tx.execute(
+                "UPDATE project SET project_key = ?1 WHERE project_id = ?2",
+                params![key, self.project_id.to_string()],
+            )?;
+            if changed != 1 {
+                return Err(AppError::Database(format!(
+                    "{} has no project row for {}; restore the database from a backup",
+                    self.db_path.display(),
+                    self.project_id
+                )));
+            }
+            tx.commit()?;
+        }
+        self.project_key = Some(key.to_string());
+        Ok(previous)
+    }
+
+    /// Resolves a comma-separated dependency list (`--deps`).
+    pub fn resolve_ref_list(&self, raw: &str) -> Result<Vec<u64>, AppError> {
+        raw.split(',')
+            .filter(|item| !item.trim().is_empty())
+            .map(|item| {
+                self.resolve_ref(item).map_err(|error| match error {
+                    AppError::Validation(message) => {
+                        AppError::Validation(format!("--deps item '{}': {message}", item.trim()))
+                    }
+                    other => other,
+                })
+            })
+            .collect()
     }
 
     pub fn project_rules(&self) -> Result<RuleRecord, AppError> {
@@ -1372,6 +1494,7 @@ impl Store {
             })?;
             summaries.push(TaskSummary {
                 id: row.get::<_, i64>(0)? as u64,
+                display_id: String::new(),
                 status: task_status,
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
@@ -1401,6 +1524,7 @@ impl Store {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
             row.labels = labels.remove(&row.id).unwrap_or_default();
         }
+        self.stamp(&mut summaries);
         snapshot.commit()?;
         Ok(Pagination {
             items: summaries,
@@ -1456,6 +1580,7 @@ impl Store {
         let has_more = items.len() > size;
         items.truncate(size);
         Self::populate_summaries(&snapshot, &mut items)?;
+        self.stamp(&mut items);
         let next_after = if has_more {
             items.last().map(|t| {
                 ListCursor {
@@ -1478,6 +1603,7 @@ impl Store {
     fn selection_summary(row: &rusqlite::Row<'_>) -> Result<TaskSummary, AppError> {
         Ok(TaskSummary {
             id: row.get(0)?,
+            display_id: String::new(),
             status: validate_status(&row.get::<_, String>(1)?)?,
             version: row.get(2)?,
             title: row.get(3)?,
@@ -1542,6 +1668,7 @@ impl Store {
         for item in &mut items {
             item.task.deps = deps.remove(&item.task.id).unwrap_or_default();
             item.task.labels = labels.remove(&item.task.id).unwrap_or_default();
+            item.task.display_id = self.display_id(item.task.id);
         }
         snapshot.commit()?;
         Ok(Pagination {
@@ -1603,6 +1730,7 @@ impl Store {
             })?;
             out.push(TaskSummary {
                 id: row.get::<_, i64>(0)? as u64,
+                display_id: String::new(),
                 status: task_status,
                 version: row.get::<_, i64>(2)? as u64,
                 title: row.get::<_, String>(3)?,
@@ -1630,6 +1758,7 @@ impl Store {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
             row.labels = labels.remove(&row.id).unwrap_or_default();
         }
+        self.stamp(&mut out);
         snapshot.commit()?;
         Ok(Pagination {
             items: out,
@@ -1660,6 +1789,7 @@ impl Store {
         for row in matches {
             items.push(TaskSummary {
                 id: row.id,
+                display_id: self.display_id(row.id),
                 status: validate_status(&row.status)?,
                 version: row.version,
                 title: row.title,
@@ -1752,6 +1882,7 @@ impl Store {
             let (id, status, version, title) = row?;
             summaries.push(DependencySummary {
                 id,
+                display_id: self.display_id(id),
                 status: validate_status(&status)?,
                 version,
                 title,
@@ -1762,7 +1893,7 @@ impl Store {
 
     /// Full library detail for one task, including dependency IDs and rules.
     pub fn show_task(&mut self, raw_id: &str) -> Result<TaskDetail, AppError> {
-        let id = parse_task_id(raw_id).map_err(AppError::Validation)?;
+        let id = self.resolve_ref(raw_id)?;
         let snapshot = self.conn.unchecked_transaction()?;
         let task = self
             .read_show_task(id)?
@@ -1772,6 +1903,7 @@ impl Store {
             priority: task.priority,
             labels: task.labels,
             id,
+            display_id: task.display_id,
             status: task.status,
             version: task.version,
             title: task.title,
@@ -1801,7 +1933,7 @@ impl Store {
         }
         let mut ids = Vec::with_capacity(raw_ids.len());
         for raw in raw_ids {
-            let id = parse_task_id(raw).map_err(AppError::Validation)?;
+            let id = self.resolve_ref(raw)?;
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -1830,7 +1962,7 @@ impl Store {
     fn task_not_found(&self, ids: &[u64]) -> AppError {
         let rendered = ids
             .iter()
-            .map(|id| render_task_id(*id))
+            .map(|id| self.display_id(*id))
             .collect::<Vec<_>>()
             .join(", ");
         let noun = if ids.len() == 1 { "task" } else { "tasks" };
@@ -1863,6 +1995,7 @@ impl Store {
         Ok(Some(ShowTask {
             priority: priority.parse().map_err(AppError::Validation)?,
             id,
+            display_id: self.display_id(id),
             status: validate_status(&status_text)?,
             version: version as u64,
             title,
@@ -1897,7 +2030,7 @@ impl Store {
             let single = row.ok_or_else(|| {
                 AppError::NotFound(format!(
                     "event {event_id} not found for task {} in project {project_id}; run tasks history --project {project_id} to list events",
-                    render_task_id(task_id),
+                    render_keyed_task_id(self.project_key.as_deref(), task_id),
                 ))
             })?;
             return Ok((
@@ -2000,7 +2133,9 @@ impl Store {
         task_id: u64,
         deps: &[u64],
         known: &HashSet<u64>,
+        key: Option<&str>,
     ) -> Result<(), AppError> {
+        let rid = |id: u64| render_keyed_task_id(key, id);
         for dep in deps {
             if known.contains(dep) {
                 continue;
@@ -2012,7 +2147,10 @@ impl Store {
                 .optional()?;
             if exists.is_none() {
                 return Err(AppError::Validation(format!(
-                    "T-{task_id:03} depends on T-{dep:03}, which is in neither the import sources nor this project; add that task to the file set or remove T-{dep:03} from Deps"
+                    "{} depends on {}, which is in neither the import sources nor this project; add that task to the file set or remove {} from Deps",
+                    rid(task_id),
+                    rid(*dep),
+                    rid(*dep)
                 )));
             }
         }
@@ -2023,11 +2161,15 @@ impl Store {
         conn: &Connection,
         task_id: u64,
         deps: &[u64],
+        key: Option<&str>,
     ) -> Result<(), AppError> {
+        let rid = |id: u64| render_keyed_task_id(key, id);
         for dep in deps {
             if *dep == task_id {
                 return Err(AppError::Validation(format!(
-                    "T-{task_id:03} lists itself as a dependency; remove T-{task_id:03} from its Deps"
+                    "{} lists itself as a dependency; remove {} from its Deps",
+                    rid(task_id),
+                    rid(task_id)
                 )));
             }
             let query = "
@@ -2046,7 +2188,10 @@ impl Store {
                 .optional()?;
             if found.is_some() {
                 return Err(AppError::Validation(format!(
-                    "T-{task_id:03} cannot depend on T-{dep:03}: T-{dep:03} already depends on it directly or indirectly, so this edge would create a cycle; remove one of the edges"
+                    "{} cannot depend on {}: {} already depends on it directly or indirectly, so this edge would create a cycle; remove one of the edges",
+                    rid(task_id),
+                    rid(*dep),
+                    rid(*dep)
                 )));
             }
         }
@@ -2104,6 +2249,7 @@ impl Store {
         priority: Priority,
     ) -> Result<(u64, u64, Option<u64>), AppError> {
         let labels = crate::labels::normalize(labels)?;
+        let key = self.project_key.clone();
         let who = format!("create in project {}", self.project_id);
         validate_title_body(&who, title, body)?;
         let deps = normalize_dependencies(deps);
@@ -2124,7 +2270,7 @@ impl Store {
                 .unwrap_or(deps[0]);
             return Err(AppError::Validation(format!(
                 "create: task '{title}' lists dependency {} more than once; remove the duplicate entry.",
-                render_task_id(duplicate)
+                render_keyed_task_id(key.as_deref(), duplicate)
             )));
         }
         let now = sqlite_now_ms();
@@ -2146,8 +2292,8 @@ impl Store {
             "UPDATE project SET next_task_number = next_task_number + 1 WHERE project_id = ?1",
             [self.project_id.to_string()],
         )?;
-        Self::validate_task_dependencies_exist(&tx, id, &deps, &HashSet::new())?;
-        Self::validate_dependency_cycle(&tx, id, &deps)?;
+        Self::validate_task_dependencies_exist(&tx, id, &deps, &HashSet::new(), key.as_deref())?;
+        Self::validate_dependency_cycle(&tx, id, &deps, key.as_deref())?;
         Self::replace_dependencies(&tx, id, &deps)?;
         crate::labels::replace(&tx, id, &labels)?;
         let snapshot = json!({
@@ -2182,6 +2328,8 @@ impl Store {
         changes: TaskUpdate,
     ) -> Result<(u64, TaskStatus, u64, Option<u64>), AppError> {
         let project_id = self.project_id;
+        let key = self.project_key.clone();
+        let rid = |id: u64| render_keyed_task_id(key.as_deref(), id);
         if changes.title.is_none()
             && changes.body.is_none()
             && changes.status.is_none()
@@ -2194,7 +2342,7 @@ impl Store {
         {
             return Err(AppError::Usage(format!(
                 "update {}: no changes requested; pass at least one of --title, --body-file, --status, --deps, --clear-deps, --labels, --clear-labels, --add-label, --remove-label or --priority (project {project_id})",
-                render_task_id(id)
+                rid(id)
             )));
         }
         if changes.labels.is_some()
@@ -2202,13 +2350,13 @@ impl Store {
         {
             return Err(AppError::Usage(format!(
                 "update {}: --labels/--clear-labels replace the whole set and cannot be combined with --add-label or --remove-label; pass one style (project {project_id})",
-                render_task_id(id)
+                rid(id)
             )));
         }
         if changes.deps.is_some() && changes.clear_deps {
             return Err(AppError::Usage(format!(
                 "update {}: --deps and --clear-deps cannot be combined; pass one of them (project {project_id})",
-                render_task_id(id)
+                rid(id)
             )));
         }
         let requested_deps = changes.deps.clone().map(normalize_dependencies);
@@ -2216,7 +2364,7 @@ impl Store {
             if deps.len() > MAX_DEPENDENCIES {
                 return Err(AppError::Validation(format!(
                     "update {}: the dependency list has {} entries; the limit is {MAX_DEPENDENCIES}. Reduce the list or split the task.",
-                    render_task_id(id),
+                    rid(id),
                     deps.len()
                 )));
             }
@@ -2230,16 +2378,16 @@ impl Store {
                     .unwrap_or(deps[0]);
                 return Err(AppError::Validation(format!(
                     "update {}: dependency {} is listed more than once; remove the duplicate entry.",
-                    render_task_id(id),
-                    render_task_id(duplicate)
+                    rid(id),
+                    rid(duplicate)
                 )));
             }
             for dep in deps {
                 if *dep == id {
                     return Err(AppError::Validation(format!(
                         "update {}: the task lists itself as a dependency; remove {} from the list.",
-                        render_task_id(id),
-                        render_task_id(id)
+                        rid(id),
+                        rid(id)
                     )));
                 }
             }
@@ -2265,7 +2413,7 @@ impl Store {
         let current = current.ok_or_else(|| {
             AppError::NotFound(format!(
                 "task {} not found in project {project_id}; run tasks list to see the IDs in this project",
-                render_task_id(id)
+                rid(id)
             ))
         })?;
         let (cur_title, cur_body, cur_status, cur_version) = current;
@@ -2283,11 +2431,7 @@ impl Store {
             .map(ToString::to_string)
             .unwrap_or(cur_status.clone());
         let next_status_value = validate_status(&next_status)?;
-        let who = format!(
-            "update {} in project {}",
-            render_task_id(id),
-            self.project_id
-        );
+        let who = format!("update {} in project {}", rid(id), self.project_id);
         validate_title_body(&who, &next_title, &next_body)?;
 
         let cur_priority: String =
@@ -2328,8 +2472,14 @@ impl Store {
             return Ok((id, next_status_value, cur_version as u64, None));
         }
         if let Some(replacement) = requested_deps.as_deref() {
-            Self::validate_task_dependencies_exist(&tx, id, replacement, &HashSet::new())?;
-            Self::validate_dependency_cycle(&tx, id, replacement)?;
+            Self::validate_task_dependencies_exist(
+                &tx,
+                id,
+                replacement,
+                &HashSet::new(),
+                key.as_deref(),
+            )?;
+            Self::validate_dependency_cycle(&tx, id, replacement, key.as_deref())?;
         }
         if next_status_value == TaskStatus::Done && cur_status != "done" {
             let resulting_deps = match (&requested_deps, changes.clear_deps) {
@@ -2337,7 +2487,13 @@ impl Store {
                 (None, true) => &[],
                 (None, false) => current_deps.as_slice(),
             };
-            Self::refuse_done_with_open_prerequisites(&tx, id, resulting_deps, &project_id)?;
+            Self::refuse_done_with_open_prerequisites(
+                &tx,
+                id,
+                resulting_deps,
+                &project_id,
+                key.as_deref(),
+            )?;
         }
         tx.execute(
             "UPDATE tasks
@@ -2407,7 +2563,9 @@ impl Store {
         id: u64,
         deps: &[u64],
         project_id: &Uuid,
+        key: Option<&str>,
     ) -> Result<(), AppError> {
+        let rid = |id: u64| render_keyed_task_id(key, id);
         let mut statement = tx.prepare_cached("SELECT status FROM tasks WHERE id=?1")?;
         let mut open = Vec::new();
         for dep in deps {
@@ -2421,16 +2579,17 @@ impl Store {
         }
         let listed = open
             .iter()
-            .map(|(dep, status)| format!("{} ({status})", render_task_id(*dep)))
+            .map(|(dep, status)| format!("{} ({status})", rid(*dep)))
             .collect::<Vec<_>>()
             .join(", ");
         Err(AppError::OpenPrerequisites {
             task: id,
             message: format!(
                 "update {}: cannot mark done while prerequisites are not done or cancelled: {listed}; complete or cancel them first, in dependency order (project {project_id})",
-                render_task_id(id)
+                rid(id)
             ),
             prerequisites: open,
+            key: key.map(str::to_owned),
         })
     }
 
@@ -2646,8 +2805,19 @@ impl Store {
         }
         for item in &parsed {
             for task in &item.tasks {
-                Self::validate_task_dependencies_exist(&tx, task.id, &task.deps, &known)?;
-                Self::validate_dependency_cycle(&tx, task.id, &task.deps)?;
+                Self::validate_task_dependencies_exist(
+                    &tx,
+                    task.id,
+                    &task.deps,
+                    &known,
+                    self.project_key.as_deref(),
+                )?;
+                Self::validate_dependency_cycle(
+                    &tx,
+                    task.id,
+                    &task.deps,
+                    self.project_key.as_deref(),
+                )?;
                 Self::replace_dependencies(&tx, task.id, &task.deps)?;
                 crate::labels::replace(
                     &tx,
@@ -2790,13 +2960,13 @@ impl Store {
             if let Some(list) = sections.remove(status) {
                 out_text.push_str(&format!("## {status}\n\n"));
                 for (id, title, body, deps, version) in list {
-                    out_text.push_str(&format!("### {ID_PREFIX}{id:03} {title}\n"));
+                    out_text.push_str(&format!("### {} {title}\n", self.display_id(id)));
                     out_text.push_str(&format!("Status: {status}\n"));
                     out_text.push_str(&format!("Version: {version}\n"));
                     out_text.push_str(&format!(
                         "Depends on: {}\n",
                         deps.iter()
-                            .map(|dep| format!("{ID_PREFIX}{dep:03}"))
+                            .map(|dep| self.display_id(*dep))
                             .collect::<Vec<_>>()
                             .join(", ")
                     ));
@@ -2889,6 +3059,9 @@ impl Store {
             }
             if current < 5 {
                 migrate_v4_to_v5(&tx)?;
+            }
+            if current < 6 {
+                migrate_v5_to_v6(&tx)?;
             }
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;

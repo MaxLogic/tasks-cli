@@ -22,12 +22,63 @@ fn string_arg(path: &Path) -> String {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
+    let mut args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    // Apply runs need a key per new project. These tests are about other
+    // behavior, so give every ledger directory under the scan root a key
+    // unless the test passes its own --key-map; tests/project_keys.rs covers
+    // missing and conflicting keys.
+    if args.iter().any(|arg| arg == "--apply") && !args.iter().any(|arg| arg == "--key-map") {
+        if let Some(position) = args.iter().position(|arg| arg == "--scan-root") {
+            let scan_root = Path::new(&args[position + 1]).to_path_buf();
+            let key_map = scan_root
+                .parent()
+                .unwrap_or(&scan_root)
+                .join(format!("generated-keys-{}.json", std::process::id()));
+            write_generated_key_map(&scan_root, &key_map);
+            args.push("--key-map".to_string());
+            args.push(string_arg(&key_map));
+        }
+    }
     Command::new(env!("CARGO_BIN_EXE_tasks"))
-        .args(args)
+        .args(&args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
         .output()
         .expect("tasks executable")
+}
+
+/// Maps every directory holding a ledger below `scan_root` to a distinct key.
+fn write_generated_key_map(scan_root: &Path, key_map: &Path) {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut has_ledger = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                walk(&path, out);
+            } else if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("TASKS.md" | "TASKS.ARCHIVE.md")
+            ) {
+                has_ledger = true;
+            }
+        }
+        if has_ledger {
+            out.push(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()));
+        }
+    }
+    let mut dirs = Vec::new();
+    walk(scan_root, &mut dirs);
+    let mut map = serde_json::Map::new();
+    for (index, dir) in dirs.iter().enumerate() {
+        map.insert(string_arg(dir), Value::String(format!("K{index}")));
+    }
+    write(key_map, &Value::Object(map).to_string());
 }
 
 fn candidates(report_dir: &Path) -> Vec<Value> {
@@ -951,6 +1002,12 @@ fn verification_failure_leaves_the_sources_in_place() {
         .arg(string_arg(&report_dir))
         .args(["--apply", "--quarantine-dir"])
         .arg(string_arg(&quarantine))
+        .arg("--key-map")
+        .arg({
+            let key_map = root.join("keys.json");
+            write_generated_key_map(&corpus, &key_map);
+            string_arg(&key_map)
+        })
         .current_dir(&manifest_dir)
         .env("TASKS_TEST_BULK_FAIL_VERIFY", "1")
         .env_remove("TASKS_WINDOWS_EXE")
@@ -1512,6 +1569,8 @@ fn seed_data_root(data_root: &Path) -> String {
         "init",
         "--root",
         &string_arg(&seed),
+        "--key",
+        "SEED",
     ]);
     assert!(
         output.status.success(),

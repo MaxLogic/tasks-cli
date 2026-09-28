@@ -100,10 +100,16 @@ class TaskDetailController extends ChangeNotifier {
   /// The task the user last selected, including while its detail loads.
   int? get taskId => _taskId;
 
+  /// The project's key as last reported by a task page or a loaded detail,
+  /// so a task that is still loading is already named `KEY-N`.
+  String? projectKey;
+
   /// Canonical form of [taskId], or null when nothing is selected.
   String? get canonicalTaskId {
     final id = _taskId;
-    return id == null ? null : viewerCanonicalTaskId(id);
+    return id == null
+        ? null
+        : viewerCanonicalTaskId(id, _detail?.projectKey ?? projectKey);
   }
 
   TaskDetail? get detail => _detail;
@@ -266,6 +272,7 @@ class TaskDetailController extends ChangeNotifier {
         return;
       }
       _detail = detail;
+      projectKey = detail.projectKey;
       _loading = false;
       _loadError = null;
       _recomputeMatches();

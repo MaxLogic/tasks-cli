@@ -508,9 +508,11 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   Future<void> offerDraftRestore(ViewerRecoveryDraft draft) async {
     final editor = _editor;
     final current = widget.model.detail?.detail;
-    if (current == null || current.canonicalId != draft.taskId) {
+    if (current == null || viewerCanonicalTaskId(current.id) != draft.taskId) {
       return;
     }
+    // Drafts keep the T-N identity; people see the keyed display form.
+    final shown = current.canonicalId;
     final TaskEditFields baseFields;
     final TaskEditFields draftFields;
     try {
@@ -519,7 +521,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     } on FormatException catch (error) {
       await editor.discardRecoveryDraft(draft);
       widget.api.announce(
-        'The saved draft for ${draft.taskId} could not be read and was '
+        'The saved draft for $shown could not be read and was '
         'removed: ${error.message}.',
         dynamic: true,
       );
@@ -528,7 +530,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     final decision = await widget.api.showModal<EditorRestoreDecision>(
       CommandScope.restoreDraft,
       (context) => ViewerRestoreDraftDialog(
-        identity: draft.taskId,
+        identity: shown,
         title: current.title,
         baseVersion: draft.baseVersion,
         currentVersion: current.version,
@@ -537,7 +539,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     if (decision != EditorRestoreDecision.restore) {
       await editor.discardRecoveryDraft(draft);
       widget.api.announce(
-        'Discarded the saved draft for ${draft.taskId}.',
+        'Discarded the saved draft for $shown.',
         clipId: 'draft_discarded',
       );
       return;
@@ -553,7 +555,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     // The draft stays on disk until the restored form is saved or discarded.
     editor.settleRecoveryDraft(draft);
     widget.api.announce(
-      'Restored the saved draft for ${draft.taskId}. Check the fields, then '
+      'Restored the saved draft for $shown. Check the fields, then '
       'save.',
       clipId: 'draft_restored',
     );

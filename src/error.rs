@@ -35,6 +35,8 @@ pub enum AppError {
         task: u64,
         prerequisites: Vec<(u64, String)>,
         message: String,
+        /// The project key, so JSON can carry each ID's display form.
+        key: Option<String>,
     },
     #[error("registry: {0}")]
     Registry(String),
@@ -175,16 +177,24 @@ impl AppError {
         if let Self::OpenPrerequisites {
             task,
             prerequisites,
+            key,
             ..
         } = self
         {
+            let display = |id: u64| crate::model::render_keyed_task_id(key.as_deref(), id);
             let items = prerequisites
                 .iter()
-                .map(|(id, status)| serde_json::json!({"id": id, "status": status}))
+                .map(|(id, status)| {
+                    serde_json::json!({"id": id, "display_id": display(*id), "status": status})
+                })
                 .collect::<Vec<_>>();
             error.insert(
                 "open_prerequisites".to_string(),
-                serde_json::json!({"task": task, "prerequisites": items}),
+                serde_json::json!({
+                    "task": task,
+                    "task_display_id": display(*task),
+                    "prerequisites": items
+                }),
             );
         }
         serde_json::json!({"schema_version": 1, "error": error}).to_string()

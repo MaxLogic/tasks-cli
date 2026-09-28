@@ -44,6 +44,15 @@ pub enum Command {
         /// Directory to bind; receives a .tasks.json identity file.
         #[arg(long)]
         root: PathBuf,
+        /// Project key for task IDs (KEY-N): 2-6 letters/digits, starting with a letter.
+        #[arg(long, value_parser = project_key_arg)]
+        key: String,
+    },
+    /// Print the project key, or change it with --set.
+    ProjectKey {
+        /// New key (2-6 letters/digits, starting with a letter); must be unused in the data root.
+        #[arg(long, value_parser = project_key_arg)]
+        set: Option<String>,
     },
     /// Bind another root directory to an existing project.
     Bind {
@@ -117,7 +126,7 @@ pub enum Command {
     EnrichClipboard,
     /// Show one or more tasks in full; rules only with --rules.
     Show {
-        /// Task IDs (T-N), shown in the given order.
+        /// Task IDs (KEY-N, T-N or N), shown in the given order.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<String>,
         /// Also print the shared project rules, once.
@@ -141,7 +150,7 @@ pub enum Command {
         /// Initial status (default draft).
         #[arg(long)]
         status: Option<TaskStatus>,
-        /// Comma-separated prerequisite IDs (T-1,T-2).
+        /// Comma-separated prerequisite IDs (KEY-1,T-2,3).
         #[arg(long)]
         deps: Option<String>,
         /// Create with no dependencies.
@@ -165,7 +174,7 @@ pub enum Command {
         /// Remove these comma-separated labels, keeping the others.
         #[arg(long)]
         remove_label: Option<String>,
-        /// Task ID (T-N).
+        /// Task ID (KEY-N, T-N or N).
         id: String,
         /// Version from list/show; the update fails if it changed.
         #[arg(long = "expect-version")]
@@ -188,7 +197,7 @@ pub enum Command {
     },
     /// Page through a task's change events, with changed fields per event.
     History {
-        /// Task ID (T-N).
+        /// Task ID (KEY-N, T-N or N).
         id: String,
         /// Resume after this event ID (next_after).
         #[arg(long)]
@@ -256,6 +265,9 @@ pub enum Command {
         /// Source ledger dialect.
         #[arg(long = "source-schema", value_enum, default_value = "canonical")]
         source_schema: SourceSchema,
+        /// JSON object mapping each new project root to its key; required by --apply.
+        #[arg(long = "key-map")]
+        key_map: Option<PathBuf>,
     },
     /// Write a consistent SQLite backup.
     Backup {
@@ -296,7 +308,7 @@ pub enum ViewerCommand {
     },
     /// Return the full task detail plus created_ms and updated_ms.
     Show {
-        /// Task ID (T-N).
+        /// Task ID (KEY-N, T-N or N).
         id: String,
     },
     /// Apply one version-checked update over the six editable fields.
@@ -322,25 +334,8 @@ pub enum RulesCommand {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct ParsedDeps(pub Vec<u64>);
-
-impl ParsedDeps {
-    pub fn parse(input: &str) -> Result<Self, String> {
-        let items: Vec<u64> = if input.trim().is_empty() {
-            Vec::new()
-        } else {
-            input
-                .split(',')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| {
-                    crate::model::parse_task_id(s.trim())
-                        .map_err(|error| format!("--deps item '{s}': {error}"))
-                })
-                .collect::<Result<_, _>>()?
-        };
-        Ok(Self(items))
-    }
+fn project_key_arg(value: &str) -> Result<String, String> {
+    crate::model::parse_project_key(value)
 }
 
 #[cfg(test)]
@@ -349,9 +344,15 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn dependency_parser_requires_task_ids() {
-        assert_eq!(ParsedDeps::parse("T-1,T-002").unwrap().0, vec![1, 2]);
-        assert!(ParsedDeps::parse("1").is_err());
+    fn init_requires_a_valid_key_and_uppercases_it() {
+        assert!(Cli::try_parse_from(["tasks", "init", "--root", "x"]).is_err());
+        assert!(Cli::try_parse_from(["tasks", "init", "--root", "x", "--key", "1AB"]).is_err());
+        assert!(Cli::try_parse_from(["tasks", "init", "--root", "x", "--key", "T"]).is_err());
+        let cli = Cli::try_parse_from(["tasks", "init", "--root", "x", "--key", "dak"]).unwrap();
+        match cli.command {
+            Command::Init { key, .. } => assert_eq!(key, "DAK"),
+            other => panic!("unexpected command {other:?}"),
+        }
     }
 
     #[test]

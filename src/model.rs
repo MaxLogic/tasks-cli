@@ -279,6 +279,9 @@ pub struct TaskSummary {
     #[serde(default)]
     pub priority: Priority,
     pub id: u64,
+    /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
+    #[serde(default)]
+    pub display_id: String,
     pub status: TaskStatus,
     pub version: u64,
     pub title: String,
@@ -292,6 +295,9 @@ pub struct TaskDetail {
     #[serde(default)]
     pub priority: Priority,
     pub id: u64,
+    /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
+    #[serde(default)]
+    pub display_id: String,
     pub status: TaskStatus,
     pub version: u64,
     pub title: String,
@@ -310,6 +316,8 @@ pub struct TaskDetail {
 pub struct ShowTask {
     pub priority: Priority,
     pub id: u64,
+    /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
+    pub display_id: String,
     pub status: TaskStatus,
     pub version: u64,
     pub title: String,
@@ -321,6 +329,9 @@ pub struct ShowTask {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencySummary {
     pub id: u64,
+    /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
+    #[serde(default)]
+    pub display_id: String,
     pub status: TaskStatus,
     pub version: u64,
     pub title: String,
@@ -469,6 +480,126 @@ pub fn render_task_id(id: u64) -> String {
     format!("{ID_PREFIX}{id:03}")
 }
 
+/// Display form of a task ID: `KEY-001` for a keyed project, `T-001` otherwise.
+pub fn render_keyed_task_id(key: Option<&str>, id: u64) -> String {
+    format!("{}-{id:03}", key.unwrap_or("T"))
+}
+
+/// Legacy prefix; `T` is never a project key.
+pub const LEGACY_KEY: &str = "T";
+pub const PROJECT_KEY_MIN_CHARS: usize = 2;
+pub const PROJECT_KEY_MAX_CHARS: usize = 6;
+
+/// Validates a project key and returns it uppercased: 2-6 ASCII letters and
+/// digits, starting with a letter. Input is case-insensitive; `T` is reserved
+/// for the legacy `T-N` form.
+pub fn parse_project_key(input: &str) -> Result<String, String> {
+    let key = input.trim().to_ascii_uppercase();
+    // `T12` would read like the legacy `T12`/`T-12` spelling of task 12.
+    if key == LEGACY_KEY
+        || (key.len() > 1
+            && key.starts_with(LEGACY_KEY)
+            && key[1..].bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(format!(
+            "invalid project key '{input}': T and T followed by digits are reserved for legacy T-N task IDs; choose 2-6 letters or digits such as DAK"
+        ));
+    }
+    let len = key.chars().count();
+    if !(PROJECT_KEY_MIN_CHARS..=PROJECT_KEY_MAX_CHARS).contains(&len) {
+        return Err(format!(
+            "invalid project key '{input}': a key has {PROJECT_KEY_MIN_CHARS}-{PROJECT_KEY_MAX_CHARS} characters, found {len}; choose one such as DAK"
+        ));
+    }
+    if !key.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return Err(format!(
+            "invalid project key '{input}': a key starts with a letter A-Z"
+        ));
+    }
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid project key '{input}': a key uses only ASCII letters A-Z and digits 0-9"
+        ));
+    }
+    Ok(key)
+}
+
+/// A task reference as typed by a user: `KEY-N`, `T-N` or bare `N`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRef {
+    /// Uppercased project key; `None` for `T-N` and bare `N`.
+    pub key: Option<String>,
+    pub id: u64,
+}
+
+impl TaskRef {
+    /// The numeric ID when the reference belongs to a project with `own_key`;
+    /// otherwise the foreign key it names.
+    pub fn resolve(&self, own_key: Option<&str>) -> Result<u64, String> {
+        match self.key.as_deref() {
+            None => Ok(self.id),
+            Some(key) if Some(key) == own_key => Ok(self.id),
+            Some(key) => Err(key.to_string()),
+        }
+    }
+}
+
+/// Parses `KEY-N`, `T-N` or `N` case-insensitively. A key part must be a
+/// syntactically valid project key; whether it is this project's key is
+/// decided by the caller.
+pub fn parse_task_ref(input: &str) -> Result<TaskRef, String> {
+    let value = input.trim();
+    let invalid =
+        || format!("invalid task id '{input}': expected KEY-<digits>, T-<digits> or <digits>");
+    let number = |digits: &str| -> Result<u64, String> {
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        digits.parse::<u64>().map_err(|_| invalid())
+    };
+    match value.split_once('-') {
+        None => Ok(TaskRef {
+            key: None,
+            id: number(value)?,
+        }),
+        Some((prefix, digits)) => {
+            let id = number(digits)?;
+            if prefix.eq_ignore_ascii_case(LEGACY_KEY) {
+                return Ok(TaskRef { key: None, id });
+            }
+            let key = parse_project_key(prefix).map_err(|_| invalid())?;
+            Ok(TaskRef { key: Some(key), id })
+        }
+    }
+}
+
+/// Parses `KEY-N` for exactly `key` (case-insensitive) or legacy `T-N`, the
+/// forms a ledger heading or dependency list may use for the target project.
+pub fn parse_ledger_task_id(input: &str, key: Option<&str>) -> Result<u64, String> {
+    if let Ok(id) = parse_task_id(input) {
+        return Ok(id);
+    }
+    if let Some(key) = key {
+        if let Some((prefix, digits)) = input.trim().split_once('-') {
+            if prefix.eq_ignore_ascii_case(key)
+                && !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                if let Ok(id) = digits.parse::<u64>() {
+                    return Ok(id);
+                }
+            }
+        }
+        return Err(format!(
+            "invalid task id '{input}': expected {key}-<digits> or T-<digits>"
+        ));
+    }
+    parse_task_id(input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +611,60 @@ mod tests {
         assert_eq!(render_task_id(1), "T-001");
         assert!(parse_task_id("1").is_err());
         assert!(parse_task_id("T-").is_err());
+    }
+
+    #[test]
+    fn project_keys_are_validated_and_uppercased() {
+        assert_eq!(parse_project_key("dak").as_deref(), Ok("DAK"));
+        assert_eq!(parse_project_key("A11Y").as_deref(), Ok("A11Y"));
+        assert_eq!(parse_project_key("ab").as_deref(), Ok("AB"));
+        assert_eq!(parse_project_key("abcdef").as_deref(), Ok("ABCDEF"));
+        for bad in ["", "A", "ABCDEFG", "1AB", "A-B", "AB_", "ÄBC", "T", "t"] {
+            assert!(parse_project_key(bad).is_err(), "{bad} accepted");
+        }
+        assert!(parse_project_key("T").unwrap_err().contains("reserved"));
+        assert!(parse_project_key("1AB").unwrap_err().contains("letter"));
+        assert!(parse_project_key("ABCDEFG").unwrap_err().contains("2-6"));
+    }
+
+    #[test]
+    fn task_refs_accept_key_legacy_and_bare_forms() {
+        let keyed = parse_task_ref("dak-012").unwrap();
+        assert_eq!(keyed.key.as_deref(), Some("DAK"));
+        assert_eq!(keyed.id, 12);
+        assert_eq!(parse_task_ref("T-7").unwrap(), TaskRef { key: None, id: 7 });
+        assert_eq!(
+            parse_task_ref("t-007").unwrap(),
+            TaskRef { key: None, id: 7 }
+        );
+        assert_eq!(parse_task_ref("42").unwrap(), TaskRef { key: None, id: 42 });
+        for bad in [
+            "",
+            "DAK-",
+            "DAK-x",
+            "1AB-3",
+            "ABCDEFG-1",
+            "-5",
+            "+5",
+            "T-+5",
+        ] {
+            assert!(parse_task_ref(bad).is_err(), "{bad} accepted");
+        }
+        assert_eq!(keyed.resolve(Some("DAK")), Ok(12));
+        assert_eq!(keyed.resolve(Some("DS")), Err("DAK".to_string()));
+        assert_eq!(keyed.resolve(None), Err("DAK".to_string()));
+        assert_eq!(render_keyed_task_id(Some("DAK"), 12), "DAK-012");
+        assert_eq!(render_keyed_task_id(None, 12000), "T-12000");
+    }
+
+    #[test]
+    fn ledger_ids_accept_only_the_target_key() {
+        assert_eq!(parse_ledger_task_id("DAK-5", Some("DAK")), Ok(5));
+        assert_eq!(parse_ledger_task_id("dak-5", Some("DAK")), Ok(5));
+        assert_eq!(parse_ledger_task_id("T-5", Some("DAK")), Ok(5));
+        assert!(parse_ledger_task_id("DS-5", Some("DAK")).is_err());
+        assert!(parse_ledger_task_id("DAK-5", None).is_err());
+        assert!(parse_ledger_task_id("5", Some("DAK")).is_err());
     }
 
     #[test]

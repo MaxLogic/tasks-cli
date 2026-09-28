@@ -86,3 +86,50 @@ accept `T-N` in old text, never rewrite old notes just to change IDs.
 
 Cross-project dependencies, cross-project `show`/`update`, renumbering tasks,
 rewriting existing notes.
+
+## Implementation decisions
+
+Recorded during implementation, 2026-09-27. spec.md "Project keys" is the
+contract; these are the choices the issue left open.
+
+- Display IDs keep the three-digit padding: `DAK-007`, like `T-007`.
+- JSON adds `display_id` next to each numeric `id` (and `task_display_id` in
+  `open_prerequisites`); `deps` arrays stay numeric. List `next_after`
+  cursors keep the `P2:T-123` form.
+- A `KEY-N` whose key no project has exits 3 as well, saying so.
+- `enrich` leaves a `KEY-N` with an unknown key unchanged and unreported
+  (`UTF-8`, `ISO-8601`); JSON gains `unknown_refs` for all unknown references.
+- Import accepts `### KEY-N` and `Depends on: KEY-N` only for the target
+  key; a `### OTHER-N` heading is a blocking problem, and the create-task
+  `Deps:` grammar stays `T-N`. Import problem messages keep the ledger's
+  `T-N` wording.
+- `--key-map` is a JSON object from project root (absolute or relative to
+  `--scan-root`) to key. Only projects the run would create need an entry.
+- Re-running `init` on a bound root must repeat its existing key; it never
+  changes one.
+- Opening every project database costs about 6 ms each on Windows, so a
+  fingerprint-validated cache `<data-root>/project-keys.json` backs reference
+  lookups (evidence: target/evidence/project-keys/perf/).
+- Key cache: kept (user decision 2026-09-28). Uniqueness checks (init, project-key --set, bulk apply) bypass the cache and read every project database directly; the cache serves only enrich and foreign-key lookups.
+- List cursors keep the P2:T-123 form (user decision 2026-09-28).
+- `T` followed only by digits (`T12`) is never a key: it would read like the
+  legacy `T12` spelling. The parser and the schema CHECK both refuse it.
+- A `### KEY-N` heading is reported as another project's task only when a
+  project in the data root owns that key; `### ISO-8601 dates` stays text.
+- Recovery drafts keep the `T-N` identity and are matched by project and
+  numeric ID, so a key (or a key change) never orphans them.
+
+## Follow-ups from review
+
+Recorded during the implementation review, 2026-09-28; not part of this change.
+
+- Read-only opens leave an empty `-wal`/`-shm` behind, which raises every
+  later read-only open on Windows from about 1 ms to 6.5 ms; `show` also pays
+  it (14.7 vs 20.3 ms). This predates the slice. A fix must not break the
+  guarantee that a bulk-import dry run leaves the data root byte-identical,
+  because a read-write close can checkpoint.
+- The enrich key-shaped regex matches UTF-8, SHA-256 and similar words, which
+  triggers a scan on ordinary prose (cheap with the cache).
+- The editor keeps the old key until the task is reloaded after a key change.
+- The default `flutter test` real-CLI cases and the verify-windows.ps1
+  ALPHA-001 fixtures need the installed build.

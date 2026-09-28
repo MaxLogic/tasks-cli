@@ -82,6 +82,56 @@ void main() {
     expect(detail.updatedMs, 1700000001000);
   });
 
+  test('a keyed show document decodes the key and display IDs', () {
+    final document = showDocument(body: 'Body\n');
+    final data = document['data']! as Map<String, Object?>;
+    data['project_key'] = 'DAK';
+    data['display_id'] = 'DAK-007';
+    for (final summary in data['dependency_summaries']! as List<Object?>) {
+      final row = summary! as Map<String, Object?>;
+      row['display_id'] =
+          'DAK-${(row['id']! as int).toString().padLeft(3, '0')}';
+    }
+    final detail = decodeDetail(document);
+
+    expect(detail.projectKey, 'DAK');
+    expect(detail.canonicalId, 'DAK-007');
+    expect(
+      detail.dependencySummaries.map((summary) => summary.canonicalId),
+      <String>['DAK-005', 'DAK-006'],
+    );
+    expect(viewerCanonicalTaskId(12, 'DAK'), 'DAK-012');
+    expect(viewerCanonicalTaskId(12000), 'T-12000');
+  });
+
+  test('a task row prefers the display ID and keeps T-N without one', () {
+    TaskItem row(Map<String, Object?> extra) =>
+        TaskItem.fromJson(<String, Object?>{
+          'id': 7,
+          'title': 'Row',
+          'status': 'todo',
+          'priority': 'P2',
+          'version': 1,
+          'labels': <String>[],
+          'dependency_count': 0,
+          'waiting_dependency_count': 0,
+          'verifying_dependency_count': 0,
+          'created_ms': 1,
+          'updated_ms': 2,
+          ...extra,
+        }, path: r'$.data.items[0]');
+
+    expect(
+      row(<String, Object?>{'display_id': 'DAK-007'}).canonicalId,
+      'DAK-007',
+    );
+    expect(row(<String, Object?>{}).canonicalId, 'T-007');
+    expect(
+      () => row(<String, Object?>{'display_id': 7}),
+      throwsA(isA<ViewerMalformedResponseFailure>()),
+    );
+  });
+
   test('a 1 MiB body decodes without truncation', () {
     final source = StringBuffer();
     var line = 0;

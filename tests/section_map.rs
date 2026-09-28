@@ -23,6 +23,8 @@ fn init_project(work: &std::path::Path) -> String {
         "init",
         "--root",
         root.to_str().expect("UTF-8 project root"),
+        "--key",
+        "SM",
     ]);
     assert!(
         init.status.success(),

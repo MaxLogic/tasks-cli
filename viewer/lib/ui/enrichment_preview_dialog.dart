@@ -72,7 +72,7 @@ class _ViewerEnrichmentPreviewDialogState
     final preview = widget.preview;
     final theme = Theme.of(context);
     final size = MediaQuery.sizeOf(context);
-    final unknown = preview.enrichment.unknownIds;
+    final unknown = preview.enrichment.unknownLabels(preview.projectKey);
     return DialogCommandHost(
       scope: CommandScope.enrichmentPreview,
       onCommand: _onCommand,

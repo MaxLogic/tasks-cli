@@ -801,8 +801,9 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       group: HelpGroup.details,
       label: 'Copy reference',
       description:
-          'Copy "T-042: Full title" as plain text. Existing clipboard text is '
-          'never enriched implicitly.',
+          'Copy the task ID and full title as plain text, for example '
+          '"DAK-042: Full title". Existing clipboard text is never enriched '
+          'implicitly.',
       activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyC)],
     ),
     CommandSpec(

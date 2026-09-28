@@ -272,6 +272,8 @@ fn single_file_import_preview_reports_a_non_empty_store_and_rules() {
             string_arg("init"),
             string_arg("--root"),
             string_arg(&project_root),
+            string_arg("--key"),
+            string_arg(if name == "project-tasks" { "PT" } else { "PR" }),
         ]);
         assert!(
             output.status.success(),
@@ -447,6 +449,12 @@ fn a_corpus_that_passes_the_dry_run_applies_and_verifies() {
         string_arg("--apply"),
         string_arg("--quarantine-dir"),
         string_arg(&quarantine),
+        string_arg("--key-map"),
+        {
+            let key_map = root.join("keys.json");
+            write(&key_map, "{\"alpha\":\"ALPHA\"}");
+            string_arg(&key_map)
+        },
     ]);
     assert_eq!(
         output.status.code(),

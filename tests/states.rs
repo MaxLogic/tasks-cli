@@ -37,7 +37,7 @@ fn genuine_v1_migration_preserves_records_and_legacy_history_bytes() {
     assert!(Store::open_readonly(root.path(), &id.to_string()).is_err());
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (1, 5));
+    assert_eq!((from, to), (1, 6));
     let backup = backup.unwrap();
     assert_ne!(backup, prior_backup);
     assert_eq!(
@@ -57,7 +57,11 @@ fn genuine_v1_migration_preserves_records_and_legacy_history_bytes() {
         "ok"
     );
     for (table, columns, order) in [
-        ("project", "*", "project_id"),
+        (
+            "project",
+            "project_id,rules_markdown,rules_version,next_task_number",
+            "project_id",
+        ),
         ("tasks", "id,title,body,version,created_ms,updated_ms", "id"),
         ("dependencies", "*", "task_id"),
         ("events", "*", "event_id"),
@@ -80,7 +84,7 @@ fn genuine_v1_migration_preserves_records_and_legacy_history_bytes() {
     }
     assert_eq!(store.show_task("T-7").unwrap().status.to_string(), "draft");
     assert_eq!(store.show_task("T-9").unwrap().status.to_string(), "todo");
-    assert_eq!(store.doctor().unwrap().2, 5);
+    assert_eq!(store.doctor().unwrap().2, 6);
     assert!(store
         .conn
         .execute("UPDATE tasks SET status='backlog' WHERE id=7", [])
@@ -94,7 +98,7 @@ fn genuine_v1_migration_preserves_records_and_legacy_history_bytes() {
         .query_row("SELECT MAX(event_id) FROM events", [], |r| r.get(0))
         .unwrap();
     assert_eq!(event, 18);
-    assert_eq!(store.migrate().unwrap(), (5, 5, None));
+    assert_eq!(store.migrate().unwrap(), (6, 6, None));
 }
 
 #[test]

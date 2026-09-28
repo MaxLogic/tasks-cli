@@ -20,7 +20,7 @@ fn schema_two_migration_indexes_existing_content_and_preserves_history() {
     drop(conn);
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (2, 5));
+    assert_eq!((from, to), (2, 6));
     let old = Connection::open(backup.unwrap()).unwrap();
     assert_eq!(
         old.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
@@ -74,5 +74,5 @@ fn schema_two_migration_indexes_existing_content_and_preserves_history() {
             .len(),
         1
     );
-    assert_eq!(store.migrate().unwrap(), (5, 5, None));
+    assert_eq!(store.migrate().unwrap(), (6, 6, None));
 }

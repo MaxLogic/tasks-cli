@@ -753,7 +753,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
             style: theme.textTheme.bodySmall,
           )
         else ...<Widget>[
-          Text(item.name, style: theme.textTheme.bodyMedium),
+          Text(item.displayName, style: theme.textTheme.bodyMedium),
           const SizedBox(height: ViewerSpace.xs),
           SelectionArea(
             child: Table(
@@ -762,6 +762,8 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 1: FlexColumnWidth(),
               },
               children: <TableRow>[
+                if (item.projectKey != null)
+                  _summaryRow(context, 'Key', item.projectKey!),
                 _summaryRow(
                   context,
                   'Counts',
@@ -982,7 +984,7 @@ class _ProjectRowTile extends StatelessWidget {
                         children: <Widget>[
                           Expanded(
                             child: Text(
-                              item.name,
+                              item.displayName,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.bodyMedium,

@@ -313,8 +313,9 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
                       field: EditorField.deps,
                       label: 'Dependencies (Alt+D)',
                       helper:
-                          'Comma-separated T-IDs in this project, at most '
-                          '1000. Empty clears every dependency.',
+                          'Comma-separated task IDs in this project '
+                          '(${viewerDependencyForms(widget.editor.projectKey)}), '
+                          'at most 1000. Empty clears every dependency.',
                     ),
                     const SizedBox(height: 12),
                     _buildTextField(

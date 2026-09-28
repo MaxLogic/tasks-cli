@@ -1,13 +1,11 @@
 use clap::{error::ErrorKind, Parser};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tasks_cli::cli::{Cli, Command, OutputFormat, ParsedDeps, RulesCommand, ViewerCommand};
+use tasks_cli::cli::{Cli, Command, OutputFormat, RulesCommand, ViewerCommand};
 use tasks_cli::error::AppError;
 use tasks_cli::interop;
 use tasks_cli::markdown;
-use tasks_cli::model::{
-    parse_task_id, ImportProblem, ImportReport, ProblemCounts, TaskStatus, TaskUpdate,
-};
+use tasks_cli::model::{ImportProblem, ImportReport, ProblemCounts, TaskStatus, TaskUpdate};
 use tasks_cli::output::{CommandPayload, Envelope, ImportFileReport, ShowPayload};
 use tasks_cli::registry;
 use tasks_cli::store::Store;
@@ -61,10 +59,21 @@ fn resolved_project(cli: &Cli, data_root: &Path) -> Result<String, AppError> {
 }
 
 fn envelope(project_id: Option<String>, data: CommandPayload, format: OutputFormat) {
+    keyed_envelope(project_id, None, data, format)
+}
+
+/// Prints a payload whose text form renders task IDs with the project key.
+fn keyed_envelope(
+    project_id: Option<String>,
+    id_key: Option<&str>,
+    data: CommandPayload,
+    format: OutputFormat,
+) {
     let value = Envelope {
         schema_version: 1,
         project_id,
         data,
+        id_key: id_key.map(str::to_owned),
     };
     match format {
         OutputFormat::Json => println!("{}", value.json()),
@@ -192,7 +201,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     }
     let data_root = resolved_root(&cli)?;
     match &cli.command {
-        Command::Init { root } => {
+        Command::Init { root, key } => {
             let mut explicit_project = cli
                 .project
                 .as_deref()
@@ -217,16 +226,40 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     explicit_project = Some(identity_project);
                 }
             }
-            let info = registry::init_root(&data_root, root, explicit_project)?;
+            let info = registry::init_root(&data_root, root, explicit_project, Some(key))?;
             registry::write_project_identity(root, &info.project_id)?;
             envelope(
                 Some(info.project_id.to_string()),
                 CommandPayload::Init {
                     project_id: info.project_id.to_string(),
+                    project_key: info.project_key.clone(),
                     db_path: info.db_path.display().to_string(),
                 },
                 cli.format,
             );
+        }
+        Command::ProjectKey { set } => {
+            let project_id = resolved_project(&cli, &data_root)?;
+            let payload = match set {
+                None => CommandPayload::ProjectKey {
+                    project_key: Store::open_readonly(&data_root, &project_id)?.project_key,
+                    previous_key: None,
+                },
+                Some(key) => {
+                    // Check and write under the registry lock, like init, so two
+                    // projects can never claim one key.
+                    let previous = registry::with_registry_lock(&data_root, |root| {
+                        let mut store = Store::open_rw(root, &project_id)?;
+                        tasks_cli::keys::ensure_available(root, key, Some(&store.project_id))?;
+                        store.set_project_key(key)
+                    })?;
+                    CommandPayload::ProjectKey {
+                        project_key: Some(key.clone()),
+                        previous_key: Some(previous),
+                    }
+                }
+            };
+            envelope(Some(project_id), payload, cli.format);
         }
         Command::Bind { root, project } => {
             let project_id = registry::bind_root(&data_root, root, Some(project.clone()))?;
@@ -249,7 +282,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         } => {
             let project_id = resolved_project(&cli, &data_root)?;
             let status_text = status.as_ref().map(ToString::to_string);
-            let page = Store::open_readonly(&data_root, &project_id)?.select_tasks(
+            let mut store = Store::open_readonly(&data_root, &project_id)?;
+            let page = store.select_tasks(
                 status_text.as_deref(),
                 *after,
                 limit.unwrap_or(20),
@@ -257,8 +291,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 *open,
                 *needs_human,
             )?;
-            envelope(
+            keyed_envelope(
                 Some(project_id),
+                store.project_key.as_deref(),
                 CommandPayload::List {
                     items: page.items,
                     has_more: page.has_more,
@@ -269,10 +304,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         }
         Command::Unlocks { offset, limit } => {
             let project_id = resolved_project(&cli, &data_root)?;
-            let page = Store::open_readonly(&data_root, &project_id)?
-                .unlocks(*offset, limit.unwrap_or(20))?;
-            envelope(
+            let mut store = Store::open_readonly(&data_root, &project_id)?;
+            let page = store.unlocks(*offset, limit.unwrap_or(20))?;
+            keyed_envelope(
                 Some(project_id),
+                store.project_key.as_deref(),
                 CommandPayload::Unlocks {
                     items: page.items,
                     has_more: page.has_more,
@@ -318,7 +354,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     next_after: page.next_after,
                 }
             };
-            envelope(Some(project_id), payload, cli.format);
+            keyed_envelope(
+                Some(project_id),
+                store.project_key.as_deref(),
+                payload,
+                cli.format,
+            );
         }
         Command::Enrich { .. } | Command::EnrichClipboard => {
             let project_id = resolved_project(&cli, &data_root)?;
@@ -343,19 +384,22 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             } else {
                 tasks_cli::clipboard::read_text()?
             };
-            let result = tasks_cli::enrich::enrich(&store.conn, &input)?;
+            let result = tasks_cli::enrich::enrich_with(
+                &store.conn,
+                &input,
+                tasks_cli::enrich::EnrichContext {
+                    own_key: store.project_key.as_deref(),
+                    own_project: Some(&store.project_id),
+                    data_root: Some(&store.data_root),
+                },
+            )?;
             if clipboard {
                 tasks_cli::clipboard::replace_text(&input, &result.text)?;
             }
-            if !result.unknown_ids.is_empty() {
+            if !result.unknown_refs.is_empty() {
                 eprintln!(
                     "Unknown task IDs left unchanged: {}",
-                    result
-                        .unknown_ids
-                        .iter()
-                        .map(|id| format!("T-{id}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    result.unknown_refs.join(", ")
                 );
             }
             if cli.format == OutputFormat::Json {
@@ -365,6 +409,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         text: result.text,
                         replacements: result.replacements,
                         unknown_ids: result.unknown_ids,
+                        unknown_refs: result.unknown_refs,
                         clipboard,
                     },
                     cli.format,
@@ -381,8 +426,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         }
         Command::Show { ids, rules } => {
             let project_id = resolved_project(&cli, &data_root)?;
-            let (mut tasks, rules) =
-                Store::open_readonly(&data_root, &project_id)?.show_tasks(ids, *rules)?;
+            let mut store = Store::open_readonly(&data_root, &project_id)?;
+            let (mut tasks, rules) = store.show_tasks(ids, *rules)?;
             let (rule_version, rules) = match rules {
                 Some(record) => (Some(record.version), Some(record.body)),
                 None => (None, None),
@@ -400,7 +445,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     rules,
                 }
             };
-            envelope(Some(project_id), payload, cli.format);
+            keyed_envelope(
+                Some(project_id),
+                store.project_key.as_deref(),
+                payload,
+                cli.format,
+            );
         }
         Command::History {
             id,
@@ -409,13 +459,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             event,
         } => {
             let project_id = resolved_project(&cli, &data_root)?;
-            let id = parse_task_id(id).map_err(AppError::Validation)?;
-            let (page, selected) = Store::open_readonly(&data_root, &project_id)?.history(
-                id,
-                *after,
-                limit.unwrap_or(20),
-                *event,
-            )?;
+            let mut store = Store::open_readonly(&data_root, &project_id)?;
+            let id = store.resolve_ref(id)?;
+            let (page, selected) = store.history(id, *after, limit.unwrap_or(20), *event)?;
             let page = if let Some(event) = selected {
                 tasks_cli::model::Pagination {
                     items: vec![event],
@@ -425,10 +471,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             } else {
                 page
             };
-            envelope(
+            keyed_envelope(
                 Some(project_id),
+                store.project_key.as_deref(),
                 CommandPayload::History {
                     id,
+                    display_id: store.display_id(id),
                     items: page.items,
                     has_more: page.has_more,
                     next_after: page.next_after,
@@ -462,6 +510,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     delete_quarantined,
                     allow_partial,
                     source_schema,
+                    key_map,
                 } => tasks_cli::bulk::BulkOptions {
                     data_root: data_root.clone(),
                     scan_root: scan_root.clone(),
@@ -473,6 +522,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     delete_quarantined: *delete_quarantined,
                     allow_partial: *allow_partial,
                     source_schema: *source_schema,
+                    key_map: key_map.clone(),
                 },
                 _ => unreachable!(),
             };
@@ -527,11 +577,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 } => {
                     let body = read_text(&body_file)?;
                     let deps = deps
-                        .map(|v| {
-                            ParsedDeps::parse(&v)
-                                .map(|p| p.0)
-                                .map_err(AppError::Validation)
-                        })
+                        .map(|v| store.resolve_ref_list(&v))
                         .transpose()?
                         .unwrap_or_default();
                     let deps = if clear_deps { Vec::new() } else { deps };
@@ -548,10 +594,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             .unwrap_or_default(),
                         priority,
                     )?;
-                    envelope(
+                    keyed_envelope(
                         Some(project_id),
+                        store.project_key.as_deref(),
                         CommandPayload::Create {
                             id,
+                            display_id: store.display_id(id),
                             status: status.to_string(),
                             version,
                             event_id,
@@ -573,15 +621,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     deps,
                     clear_deps,
                 } => {
-                    let id = parse_task_id(&id).map_err(AppError::Validation)?;
+                    let id = store.resolve_ref(&id)?;
                     let body = body_file.as_deref().map(read_text).transpose()?;
-                    let deps = deps
-                        .map(|v| {
-                            ParsedDeps::parse(&v)
-                                .map(|p| p.0)
-                                .map_err(AppError::Validation)
-                        })
-                        .transpose()?;
+                    let deps = deps.map(|v| store.resolve_ref_list(&v)).transpose()?;
                     let (id, resulting_status, version, event_id) = store.update_task(
                         id,
                         expect_version,
@@ -604,10 +646,12 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             remove_labels: split_labels(remove_label.as_deref()),
                         },
                     )?;
-                    envelope(
+                    keyed_envelope(
                         Some(project_id),
+                        store.project_key.as_deref(),
                         CommandPayload::Update {
                             id,
+                            display_id: store.display_id(id),
                             status: resulting_status.to_string(),
                             version,
                             event_id,
@@ -652,14 +696,24 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                                 .to_string(),
                         ));
                     }
+                    let id_key = store.project_key.clone();
+                    // Keys of the other projects, so a `### OTHER-N` heading is
+                    // reported while `### ISO-8601 ...` stays text.
+                    let other_keys = tasks_cli::keys::scan_cached(&store.data_root)?
+                        .into_iter()
+                        .filter(|project| project.project_id != store.project_id)
+                        .filter_map(|project| project.key)
+                        .collect::<Vec<_>>();
                     let mut parsed = Vec::with_capacity(files.len());
                     for (index, path) in files.iter().enumerate() {
                         let bytes = read_input(path)?;
-                        let item = markdown::parse_with_schema(
+                        let item = markdown::parse_for_project(
                             path.display().to_string(),
                             bytes,
                             map_file.as_deref(),
                             source_schema,
+                            id_key.as_deref(),
+                            other_keys.clone(),
                         )?;
                         if let Some(expected) = expect_sha256.get(index) {
                             if !expected.eq_ignore_ascii_case(&item.source_hash) {
@@ -713,11 +767,13 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         let mut reparsed = Vec::with_capacity(files.len());
                         for (index, path) in files.iter().enumerate() {
                             let reread = read_input(path)?;
-                            let item = markdown::parse_with_schema(
+                            let item = markdown::parse_for_project(
                                 path.display().to_string(),
                                 reread,
                                 map_file.as_deref(),
                                 source_schema,
+                                id_key.as_deref(),
+                                other_keys.clone(),
                             )?;
                             if !expect_sha256[index].eq_ignore_ascii_case(&item.source_hash) {
                                 return Err(AppError::ShaMismatch {
@@ -731,8 +787,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         markdown::resolve_create_task_deps_across(&mut reparsed);
                         let (reports, already) =
                             store.import_apply_many(reparsed, &expect_sha256)?;
-                        envelope(
+                        keyed_envelope(
                             Some(project_id),
+                            id_key.as_deref(),
                             import_payload(
                                 &files,
                                 reports,
@@ -746,8 +803,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                         return Ok(());
                     }
                     let reports = store.import_preview_many(parsed);
-                    envelope(
+                    keyed_envelope(
                         Some(project_id),
+                        id_key.as_deref(),
                         import_payload(
                             &files,
                             reports,
@@ -802,6 +860,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 | Command::Show { .. }
                 | Command::History { .. }
                 | Command::Init { .. }
+                | Command::ProjectKey { .. }
                 | Command::Bind { .. }
                 | Command::BulkImport { .. }
                 | Command::Viewer(_)
