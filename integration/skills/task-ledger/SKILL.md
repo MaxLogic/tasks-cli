@@ -38,6 +38,19 @@ with native Linux SQLite or propagate a Linux data root into a Windows store.
 Both worktrees use the same UUID even though their paths differ. A project UUID
 does not grant permission to migrate, deploy, or access unrelated projects.
 
+## Task IDs and project keys
+
+Each project has a short key chosen by a person (`DAK`), and the CLI shows task
+IDs as `KEY-N` (`DAK-012`); a project without a key still shows `T-N`. Write
+new references as `KEY-N` so notes, commits and other projects' tasks name
+the project too. Input accepts `KEY-N` with this project's key, `T-N` and a
+bare number, forever, so old text keeps working; never rewrite old notes only
+to change their IDs. A `KEY-N` of another project exits 3 and names that
+project: run the command there, since dependencies stay within one project.
+`enrich` resolves another project's `KEY-N` read-only. `project-key` prints
+the key. `init --key` and `project-key --set` need the key from the user; never
+invent or change one yourself.
+
 ## Read only the needed records
 
 The table omits the `tasks` prefix. Browse with the default text output; add
@@ -51,6 +64,7 @@ differs from this contract. Do not invent a fallback that broadens writes.
 | Every open state, including blocked/human work | `list --open --limit 30` |
 | Human-gated work | `list --needs-human --limit 30` |
 | One explicit lifecycle | `list --status blocked --limit 30` |
+| Group awaiting its batch gate | `list --status to-verify --limit 30` |
 | Label slice | `list --label storage --limit 30` |
 | Complete task/version/dependencies | `show T-012` |
 | Several selected tasks in one read | `show T-012 T-014 T-020` |
@@ -67,7 +81,11 @@ search/history use numeric cursors. Ranked search and unlocks use offsets.
 Do not substitute a single bounded page for "all open tasks". Search
 finds candidates, then `show` retrieves only selected bodies and prerequisites.
 Default list is runnable `todo`/`in-progress` work excluding needs-human tasks;
-it is not the full backlog. Distinguish direct dependents from dependents that
+it is not the full backlog. Statuses: draft, todo, in-progress, to-verify,
+blocked, done, cancelled. `to-verify` means implemented and focused-tested,
+waiting for a scheduled batch gate; it is nonterminal and hidden from default
+list (`--open` and `--status to-verify` show it). A `to-verify` prerequisite
+counts as satisfied for default list and `unlocks` only. Distinguish direct dependents from dependents that
 become immediately runnable after completion; `unlocks` is scheduling evidence,
 not permission to close a prerequisite. Lower P number means higher priority;
 P0 through P3 are supported and P2 is the default. Priority never bypasses deps.
@@ -81,7 +99,9 @@ nothing. Re-read `show` before edits derived from body or field content. On
 conflict, re-read and reconcile the changed intent with the user selection;
 never automatically retry the same write or force an overwrite. Write output is
 printed after commit (ID, status, new version, event ID); report it without a
-verifying `show`. SQLite allocates IDs.
+verifying `show`. SQLite allocates IDs. `update --status done` fails with exit 2
+and writes nothing while any prerequisite is not done or cancelled; move a
+verified group to done in dependency order instead of retrying.
 
 ```text
 create --title "Fix shutdown ordering" --body-file <body.md> --priority P2 --labels lifecycle
@@ -103,8 +123,8 @@ The `needs-human` label is the human gate. Preserve it unless the underlying
 decision is resolved and removing it is authorized. Use `--add-label` and
 `--remove-label` for single labels; `--labels` replaces the whole set. Treat
 labels, priority, status, and dependencies as structured fields, not duplicate
-body status lines. Dependency IDs belong to this project, must exist, and must
-stay acyclic. Keep prerequisites without IDs in task notes. Read project rules
+body status lines. Dependency IDs belong to this project (`KEY-N`, `T-N` or
+`N`), must exist, and must stay acyclic. Keep prerequisites without IDs in task notes. Read project rules
 once per session before formulation/execution (plain `show` omits them) and use
 versioned `rules set` only when authorized.
 

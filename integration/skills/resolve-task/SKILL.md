@@ -22,7 +22,9 @@ Use focused mode for one low/medium-risk task; full mode for multiple tasks,
 backlog sweeps or high-risk changes. Read repository guidance, rules, relevant
 specs and nearest tests. Resolve identity before any access. Fetch bounded rows
 (text output), then selected bodies, versions and prerequisites in one
-multi-ID `show`; add `--rules` once per session. Explicit IDs include necessary
+multi-ID `show`; add `--rules` once per session. IDs may be written `KEY-N`,
+`T-N` or `N`; cite them as `KEY-N` in new notes and commit messages and leave
+old `T-N` text unchanged. Explicit IDs include necessary
 prerequisites; semantic selections include matching work plus prerequisites;
 "all open" requires `list --open` with every page, including blocked/human work.
 Normal runnable list alone cannot establish that a sweep is complete.
@@ -71,8 +73,9 @@ See [verification](references/verification.md).
 5. Freeze the source and proof inputs; record real candidate identity, hashes
    where used, literal commands, exit codes, test counts and proof references.
    Run the task tier on those inputs. Zero selected tests do not prove behavior.
-6. Coordinator checks acceptance and review, then transitions to `done` with the
-   last observed version. The write output is the committed result; no
+6. Coordinator checks acceptance and review, then transitions to `to-verify`
+   when a batch gate is scheduled for the task's group, `done` otherwise, with
+   the last observed version. The write output is the committed result; no
    read-back `show`. A stale version (exit 4) is re-read and reconciled, never
    overwritten with an automatic retry. Keep concise proof pointers in Notes.
 7. Inspect the exact owned patch, clean owned temporary artifacts safely, and

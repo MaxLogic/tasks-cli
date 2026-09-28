@@ -61,7 +61,9 @@ notes rather than appending a session transcript or raw logs.
 Set priority P0-P3, default P2, and existing-vocabulary labels through structured
 CLI fields. Use dependencies only for same-project IDs that truly must complete
 first. Do not place reasons, ranges or external project IDs into dependency
-arguments. A parent groups work and is not automatically a dependency.
+arguments. Write task references in bodies and notes as `KEY-N` (for example
+`DAK-212`, or another project's `DS-640`); keep existing `T-N` text as
+written. A parent groups work and is not automatically a dependency.
 Let SQLite assign IDs. Pass bodies with `--body-file -` and a heredoc. Use
 `show` for content you rewrite, then `update --expect-version`; a status-only
 change can use the listed version. The write output reports the committed
