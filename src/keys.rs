@@ -1,19 +1,22 @@
 //! Project keys (`DAK` in `DAK-212`): uniqueness across one data root and the
 //! lookup of the project that owns a key.
 //!
-//! A key lives only in its project database. Uniqueness checks (`init`,
-//! `project-key --set`, bulk apply) always open and read every project
-//! database under `<data-root>/projects/` with [`scan`].
-//!
-//! Lookups that only resolve a reference (`enrich`, the owner named by a
-//! foreign `KEY-N`, import's foreign-heading check) use [`scan_cached`]:
-//! opening a SQLite database costs milliseconds on Windows, so
-//! `<data-root>/project-keys.json` caches each database's key next to its file
-//! fingerprint (identity, size and modification time of the database and of
-//! a non-empty WAL or journal). A database whose fingerprint differs is read
-//! again, so a stale or concurrently rewritten cache costs time but never
-//! yields a wrong key. The cache is derived data, rewritten atomically only by
-//! [`scan_cached`].
+//! A key lives only in its project database. Every key lookup goes through
+//! `<data-root>/project-keys.json`, because opening a SQLite database costs
+//! milliseconds on Windows: the uniqueness checks of `init`, `project-key
+//! --set` and bulk apply (under the registry lock), `enrich`, the owner named
+//! by a foreign `KEY-N` and import's foreign-heading check. The cache holds
+//! each database's key next to its file fingerprint (identity, size and
+//! modification time of the database and of a non-empty WAL or journal). A
+//! database without an entry or whose fingerprint differs is read again, and a
+//! read is cached only when the fingerprint was the same before and after it,
+//! so a stale or concurrently rewritten cache costs time but never yields a
+//! wrong key; a file modified within the last 2 seconds is read but not
+//! cached, for filesystems with coarse modification times. The cache is
+//! derived data, rewritten atomically by the reference lookups
+//! ([`scan_cached`]) and after a committed `init`, `project-key --set` or bulk
+//! apply ([`CacheUpdate`]), so a refused `init`, a bulk dry run or a
+//! rolled-back apply leaves the data root unchanged.
 
 use crate::error::AppError;
 use crate::model::render_keyed_task_id;
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 /// One project database found under `<data-root>/projects/`.
@@ -54,31 +57,63 @@ pub fn read_key(conn: &Connection) -> rusqlite::Result<Option<String>> {
 }
 
 fn read_key_at(db_path: &Path) -> Result<Option<String>, AppError> {
-    let conn = Connection::open_with_flags(
-        db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = crate::store::open_for_reading(db_path, OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     Ok(read_key(&conn)?)
 }
 
-/// Identity, size and modification time of the database and of a non-empty
-/// WAL or rollback journal. Empty sidecars count as absent because a
-/// read-only reader may create an empty WAL without changing any data.
+/// The database and its WAL and rollback journal, with their metadata when
+/// they count: the database always, a sidecar only when non-empty, because a
+/// reader may create an empty WAL without changing any data.
+fn fingerprint_files(db_path: &Path) -> Vec<(PathBuf, Option<fs::Metadata>)> {
+    ["", "-wal", "-journal"]
+        .into_iter()
+        .map(|suffix| {
+            let mut name = db_path.as_os_str().to_os_string();
+            name.push(suffix);
+            let path = PathBuf::from(name);
+            let meta = fs::metadata(&path)
+                .ok()
+                .filter(|meta| suffix.is_empty() || meta.len() > 0);
+            (path, meta)
+        })
+        .collect()
+}
+
+/// How long after its last modification a file's key may be cached. On a
+/// filesystem with coarse modification times (FAT/exFAT keep 2 seconds) a
+/// same-size change made within that window could keep the fingerprint; a
+/// read of a file modified this recently is used but not cached.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// True when every counted file was last modified at least [`RACY_WINDOW`]
+/// before `now`; an unknown modification time is never settled.
+fn settled(db_path: &Path, now: SystemTime) -> bool {
+    fingerprint_files(db_path)
+        .iter()
+        .all(|(_, meta)| match meta {
+            None => true,
+            Some(meta) => meta
+                .modified()
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= RACY_WINDOW),
+        })
+}
+
+/// Identity, size and modification time of the files [`fingerprint_files`]
+/// counts.
 fn fingerprint(db_path: &Path) -> String {
     let mut parts = Vec::with_capacity(3);
-    for suffix in ["", "-wal", "-journal"] {
-        let mut name = db_path.as_os_str().to_os_string();
-        name.push(suffix);
-        let path = PathBuf::from(name);
-        let part = match fs::metadata(&path) {
-            Ok(meta) if suffix.is_empty() || meta.len() > 0 => {
+    for (path, meta) in fingerprint_files(db_path) {
+        let part = match meta {
+            Some(meta) => {
                 let identity = file_id::get_file_id(&path)
                     .map(|id| format!("{id:?}"))
                     .unwrap_or_else(|_| "unavailable".to_string());
                 format!("{identity}:{:?}:{}", meta.modified().ok(), meta.len())
             }
-            _ => "-".to_string(),
+            None => "-".to_string(),
         };
         parts.push(part);
     }
@@ -108,6 +143,25 @@ fn load_cache(data_root: &Path) -> KeyCache {
         .unwrap_or_default()
 }
 
+/// A refreshed key cache from a scan, to be written only once the caller's
+/// change has committed, so a refused or rolled-back command leaves the data
+/// root unchanged.
+#[derive(Debug)]
+#[must_use = "store the refreshed cache after the change commits, or drop it"]
+pub struct CacheUpdate {
+    fresh: KeyCache,
+    changed: bool,
+}
+
+impl CacheUpdate {
+    /// Best effort, like every cache write.
+    pub fn store(self, data_root: &Path) {
+        if self.changed {
+            store_cache(data_root, &self.fresh);
+        }
+    }
+}
+
 /// Best effort: a failed write only costs the next scan its shortcut.
 fn store_cache(data_root: &Path, cache: &KeyCache) {
     let Ok(bytes) = serde_json::to_vec(cache) else {
@@ -121,29 +175,33 @@ fn store_cache(data_root: &Path, cache: &KeyCache) {
 }
 
 /// Every project database under `<data-root>/projects/<uuid>/TASKS.sqlite`
-/// with its key. `strict` fails on a database that cannot be read, because a
+/// with its key, through the key cache, which this never writes. `strict`
+/// fails on a database that has to be read and cannot be, because a
 /// uniqueness check cannot vouch for it; otherwise such a project is skipped.
 /// Directories that are not canonical UUIDs or hold no database are ignored.
-/// Reads every database directly; never touches the key cache.
 pub fn scan(data_root: &Path, strict: bool) -> Result<Vec<KeyedProject>, AppError> {
-    scan_with(data_root, strict, false)
+    Ok(scan_with(data_root, strict)?.0)
 }
 
-/// Lenient [`scan`] through the key cache, which it rewrites when it changed.
-/// For reference lookups only, never for uniqueness checks.
+/// Lenient [`scan`] that also rewrites the key cache when it changed.
 pub fn scan_cached(data_root: &Path) -> Result<Vec<KeyedProject>, AppError> {
-    scan_with(data_root, false, true)
+    let (projects, update) = scan_with(data_root, false)?;
+    update.store(data_root);
+    Ok(projects)
 }
 
-fn scan_with(
-    data_root: &Path,
-    strict: bool,
-    use_cache: bool,
-) -> Result<Vec<KeyedProject>, AppError> {
+fn scan_with(data_root: &Path, strict: bool) -> Result<(Vec<KeyedProject>, CacheUpdate), AppError> {
     let projects_dir = data_root.join("projects");
     let entries = match fs::read_dir(&projects_dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let fresh = KeyCache {
+                format_version: CACHE_FORMAT,
+                projects: BTreeMap::new(),
+            };
+            let changed = load_cache(data_root).format_version != CACHE_FORMAT;
+            return Ok((Vec::new(), CacheUpdate { fresh, changed }));
+        }
         Err(error) => {
             return Err(AppError::io_path(
                 "list project databases in",
@@ -152,11 +210,8 @@ fn scan_with(
             ))
         }
     };
-    let cache = if use_cache {
-        load_cache(data_root)
-    } else {
-        KeyCache::default()
-    };
+    let cache = load_cache(data_root);
+    let now = SystemTime::now();
     let mut fresh = KeyCache {
         format_version: CACHE_FORMAT,
         projects: BTreeMap::new(),
@@ -188,10 +243,10 @@ fn scan_with(
             Some(key) => Ok((key, true)),
             // Cache a read only when the files did not change around it, so
             // a concurrent write can never pair an old key with a new
-            // fingerprint.
+            // fingerprint, and were not modified too recently to tell apart.
             None => read_key_at(&db_path).map(|key| {
                 let stable = self::fingerprint(&db_path) == fingerprint;
-                (key, stable)
+                (key, stable && settled(&db_path, now))
             }),
         };
         match read {
@@ -221,13 +276,14 @@ fn scan_with(
         }
     }
     projects.sort_by_key(|project| project.project_id);
-    if use_cache && fresh.projects != cache.projects {
-        store_cache(data_root, &fresh);
-    }
-    Ok(projects)
+    // A missing or unreadable cache file loads as the default (format 0), so
+    // a scan with nothing to cache still creates the file.
+    let changed = fresh.projects != cache.projects || cache.format_version != CACHE_FORMAT;
+    Ok((projects, CacheUpdate { fresh, changed }))
 }
 
 /// The project that owns `key`, if any. Strict: an unreadable database fails.
+/// Reads the key cache without writing it.
 pub fn find_owner(data_root: &Path, key: &str) -> Result<Option<KeyedProject>, AppError> {
     Ok(scan(data_root, true)?
         .into_iter()
@@ -276,15 +332,18 @@ fn describe_text(data_root: &Path, project_id: &Uuid) -> String {
 }
 
 /// Refuses `key` when another project database in the data root already has
-/// it. Reads every database directly (no cache). Call while holding the
-/// registry lock so the answer stays true until the key is written.
+/// it. Strict [`scan`] through the key cache; the refreshed cache is
+/// returned for the caller to store once its change has committed. Call
+/// while holding the registry lock so the answer stays true until the key is
+/// written.
 pub fn ensure_available(
     data_root: &Path,
     key: &str,
     except: Option<&Uuid>,
-) -> Result<(), AppError> {
+) -> Result<CacheUpdate, AppError> {
     let data_root = validate_storage_root(data_root)?;
-    let owner = scan(&data_root, true)?
+    let (projects, update) = scan_with(&data_root, true)?;
+    let owner = projects
         .into_iter()
         .find(|project| project.key.as_deref() == Some(key) && Some(&project.project_id) != except);
     match owner {
@@ -292,7 +351,7 @@ pub fn ensure_available(
             "project key {key} is already used by project {}; choose another key",
             describe_text(&data_root, &owner.project_id)
         ))),
-        None => Ok(()),
+        None => Ok(update),
     }
 }
 
@@ -330,6 +389,32 @@ pub fn foreign_reference_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_recently_modified_database_is_read_but_not_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let info = crate::store::create_project_db_with_key(root.path(), &id, Some("RAC")).unwrap();
+        let cached = || {
+            load_cache(root.path())
+                .projects
+                .contains_key(&id.to_string())
+        };
+        let keys = scan_cached(root.path()).unwrap();
+        assert_eq!(keys[0].key.as_deref(), Some("RAC"));
+        assert!(!cached(), "a database modified just now must not be cached");
+        let old = SystemTime::now() - Duration::from_secs(10);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&info.db_path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(settled(&info.db_path, SystemTime::now()));
+        assert!(!settled(&info.db_path, old + Duration::from_secs(1)));
+        scan_cached(root.path()).unwrap();
+        assert!(cached(), "a settled database is cached");
+    }
 
     #[test]
     fn missing_projects_directory_has_no_keys() {

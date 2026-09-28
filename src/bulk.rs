@@ -559,6 +559,12 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         }
     }
 
+    if summary.verified_projects > 0 {
+        // Committed projects changed the data root; refresh the key cache
+        // (best effort). A dry run or an all-rolled-back apply skips this.
+        let _ = crate::keys::scan_cached(&options.data_root);
+    }
+
     let reports = write_reports(
         &report_dir,
         &summary,
@@ -2047,7 +2053,9 @@ fn apply_and_verify_inner(
         })?;
     // The registry lock is held: the key check and the new database cannot
     // interleave with another init, project-key --set or bulk apply.
-    registry::create_or_verify_keyed(&options.data_root, &explicit_project, key)?;
+    // The key check's cache refresh is dropped: a later rollback must leave
+    // the data root unchanged, so `run` refreshes the cache after the apply.
+    let _ = registry::create_or_verify_keyed(&options.data_root, &explicit_project, key)?;
     let mut store = Store::open_rw(&options.data_root, project_id)?;
     let (_, already_imported) = store.import_apply_many(reparsed, &hashes)?;
 

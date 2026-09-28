@@ -399,15 +399,22 @@ pub fn with_registry_lock<T>(
 
 /// Creates or validates the project database under the registry lock. A new
 /// database receives `key` after the key is checked against every project in
-/// the data root; an existing one must already hold exactly that key.
+/// the data root; an existing one must already hold exactly that key. The
+/// key check's refreshed cache is returned for the caller to store once its
+/// whole change has committed.
 pub fn create_or_verify_keyed(
     data_root: &Path,
     project_id: &Uuid,
     key: Option<&str>,
-) -> Result<StoreInfo, AppError> {
-    if let Some(key) = key {
-        crate::keys::ensure_available(data_root, key, Some(project_id))?;
-    }
+) -> Result<(StoreInfo, Option<crate::keys::CacheUpdate>), AppError> {
+    let update = match key {
+        Some(key) => Some(crate::keys::ensure_available(
+            data_root,
+            key,
+            Some(project_id),
+        )?),
+        None => None,
+    };
     let info = create_project_db_with_key(data_root, project_id, key)?;
     if let Some(key) = key {
         if info.project_key.as_deref() != Some(key) {
@@ -420,7 +427,7 @@ pub fn create_or_verify_keyed(
             )));
         }
     }
-    Ok(info)
+    Ok((info, update))
 }
 
 pub fn init_root(
@@ -465,15 +472,22 @@ pub fn init_root(
                 )));
             }
         }
-        return create_or_verify_keyed(&data_root, &existing_id, key);
+        let (info, update) = create_or_verify_keyed(&data_root, &existing_id, key)?;
+        if let Some(update) = update {
+            update.store(&data_root);
+        }
+        return Ok(info);
     }
     let project_id = explicit_project.unwrap_or_else(Uuid::new_v4);
-    let info = create_or_verify_keyed(&data_root, &project_id, key)?;
+    let (info, update) = create_or_verify_keyed(&data_root, &project_id, key)?;
     registry.bindings.push(RegistryBinding {
         root: canonical_root.to_string_lossy().to_string(),
         project_id: project_id.to_string(),
     });
     registry.store(&path)?;
+    if let Some(update) = update {
+        update.store(&data_root);
+    }
     Ok(info)
 }
 

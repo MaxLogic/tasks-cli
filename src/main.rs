@@ -250,8 +250,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     // projects can never claim one key.
                     let previous = registry::with_registry_lock(&data_root, |root| {
                         let mut store = Store::open_rw(root, &project_id)?;
-                        tasks_cli::keys::ensure_available(root, key, Some(&store.project_id))?;
-                        store.set_project_key(key)
+                        let update =
+                            tasks_cli::keys::ensure_available(root, key, Some(&store.project_id))?;
+                        let previous = store.set_project_key(key)?;
+                        update.store(root);
+                        Ok(previous)
                     })?;
                     CommandPayload::ProjectKey {
                         project_key: Some(key.clone()),
