@@ -67,6 +67,60 @@ void main() {
     );
   }
 
+  testWidgets('a keyed project shows KEY-N in rows, actions and copies', (
+    tester,
+  ) async {
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final catalog = <ProjectItem>[
+      ProjectItem(
+        projectId: testProjectItem(1).projectId,
+        projectKey: 'DAK',
+        name: 'Project 1',
+        roots: const <String>[r'C:\work\project-1'],
+        availability: ProjectAvailability.available,
+        error: null,
+        sampledAtMs: 1700000000001,
+        stats: testProjectItem(1).stats,
+      ),
+    ];
+    final reads = fakeWorkspaceReads(
+      projects: catalog,
+      tasks: <String, List<TaskItem>>{
+        catalog.single.projectId: <TaskItem>[
+          testTaskItem(1, title: 'First task', displayId: 'DAK-001'),
+          testTaskItem(2, title: 'Second task', displayId: 'DAK-002'),
+        ],
+      },
+      details: <int, TaskDetail>{
+        1: testTaskDetail(1, title: 'First task', projectKey: 'DAK'),
+        2: testTaskDetail(2, title: 'Second task', projectKey: 'DAK'),
+      },
+    );
+    await pumpTaskBrowser(tester, reads: reads);
+    expect(find.text('Project 1 (DAK)'), findsWidgets);
+    expect(find.byTooltip('Actions for DAK-002'), findsOneWidget);
+    expect(find.byTooltip('Actions for T-002'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp(r'^DAK-001, ')), findsWidgets);
+    await pressKey(tester, LogicalKeyboardKey.f2);
+    await pressKey(tester, LogicalKeyboardKey.keyC);
+    expect(copied, 'DAK-001 First task');
+  });
+
   testWidgets('task row copies summary and exposes keyboard context actions', (
     tester,
   ) async {

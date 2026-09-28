@@ -275,6 +275,8 @@ final class _Slice6Harness {
       'init',
       '--root',
       project,
+      '--key',
+      'CLIP',
       '--data-root',
       store,
       '--format',

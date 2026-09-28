@@ -26,6 +26,10 @@ const int viewerLabelMaxChars = 64;
 /// Pattern every normalized label must match (spec section 7).
 final RegExp viewerLabelAllowedPattern = RegExp(r'^[a-z0-9\-_.:]+$');
 
+/// A `KEY-N` reference: a valid project key shape the parser did not accept,
+/// so it names another project.
+final RegExp _otherProjectReference = RegExp(r'^[A-Za-z][A-Za-z0-9]{1,5}-\d+$');
+
 /// Dependency limit (spec section 7).
 const int viewerDepsMaxCount = 1000;
 
@@ -66,11 +70,13 @@ final class EditorFieldValidation {
 /// Validates [fields] and derives the normalized values a save would send.
 ///
 /// [taskId] enables the self-dependency check; the form always knows it.
+/// [projectKey] is the project's key, so `KEY-N` dependency IDs are accepted.
 /// [limits] lets the caller use the values `viewer info` reported instead of
 /// the compiled-in defaults.
 EditorFieldValidation validateEditorFields(
   TaskEditFields fields, {
   int? taskId,
+  String? projectKey,
   ViewerEditableFieldLimits? limits,
 }) {
   final titleMax = limits?.titleMaxChars ?? viewerTitleMaxScalars;
@@ -134,14 +140,27 @@ EditorFieldValidation validateEditorFields(
     errors[EditorField.labels] = 'Labels: ${labelProblems.join(' ')}';
   }
 
-  final deps = parseEditorDependencyText(fields.depsText);
+  final deps = parseEditorDependencyText(
+    fields.depsText,
+    projectKey: projectKey,
+  );
   final depProblems = <String>[];
+  final example = viewerCanonicalTaskId(42, projectKey);
+  final accepted = projectKey == null ? 'T-N or N' : '$projectKey-N, T-N or N';
   for (final error in deps.errors) {
-    depProblems.add('"${error.token}" is not a task ID like T-042.');
+    if (_otherProjectReference.hasMatch(error.token)) {
+      depProblems.add(
+        '"${error.token}" belongs to another project; dependencies must be '
+        'in this project ($accepted).',
+      );
+    } else {
+      depProblems.add('"${error.token}" is not a task ID like $example.');
+    }
   }
   if (taskId != null && deps.ids.contains(taskId)) {
     depProblems.add(
-      'the task cannot depend on itself (${viewerCanonicalTaskId(taskId)}).',
+      'the task cannot depend on itself '
+      '(${viewerCanonicalTaskId(taskId, projectKey)}).',
     );
   }
   if (deps.ids.length > depsMaxCount) {

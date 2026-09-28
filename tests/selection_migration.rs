@@ -38,7 +38,7 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
     fixture(root.path(), &id);
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (3, 5));
+    assert_eq!((from, to), (3, 6));
     let old =
         Connection::open_with_flags(backup.unwrap(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
@@ -51,7 +51,11 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
         vec![vec![Value::Text("ok".into())]]
     );
     for (table, columns, order) in [
-        ("project", "*", "project_id"),
+        (
+            "project",
+            "project_id,rules_markdown,rules_version,next_task_number",
+            "project_id",
+        ),
         (
             "tasks",
             "id,title,body,status,version,created_ms,updated_ms",
@@ -78,7 +82,7 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
         .conn
         .execute("UPDATE tasks SET priority='P4' WHERE id=7", [])
         .is_err());
-    assert_eq!(store.migrate().unwrap(), (5, 5, None));
+    assert_eq!(store.migrate().unwrap(), (6, 6, None));
 }
 
 #[test]

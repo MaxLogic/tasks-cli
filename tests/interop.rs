@@ -45,6 +45,8 @@ fn subprocess_preserves_stdin_body_and_nonzero_exit_codes() {
             "init",
             "--root",
             root.to_str().unwrap(),
+            "--key",
+            "IO",
         ])
         .output()
         .expect("init");

@@ -70,6 +70,7 @@ fn path_flag(arg: &str) -> Option<(&'static str, Option<&str>)> {
         "--scan-root",
         "--report-dir",
         "--quarantine-dir",
+        "--key-map",
     ] {
         if arg == flag {
             return Some((flag, None));
@@ -296,9 +297,48 @@ mod tests {
     }
 
     #[test]
+    fn key_flags_pass_through_and_the_key_map_is_translated() {
+        let args: Vec<String> = [
+            "bulk-import",
+            "--key-map",
+            "keys.json",
+            "--scan-root=corpus",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let result = convert_args(&args, |path| {
+            Ok(PathBuf::from(format!("translated:{}", path.display())))
+        })
+        .expect("converted args");
+        assert_eq!(
+            result,
+            [
+                "bulk-import",
+                "--key-map",
+                "translated:keys.json",
+                "--scan-root=translated:corpus"
+            ]
+        );
+        for args in [
+            vec!["init", "--root", "/work", "--key", "dak"],
+            vec!["project-key", "--set", "DAK"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let result = convert_args(&args, |path| {
+                Ok(PathBuf::from(format!("translated:{}", path.display())))
+            })
+            .expect("converted args");
+            assert_eq!(result.last(), args.last(), "{args:?}");
+        }
+        let key = Cli::try_parse_from(["tasks", "project-key"]).expect("project-key parse");
+        assert!(should_inject_project_context(&key));
+    }
+
+    #[test]
     fn init_and_bind_do_not_inherit_project_routing_context() {
-        let init =
-            Cli::try_parse_from(["tasks", "init", "--root", "C:\\work"]).expect("init parse");
+        let init = Cli::try_parse_from(["tasks", "init", "--root", "C:\\work", "--key", "WK"])
+            .expect("init parse");
         assert!(!should_inject_project_context(&init));
         let bind = Cli::try_parse_from([
             "tasks",

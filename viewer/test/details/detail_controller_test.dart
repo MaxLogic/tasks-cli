@@ -215,6 +215,23 @@ void main() {
       expect(controller.isLoading, isFalse);
     });
 
+    test('a loading task is named with the project key', () async {
+      final reader = FakeDetailReader(
+        detailResponder: (projectId, taskId) async => detailFor(taskId),
+      );
+      final controller = buildDetailController(reader, debounce: _fastDebounce);
+      addTearDown(controller.dispose);
+
+      controller.projectKey = 'DAK';
+      controller.selectTask(7);
+      expect(controller.isLoading, isTrue);
+      expect(controller.detail, isNull);
+      expect(controller.canonicalTaskId, 'DAK-007');
+      await Future<void>.delayed(_fastDebounce * 3);
+      // The loaded detail (no key in this fixture) is authoritative.
+      expect(controller.canonicalTaskId, 'T-007');
+    });
+
     test('Enter opens without waiting for the debounce', () async {
       final reader = FakeDetailReader(
         detailResponder: (projectId, taskId) async => detailFor(taskId),

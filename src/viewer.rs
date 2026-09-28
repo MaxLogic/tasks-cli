@@ -9,8 +9,8 @@
 use crate::error::AppError;
 use crate::labels;
 use crate::model::{
-    parse_task_id, render_task_id, DependencySummary, Priority, TaskDetail, TaskStatus, TaskUpdate,
-    BODY_MAX_BYTES, MAX_DEPENDENCIES, TITLE_MAX_CHARS,
+    parse_ledger_task_id, parse_task_ref, render_keyed_task_id, DependencySummary, Priority,
+    TaskDetail, TaskStatus, TaskUpdate, BODY_MAX_BYTES, MAX_DEPENDENCIES, TITLE_MAX_CHARS,
 };
 use crate::registry;
 use crate::storage::{validate_storage_path, validate_storage_root};
@@ -115,6 +115,9 @@ pub struct ViewerProjectsPayload {
 #[derive(Debug, Serialize)]
 pub struct ProjectItem {
     pub project_id: String,
+    /// The project key (`DAK`), or null before one is assigned or when the
+    /// database could not be sampled.
+    pub project_key: Option<String>,
     pub name: String,
     pub roots: Vec<String>,
     pub availability: &'static str,
@@ -140,11 +143,16 @@ pub struct ProjectStats {
     pub started_ms: Option<i64>,
     pub last_write_ms: Option<i64>,
     pub progress_percent: Option<f64>,
+    /// Sampled with the statistics so the cache carries it; also exposed as
+    /// the item's top-level `project_key`.
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ViewerTasksPayload {
     pub protocol_version: u8,
+    pub project_key: Option<String>,
     pub items: Vec<TaskItem>,
     pub total_count: u64,
     pub offset: u64,
@@ -157,6 +165,8 @@ pub struct ViewerTasksPayload {
 #[derive(Debug, Serialize)]
 pub struct TaskItem {
     pub id: u64,
+    /// `KEY-001` or `T-001`.
+    pub display_id: String,
     pub title: String,
     pub status: TaskStatus,
     pub priority: Priority,
@@ -175,6 +185,7 @@ pub struct TaskItem {
 #[derive(Debug, Serialize)]
 pub struct ViewerShowPayload {
     pub protocol_version: u8,
+    pub project_key: Option<String>,
     #[serde(flatten)]
     pub task: TaskDetail,
     pub created_ms: i64,
@@ -185,6 +196,7 @@ pub struct ViewerShowPayload {
 pub struct ViewerUpdatePayload {
     pub protocol_version: u8,
     pub id: u64,
+    pub display_id: String,
     pub status: String,
     pub version: u64,
     pub event_id: Option<u64>,
@@ -903,6 +915,10 @@ struct ProjectRecord {
 impl From<ProjectRecord> for ProjectItem {
     fn from(record: ProjectRecord) -> Self {
         Self {
+            project_key: record
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.project_key.clone()),
             project_id: record.project_id,
             name: record.name,
             roots: record.roots,
@@ -1208,6 +1224,7 @@ fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats
             Some(100.0 * done as f64 / remaining as f64)
         };
         Ok(ProjectStats {
+            project_key: crate::keys::read_key(&conn)?,
             total,
             open,
             blocked,
@@ -1228,8 +1245,13 @@ fn matches_project_query(record: &ProjectRecord, query: &ProjectQuery) -> bool {
     }
     if !query.query.is_empty() {
         let needle = query.query.to_ascii_lowercase();
+        let key = record
+            .stats
+            .as_ref()
+            .and_then(|stats| stats.project_key.as_deref());
         let matched = std::iter::once(record.name.as_str())
             .chain(std::iter::once(record.project_id.as_str()))
+            .chain(key)
             .chain(record.roots.iter().map(String::as_str))
             .any(|haystack| contains_ascii_insensitive(haystack, &needle));
         if !matched {
@@ -1362,6 +1384,7 @@ fn catalog_hash(records: &[ProjectRecord]) -> String {
                 "cancelled": stats.cancelled,
                 "started_ms": stats.started_ms,
                 "last_write_ms": stats.last_write_ms,
+                "project_key": stats.project_key,
                 "progress_percent": stats.progress_percent,
             })),
         });
@@ -1627,7 +1650,7 @@ pub fn tasks(
             (total_count, token.to_string())
         }
         None => {
-            let total_count = count_tasks(&tx, &query)?;
+            let total_count = count_tasks(&tx, &query, store.project_key.as_deref())?;
             let snapshot = tasks_token(
                 &project_id,
                 &identity_before,
@@ -1638,7 +1661,7 @@ pub fn tasks(
             (total_count, snapshot)
         }
     };
-    let items = select_task_page(&tx, &query)?;
+    let items = select_task_page(&tx, &query, store.project_key.as_deref())?;
     tx.commit()?;
     if file_identity(&db_path) != identity_before {
         return Err(stale_snapshot(
@@ -1649,6 +1672,7 @@ pub fn tasks(
     let next_offset = has_more.then_some(query.offset + items.len() as u64);
     Ok(ViewerTasksPayload {
         protocol_version: PROTOCOL_VERSION,
+        project_key: store.project_key.clone(),
         items,
         total_count,
         offset: query.offset,
@@ -1661,7 +1685,7 @@ pub fn tasks(
 
 /// The WHERE clause and its bound values for one task query. The only
 /// interpolated text is this module's own allowlisted SQL.
-fn task_filter_sql(query: &TaskQuery) -> (String, Vec<SqlValue>) {
+fn task_filter_sql(query: &TaskQuery, key: Option<&str>) -> (String, Vec<SqlValue>) {
     let mut conditions: Vec<String> = Vec::new();
     let mut params: Vec<SqlValue> = Vec::new();
     if query.scope == Scope::Open {
@@ -1705,7 +1729,8 @@ fn task_filter_sql(query: &TaskQuery) -> (String, Vec<SqlValue>) {
         ),
     }
     if !query.query.is_empty() {
-        match parse_task_id(&query.query) {
+        // A complete T-N, or KEY-N with this project's key, is an ID match.
+        match parse_ledger_task_id(&query.query, key) {
             Ok(id) => {
                 conditions.push("t.id = ?".to_string());
                 params.push(SqlValue::Integer(id as i64));
@@ -1757,8 +1782,8 @@ fn task_order_by(sort: TaskSort, direction: Direction) -> String {
     }
 }
 
-fn count_tasks(conn: &Connection, query: &TaskQuery) -> Result<u64, AppError> {
-    let (where_sql, params) = task_filter_sql(query);
+fn count_tasks(conn: &Connection, query: &TaskQuery, key: Option<&str>) -> Result<u64, AppError> {
+    let (where_sql, params) = task_filter_sql(query, key);
     let sql = format!("SELECT COUNT(*) FROM tasks t WHERE {where_sql}");
     let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
         row.get(0)
@@ -1766,8 +1791,12 @@ fn count_tasks(conn: &Connection, query: &TaskQuery) -> Result<u64, AppError> {
     Ok(count as u64)
 }
 
-fn select_task_page(conn: &Connection, query: &TaskQuery) -> Result<Vec<TaskItem>, AppError> {
-    let (where_sql, mut params) = task_filter_sql(query);
+fn select_task_page(
+    conn: &Connection,
+    query: &TaskQuery,
+    key: Option<&str>,
+) -> Result<Vec<TaskItem>, AppError> {
+    let (where_sql, mut params) = task_filter_sql(query, key);
     let order = task_order_by(query.sort, query.direction);
     let sql = format!(
         "SELECT t.id, t.title, t.status, t.priority, t.version, t.created_ms, t.updated_ms
@@ -1779,31 +1808,35 @@ fn select_task_page(conn: &Connection, query: &TaskQuery) -> Result<Vec<TaskItem
     let mut rows = statement.query(rusqlite::params_from_iter(params.iter()))?;
     let mut items = Vec::new();
     while let Some(row) = rows.next()? {
-        items.push(read_task_item(row)?);
+        items.push(read_task_item(row, key)?);
     }
     drop(rows);
     drop(statement);
     populate_task_items(conn, &mut items)?;
+    for item in &mut items {
+        item.display_id = render_keyed_task_id(key, item.id);
+    }
     Ok(items)
 }
 
-fn read_task_item(row: &rusqlite::Row<'_>) -> Result<TaskItem, AppError> {
+fn read_task_item(row: &rusqlite::Row<'_>, key: Option<&str>) -> Result<TaskItem, AppError> {
     let id = row.get::<_, i64>(0)? as u64;
     let status_text: String = row.get(2)?;
     let priority_text: String = row.get(3)?;
     let created_ms = row
         .get::<_, Option<i64>>(5)?
-        .ok_or_else(|| corrupt_timestamp(id, "created_ms"))?;
+        .ok_or_else(|| corrupt_timestamp(key, id, "created_ms"))?;
     let updated_ms = row
         .get::<_, Option<i64>>(6)?
-        .ok_or_else(|| corrupt_timestamp(id, "updated_ms"))?;
+        .ok_or_else(|| corrupt_timestamp(key, id, "updated_ms"))?;
     Ok(TaskItem {
         id,
+        display_id: String::new(),
         title: row.get(1)?,
         status: parse_canonical_status(&status_text)
-            .ok_or_else(|| corrupt_status(id, &status_text))?,
+            .ok_or_else(|| corrupt_status(key, id, &status_text))?,
         priority: parse_canonical_priority(&priority_text)
-            .ok_or_else(|| corrupt_priority(id, &priority_text))?,
+            .ok_or_else(|| corrupt_priority(key, id, &priority_text))?,
         version: row.get::<_, i64>(4)? as u64,
         labels: Vec::new(),
         dependency_count: 0,
@@ -1814,24 +1847,24 @@ fn read_task_item(row: &rusqlite::Row<'_>) -> Result<TaskItem, AppError> {
     })
 }
 
-fn corrupt_timestamp(id: u64, column: &str) -> AppError {
+fn corrupt_timestamp(key: Option<&str>, id: u64, column: &str) -> AppError {
     AppError::Database(format!(
         "task {} has a null {column}; the database is corrupt. Restore it from a backup, then run tasks doctor",
-        render_task_id(id)
+        render_keyed_task_id(key, id)
     ))
 }
 
-fn corrupt_status(id: u64, value: &str) -> AppError {
+fn corrupt_status(key: Option<&str>, id: u64, value: &str) -> AppError {
     AppError::Database(format!(
         "task {} has the unsupported status '{value}'; the database is corrupt. Restore it from a backup, then run tasks doctor",
-        render_task_id(id)
+        render_keyed_task_id(key, id)
     ))
 }
 
-fn corrupt_priority(id: u64, value: &str) -> AppError {
+fn corrupt_priority(key: Option<&str>, id: u64, value: &str) -> AppError {
     AppError::Database(format!(
         "task {} has the unsupported priority '{value}'; the database is corrupt. Restore it from a backup, then run tasks doctor",
-        render_task_id(id)
+        render_keyed_task_id(key, id)
     ))
 }
 
@@ -1892,15 +1925,18 @@ fn dependency_counts(
 /// `viewer show T-ID` returns every existing `TaskDetail` field plus both
 /// timestamps from one deferred read transaction.
 pub fn show(data_root: &Path, project: &str, raw_id: &str) -> Result<ViewerShowPayload, AppError> {
-    let id = parse_task_id(raw_id).map_err(AppError::Validation)?;
+    // Reject malformed input before touching the store.
+    parse_task_ref(raw_id).map_err(AppError::Validation)?;
     let project_id = canonical_project(project)?;
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id);
     validate_storage_path(&db_path)?;
     let identity_before = file_identity(&db_path);
     let store = Store::open_readonly(&data_root, &project_id)?;
+    let id = store.resolve_ref(raw_id)?;
+    let key = store.project_key.as_deref();
     let tx = store.conn.unchecked_transaction()?;
-    let (task, created_ms, updated_ms) = read_task_detail(&tx, &project_id, id)?;
+    let (task, created_ms, updated_ms) = read_task_detail(&tx, &project_id, id, key)?;
     tx.commit()?;
     if file_identity(&db_path) != identity_before {
         return Err(stale_snapshot(
@@ -1909,6 +1945,7 @@ pub fn show(data_root: &Path, project: &str, raw_id: &str) -> Result<ViewerShowP
     }
     Ok(ViewerShowPayload {
         protocol_version: PROTOCOL_VERSION,
+        project_key: store.project_key.clone(),
         task,
         created_ms,
         updated_ms,
@@ -1919,6 +1956,7 @@ fn read_task_detail(
     conn: &Connection,
     project_id: &str,
     id: u64,
+    key: Option<&str>,
 ) -> Result<(TaskDetail, i64, i64), AppError> {
     let row = conn
         .query_row(
@@ -1941,11 +1979,11 @@ fn read_task_detail(
     let (status, priority, version, title, body, created_ms, updated_ms) = row.ok_or_else(|| {
         AppError::NotFound(format!(
             "task {} not found in project {project_id}; run tasks list to see the IDs in this project",
-            render_task_id(id)
+            render_keyed_task_id(key, id)
         ))
     })?;
-    let created_ms = created_ms.ok_or_else(|| corrupt_timestamp(id, "created_ms"))?;
-    let updated_ms = updated_ms.ok_or_else(|| corrupt_timestamp(id, "updated_ms"))?;
+    let created_ms = created_ms.ok_or_else(|| corrupt_timestamp(key, id, "created_ms"))?;
+    let updated_ms = updated_ms.ok_or_else(|| corrupt_timestamp(key, id, "updated_ms"))?;
     let (rule_version, rules) = conn
         .query_row(
             "SELECT rules_version, rules_markdown FROM project LIMIT 1",
@@ -1961,15 +1999,17 @@ fn read_task_detail(
     Ok((
         TaskDetail {
             priority: parse_canonical_priority(&priority)
-                .ok_or_else(|| corrupt_priority(id, &priority))?,
+                .ok_or_else(|| corrupt_priority(key, id, &priority))?,
             id,
-            status: parse_canonical_status(&status).ok_or_else(|| corrupt_status(id, &status))?,
+            display_id: render_keyed_task_id(key, id),
+            status: parse_canonical_status(&status)
+                .ok_or_else(|| corrupt_status(key, id, &status))?,
             version: version as u64,
             title,
             body,
             deps: task_dependency_ids(conn, id)?,
             labels: labels::read(conn, id)?,
-            dependency_summaries: task_dependency_summaries(conn, id)?,
+            dependency_summaries: task_dependency_summaries(conn, id, key)?,
             rule_version: rule_version as u64,
             rules,
         },
@@ -1993,6 +2033,7 @@ fn task_dependency_ids(conn: &Connection, id: u64) -> Result<Vec<u64>, AppError>
 fn task_dependency_summaries(
     conn: &Connection,
     id: u64,
+    key: Option<&str>,
 ) -> Result<Vec<DependencySummary>, AppError> {
     let mut statement = conn.prepare(
         "SELECT tasks.id, tasks.status, tasks.version, tasks.title
@@ -2014,8 +2055,9 @@ fn task_dependency_summaries(
         let (dep_id, status, version, title) = row?;
         summaries.push(DependencySummary {
             id: dep_id,
+            display_id: render_keyed_task_id(key, dep_id),
             status: parse_canonical_status(&status)
-                .ok_or_else(|| corrupt_status(dep_id, &status))?,
+                .ok_or_else(|| corrupt_status(key, dep_id, &status))?,
             version,
             title,
         });
@@ -2038,10 +2080,25 @@ pub fn update(
     let project_id = canonical_project(project)?;
     let data_root = validate_storage_root(data_root)?;
     let mut store = Store::open_rw(&data_root, &project_id)?;
+    let changes = &request.changes;
+    if changes.title.is_none()
+        && changes.body.is_none()
+        && changes.status.is_none()
+        && changes.priority.is_none()
+        && changes.labels.is_none()
+        && changes.deps.is_none()
+    {
+        return Err(AppError::Usage(format!(
+            "viewer update {}: the changes object is empty; pass at least one of {}",
+            store.display_id(request.id),
+            EDITABLE_FIELD_NAMES.join(", ")
+        )));
+    }
     let (id, status, version, event_id) =
         store.update_task(request.id, request.expect_version, request.changes)?;
     Ok(ViewerUpdatePayload {
         protocol_version: PROTOCOL_VERSION,
+        display_id: store.display_id(id),
         id,
         status: status.to_string(),
         version,
@@ -2090,19 +2147,8 @@ fn update_request(value: Value) -> Result<UpdateRequest, AppError> {
         clear_deps: false,
         ..TaskUpdate::default()
     };
-    if changes.title.is_none()
-        && changes.body.is_none()
-        && changes.status.is_none()
-        && changes.priority.is_none()
-        && changes.labels.is_none()
-        && changes.deps.is_none()
-    {
-        return Err(AppError::Usage(format!(
-            "viewer update {}: the changes object is empty; pass at least one of {}",
-            render_task_id(id),
-            EDITABLE_FIELD_NAMES.join(", ")
-        )));
-    }
+    // An empty change set is refused in `update` once the store is open, so
+    // the message can name the task in its keyed form.
     Ok(UpdateRequest {
         id,
         expect_version,

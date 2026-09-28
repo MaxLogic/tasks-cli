@@ -525,10 +525,10 @@ function Initialize-ViewerVerifyFixture {
     }
 
     $alphaInit = Invoke-TasksCliJson -Executable $CliExecutable -WorkingDirectory $FixtureRoot `
-        -Arguments @('--format', 'json', '--data-root', $FixtureRoot, 'init', '--root', $alphaDirectory) `
+        -Arguments @('--format', 'json', '--data-root', $FixtureRoot, 'init', '--root', $alphaDirectory, '--key', 'ALPHA') `
         -TimeoutSeconds $CommandTimeoutSeconds
     $betaInit = Invoke-TasksCliJson -Executable $CliExecutable -WorkingDirectory $FixtureRoot `
-        -Arguments @('--format', 'json', '--data-root', $FixtureRoot, 'init', '--root', $betaDirectory) `
+        -Arguments @('--format', 'json', '--data-root', $FixtureRoot, 'init', '--root', $betaDirectory, '--key', 'BETA') `
         -TimeoutSeconds $CommandTimeoutSeconds
     $alphaId = [string]$alphaInit.project_id
     $betaId = [string]$betaInit.project_id
@@ -642,7 +642,7 @@ function Initialize-ViewerVerifyFixture {
     }
     $firstTwo = @($tasks.data.items | Select-Object -First 2)
     if ($firstTwo.Count -ne 2 -or [int]$firstTwo[0].id -ne 1 -or [int]$firstTwo[1].id -ne 2) {
-        throw 'The default priority sort must start with the two reserved P0 rows (T-001, T-002).'
+        throw 'The default priority sort must start with the two reserved P0 rows (ALPHA-001, ALPHA-002).'
     }
 
     $manifest = [ordered]@{
@@ -669,14 +669,14 @@ function Initialize-ViewerVerifyFixture {
             }
         )
         checks           = [ordered]@{
-            first_row_id        = 'T-001'
+            first_row_id        = 'ALPHA-001'
             first_row_title     = 'Alpha task 01'
-            detail_row_id       = 'T-002'
+            detail_row_id       = 'ALPHA-002'
             detail_body_marker  = 'Body marker 02'
             search_query        = '%_'
             search_expected_count = 2
             search_expected_title = 'Literal 50%_ probe'
-            save_task_id        = 'T-001'
+            save_task_id        = 'ALPHA-001'
             save_new_title      = 'Alpha task 01 renamed by the headless viewer'
         }
     }

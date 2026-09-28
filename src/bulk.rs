@@ -40,6 +40,8 @@ pub struct BulkOptions {
     pub delete_quarantined: bool,
     pub allow_partial: bool,
     pub source_schema: SourceSchema,
+    /// JSON object mapping each new project root to its key.
+    pub key_map: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +82,8 @@ pub struct BulkSummary {
     pub ledger_references: usize,
     pub quarantined_files: usize,
     pub deleted_quarantined_files: usize,
+    /// Candidates --apply would create whose key is missing or already used.
+    pub key_problems: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +143,11 @@ pub struct BulkCandidate {
     pub warnings: Vec<String>,
     pub project_id: String,
     pub project_root: String,
+    /// The key the project gets (from --key-map) or already has.
+    pub project_key: Option<String>,
+    /// Why --apply cannot create this project yet: no key mapped for its root,
+    /// or the mapped key is already used in the data root.
+    pub key_problem: Option<String>,
     pub task_count: usize,
     pub files: Vec<BulkFileRecord>,
     pub applied: bool,
@@ -281,6 +290,12 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         .map(|pattern| Ok((pattern.clone(), compile_glob(pattern)?)))
         .collect::<Result<Vec<_>, AppError>>()?;
 
+    let key_map = match options.key_map.as_deref() {
+        Some(path) => load_key_map(path, &scan_root)?,
+        None => Vec::new(),
+    };
+    let existing_keys = crate::keys::scan(&options.data_root, false)?;
+
     let scan = scan_tree(&scan_root, &excludes)?;
 
     let mut inputs: Vec<(PathBuf, CandidateInput)> = scan
@@ -304,12 +319,71 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
     // candidate and without --allow-partial the run refuses before the first
     // registry entry, project directory, database or quarantine move exists.
     let mut staged: Vec<(String, CandidateOutcome)> = Vec::with_capacity(inputs.len());
+    let mut keys: Vec<CandidateKey> = Vec::with_capacity(inputs.len());
     for (dir, input) in &inputs {
-        let project_id = match existing_binding(&options.data_root, dir)? {
-            Some(existing) => existing,
-            None => derived_project_id(dir).to_string(),
+        let (project_id, creates) = match existing_binding(&options.data_root, dir)? {
+            Some(existing) => (existing, false),
+            None => (derived_project_id(dir).to_string(), true),
         };
-        let outcome = process_candidate(dir, input, &scan_root, &options, &map, &project_id)?;
+        // A new project takes its key from --key-map; an existing one keeps
+        // the key its database already has.
+        let key = if creates {
+            key_map
+                .iter()
+                .find(|(root, _)| same_path(root, dir))
+                .map(|(_, key)| key.clone())
+        } else {
+            existing_keys
+                .iter()
+                .find(|project| project.project_id.to_string() == project_id)
+                .and_then(|project| project.key.clone())
+        };
+        let other_keys = existing_keys
+            .iter()
+            .filter(|project| project.project_id.to_string() != project_id)
+            .filter_map(|project| project.key.clone())
+            .filter(|other| Some(other) != key.as_ref())
+            .collect::<Vec<_>>();
+        let candidate_map = map.with_id_key(key.as_deref()).with_other_keys(other_keys);
+        let outcome = process_candidate(
+            dir,
+            input,
+            &scan_root,
+            &options,
+            &candidate_map,
+            &project_id,
+        )?;
+        let applicable = outcome.bucket == BUCKET_RECOGNIZED
+            || outcome.bucket == BUCKET_RECOGNIZED_WITH_WARNINGS;
+        let problem = if !creates || !applicable {
+            None
+        } else if let Some(key) = key.as_deref() {
+            existing_keys
+                .iter()
+                .find(|project| {
+                    project.key.as_deref() == Some(key)
+                        && project.project_id.to_string() != project_id
+                })
+                .map(|owner| {
+                    let (name, _) = crate::keys::describe(&options.data_root, &owner.project_id);
+                    format!(
+                        "{}: key {key} is already used by project {name} ({}); choose another key in --key-map",
+                        dir.display(),
+                        owner.project_id
+                    )
+                })
+        } else {
+            Some(format!(
+                "{}: no project key; add \"{}\": \"KEY\" to the --key-map file",
+                dir.display(),
+                dir.display().to_string().replace('\\', "\\\\")
+            ))
+        };
+        keys.push(CandidateKey {
+            key,
+            problem,
+            map: candidate_map,
+        });
         staged.push((project_id, outcome));
     }
 
@@ -318,8 +392,18 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         let any_unrecognized = staged
             .iter()
             .any(|(_, outcome)| outcome.bucket == BUCKET_UNRECOGNIZED);
+        let key_problems = keys
+            .iter()
+            .filter_map(|key| key.problem.as_deref())
+            .collect::<Vec<_>>();
         if any_unrecognized && !options.allow_partial {
-            strict_refusal = Some(strict_refusal_message(&staged, &report_dir));
+            let mut message = strict_refusal_message(&staged, &report_dir);
+            for problem in &key_problems {
+                message.push_str(&format!("\n- {problem}"));
+            }
+            strict_refusal = Some(message);
+        } else if !key_problems.is_empty() {
+            strict_refusal = Some(key_refusal_message(&key_problems, &report_dir));
         } else {
             let export_dir = report_dir.join(EXPORT_DIR);
             for (index, ((dir, _), (_, outcome))) in inputs.iter().zip(staged.iter()).enumerate() {
@@ -362,7 +446,7 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
                         &project_id,
                         outcome,
                         &options,
-                        &map,
+                        &keys[index],
                         &mut manifest,
                     )?;
                 }
@@ -370,7 +454,7 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         }
     }
 
-    for ((dir, _input), (project_id, outcome)) in inputs.iter().zip(staged) {
+    for (((dir, _input), (project_id, outcome)), key) in inputs.iter().zip(staged).zip(keys) {
         if outcome.bucket == BUCKET_UNRECOGNIZED
             || outcome.apply_error.is_some()
             || (outcome.applied && !outcome.verified)
@@ -388,6 +472,8 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
             warnings: outcome.warnings,
             project_id,
             project_root: dir.display().to_string(),
+            project_key: key.key,
+            key_problem: key.problem,
             task_count: outcome.task_count,
             files: outcome.files,
             applied: outcome.applied,
@@ -450,6 +536,10 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
             .flat_map(|candidate| candidate.quarantine.iter())
             .filter(|record| record.status == "deleted")
             .count(),
+        key_problems: candidates
+            .iter()
+            .filter(|candidate| candidate.key_problem.is_some())
+            .count(),
     };
     for candidate in &candidates {
         match candidate.bucket.as_str() {
@@ -487,6 +577,75 @@ pub fn run(options: BulkOptions) -> Result<BulkRun, AppError> {
         failed,
         strict_refusal,
     })
+}
+
+/// Per candidate: its project key, why --apply cannot create it yet, and the
+/// section map that accepts `KEY-N` headings for it.
+struct CandidateKey {
+    key: Option<String>,
+    problem: Option<String>,
+    map: SectionMap,
+}
+
+/// Loads `--key-map`: one JSON object from project root to key. A relative
+/// root is resolved against the scan root. Keys are validated and must be
+/// unique within the map; uniqueness against the data root is checked per
+/// candidate (dry run) and again under the registry lock (apply).
+fn load_key_map(path: &Path, scan_root: &Path) -> Result<Vec<(PathBuf, String)>, AppError> {
+    let bytes = fs::read(path).map_err(|error| AppError::io_path("read --key-map", path, error))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        AppError::Usage(format!(
+            "--key-map {} is not valid JSON ({error}); write an object such as {{\"C:/work/app\": \"APP\"}}",
+            path.display()
+        ))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        AppError::Usage(format!(
+            "--key-map {} must be one JSON object mapping each project root to its key",
+            path.display()
+        ))
+    })?;
+    let mut entries: Vec<(PathBuf, String)> = Vec::with_capacity(object.len());
+    let mut by_key: HashMap<String, String> = HashMap::new();
+    for (root, key) in object {
+        let key = key.as_str().ok_or_else(|| {
+            AppError::Usage(format!(
+                "--key-map {}: the key for {root} must be a string",
+                path.display()
+            ))
+        })?;
+        let key = crate::model::parse_project_key(key).map_err(|error| {
+            AppError::Validation(format!("--key-map {}: {root}: {error}", path.display()))
+        })?;
+        if let Some(first) = by_key.insert(key.clone(), root.clone()) {
+            return Err(AppError::Validation(format!(
+                "--key-map {}: key {key} is assigned to both {first} and {root}; keys are unique within a data root",
+                path.display()
+            )));
+        }
+        let mut resolved = PathBuf::from(root);
+        if resolved.is_relative() {
+            resolved = scan_root.join(resolved);
+        }
+        let resolved = resolved.canonicalize().unwrap_or(resolved);
+        entries.push((resolved, key));
+    }
+    Ok(entries)
+}
+
+fn key_refusal_message(problems: &[&str], report_dir: &Path) -> String {
+    let mut message = format!(
+        "bulk-import --apply refused: {} project(s) it would create have no usable key, so nothing was written (no registry change, no project directory, no database, no quarantine). Map every root in --key-map and re-run:",
+        problems.len()
+    );
+    for problem in problems {
+        message.push_str(&format!("\n- {problem}"));
+    }
+    message.push_str(&format!(
+        "\nSee {}/summary.md for the per-candidate report.",
+        report_dir.display()
+    ));
+    message
 }
 
 /// The message for an --apply run that refused to touch anything because at
@@ -620,6 +779,10 @@ fn render_summary(
     ));
     out.push_str(&format!("- excluded paths: {}\n", summary.excluded_paths));
     out.push_str(&format!(
+        "- roots without a usable key: {}\n",
+        summary.key_problems
+    ));
+    out.push_str(&format!(
         "- AGENTS.md/CLAUDE.md files referencing TASKS.md: {}\n",
         summary.ledger_references
     ));
@@ -651,6 +814,13 @@ fn render_summary(
         }
         out.push_str(&format!("- directory: {}\n", candidate.directory));
         out.push_str(&format!("- project UUID: {}\n", candidate.project_id));
+        out.push_str(&format!(
+            "- project key: {}\n",
+            candidate.project_key.as_deref().unwrap_or("(none)")
+        ));
+        if let Some(problem) = &candidate.key_problem {
+            out.push_str(&format!("- key problem: {problem}\n"));
+        }
         out.push_str(&format!("- tasks: {}\n", candidate.task_count));
         out.push_str(&format!(
             "- applied: {}; verified: {}\n",
@@ -1482,7 +1652,7 @@ fn apply_candidate(
     project_id: &str,
     outcome: &mut CandidateOutcome,
     options: &BulkOptions,
-    map: &SectionMap,
+    key: &CandidateKey,
     manifest: &mut Vec<ManifestEntry>,
 ) -> Result<(), AppError> {
     match apply_and_verify(
@@ -1492,9 +1662,10 @@ fn apply_candidate(
         &outcome.parsed,
         &outcome.files,
         &display_relative(scan_root, dir),
-        map,
+        &key.map,
         options,
         project_id,
+        key.key.as_deref(),
     ) {
         Ok(result) => {
             outcome.applied = result.applied;
@@ -1661,6 +1832,7 @@ fn apply_and_verify(
     map: &SectionMap,
     options: &BulkOptions,
     project_id: &str,
+    key: Option<&str>,
 ) -> Result<ApplyOutcome, AppError> {
     // The test seam pauses immediately before the protected apply stage.
     before_candidate_apply()?;
@@ -1698,6 +1870,7 @@ fn apply_and_verify(
             map,
             options,
             project_id,
+            key,
         );
         result = Some(match attempt {
             Ok(mut outcome) => {
@@ -1837,6 +2010,7 @@ fn apply_and_verify_inner(
     map: &SectionMap,
     options: &BulkOptions,
     project_id: &str,
+    key: Option<&str>,
 ) -> Result<ApplyOutcome, AppError> {
     let mut reparsed = Vec::with_capacity(ledger_files.len());
     let mut hashes = Vec::with_capacity(ledger_files.len());
@@ -1871,7 +2045,9 @@ fn apply_and_verify_inner(
                 "bulk-import produced project id '{project_id}', which is not a UUID ({error}); re-run the scan"
             ))
         })?;
-    crate::store::create_project_db(&options.data_root, &explicit_project)?;
+    // The registry lock is held: the key check and the new database cannot
+    // interleave with another init, project-key --set or bulk apply.
+    registry::create_or_verify_keyed(&options.data_root, &explicit_project, key)?;
     let mut store = Store::open_rw(&options.data_root, project_id)?;
     let (_, already_imported) = store.import_apply_many(reparsed, &hashes)?;
 
@@ -1896,7 +2072,14 @@ fn apply_and_verify_inner(
         let exported_bytes = fs::read(&export_path).map_err(|error| {
             AppError::io_path("read the verification export", &export_path, error)
         })?;
-        let exported = markdown::parse(export_path.display().to_string(), exported_bytes, None)?;
+        let exported = markdown::parse_for_project(
+            export_path.display().to_string(),
+            exported_bytes,
+            None,
+            SourceSchema::Canonical,
+            store.project_key.as_deref(),
+            Vec::new(),
+        )?;
         let verification = verify_project(&mut store, preview, &exported, exported_count);
         #[cfg(feature = "test-hooks")]
         let verification = maybe_force_verification_failure(verification);

@@ -47,7 +47,7 @@ String viewerProjectRowLabel(
   ProjectItem item, {
   bool includeRoot = false,
 }) {
-  final buffer = StringBuffer(item.name);
+  final buffer = StringBuffer(item.displayName);
   if (includeRoot && item.roots.isNotEmpty) {
     buffer
       ..write(', root ')

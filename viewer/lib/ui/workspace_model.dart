@@ -307,7 +307,12 @@ class ViewerWorkspaceModel extends ChangeNotifier {
       return;
     }
     tasks.selectIndex(index);
-    await _detail?.openTask(item.id);
+    final detail = _detail;
+    if (detail == null) {
+      return;
+    }
+    detail.projectKey = tasks.projectKey ?? detail.projectKey;
+    await detail.openTask(item.id);
   }
 
   /// Makes the page that owns [index] available for a virtual jump.
@@ -492,6 +497,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
         if (id == null) {
           detail.clearSelection();
         } else {
+          detail.projectKey = _tasks?.projectKey ?? detail.projectKey;
           detail.selectTask(id);
         }
       }
@@ -530,7 +536,10 @@ class ViewerWorkspaceModel extends ChangeNotifier {
       return;
     }
     for (final draft in editor.pendingDrafts) {
-      if (draft.projectId != projectId || draft.taskId != detail.canonicalId) {
+      // Drafts are stored under the key-independent T-N form, so match on the
+      // project and the numeric ID, never on the keyed display form.
+      if (draft.projectId != projectId ||
+          draft.taskId != viewerCanonicalTaskId(detail.id)) {
         continue;
       }
       if (!_offeredDrafts.add(draft.draftId)) {

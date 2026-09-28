@@ -184,7 +184,10 @@ void viewerE2eScenarios() {
           greaterThan(fixture.checks.searchExpectedCount),
           reason: 'the unfiltered list must be larger than the search result',
         );
-        expect(find.bySemanticsLabel(RegExp('^T-\\d{3}, ')), findsWidgets);
+        expect(
+          find.bySemanticsLabel(RegExp('^[A-Z][A-Z0-9]*-\\d{3}, ')),
+          findsWidgets,
+        );
         final visible = <String>[
           for (var index = 0; index < window.tasks!.loadedRowCount; index += 1)
             if (window.tasks!.itemAt(index) != null)

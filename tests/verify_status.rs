@@ -84,7 +84,10 @@ fn v4_fixture(root: &std::path::Path, id: &Uuid) {
 }
 
 const PRESERVED: [(&str, &str); 6] = [
-    ("project", "SELECT * FROM project"),
+    (
+        "project",
+        "SELECT project_id,rules_markdown,rules_version,next_task_number FROM project",
+    ),
     (
         "tasks",
         "SELECT id,title,body,status,version,created_ms,updated_ms,priority FROM tasks ORDER BY id",
@@ -100,14 +103,14 @@ const PRESERVED: [(&str, &str); 6] = [
 
 #[test]
 fn schema_four_upgrade_rebuilds_status_check_with_verified_backup() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 5);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 6);
     let root = tempfile::tempdir().unwrap();
     let id = Uuid::new_v4();
     v4_fixture(root.path(), &id);
     assert!(Store::open_readonly(root.path(), &id.to_string()).is_err());
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (4, 5));
+    assert_eq!((from, to), (4, 6));
     let backup = backup.unwrap();
     assert!(backup
         .file_name()
@@ -194,10 +197,10 @@ fn schema_four_upgrade_rebuilds_status_check_with_verified_backup() {
         .conn
         .execute_batch("INSERT INTO tasks_fts(tasks_fts) VALUES('integrity-check')")
         .unwrap();
-    assert_eq!(store.doctor().unwrap().2, 5);
+    assert_eq!(store.doctor().unwrap().2, 6);
     drop(store);
     let mut again = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
-    assert_eq!(again.migrate().unwrap(), (5, 5, None));
+    assert_eq!(again.migrate().unwrap(), (6, 6, None));
 }
 
 #[test]
@@ -536,7 +539,11 @@ fn cli_takes_a_dependent_chain_through_to_verify_and_guards_done() {
     assert_eq!(error["code"], "validation");
     assert_eq!(
         error["open_prerequisites"],
-        serde_json::json!({"task": 3, "prerequisites": [{"id": 2, "status": "to-verify"}]})
+        serde_json::json!({
+            "task": 3,
+            "task_display_id": "T-003",
+            "prerequisites": [{"id": 2, "display_id": "T-002", "status": "to-verify"}]
+        })
     );
     assert!(refused.stdout.is_empty());
     let shown = cli.ok(&["show", "T-3"]);

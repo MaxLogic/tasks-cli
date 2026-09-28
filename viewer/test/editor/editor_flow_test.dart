@@ -725,6 +725,33 @@ void main() {
       expect(drafts.drafts, isEmpty);
     });
 
+    testWidgets('a keyed task still offers its T-N recovery draft', (
+      WidgetTester tester,
+    ) async {
+      final drafts = sinkHoldingDraft(savedDraftForFirstTask());
+      final catalog = <ProjectItem>[testProjectItem(1)];
+      final reads = fakeWorkspaceReads(
+        projects: catalog,
+        tasks: <String, List<TaskItem>>{
+          catalog.single.projectId: <TaskItem>[
+            testTaskItem(1, title: 'First task', displayId: 'DAK-001'),
+          ],
+        },
+        details: <int, TaskDetail>{
+          1: testTaskDetail(1, title: 'First task', projectKey: 'DAK'),
+        },
+      );
+      final harness = await openFirstTask(tester, reads: reads, drafts: drafts);
+
+      expect(find.text('Restore draft'), findsOneWidget);
+      expect(find.text('DAK-001  First task'), findsOneWidget);
+
+      await pressAlt(tester, LogicalKeyboardKey.keyD);
+
+      expect(harness.statusText, 'Discarded the saved draft for DAK-001.');
+      expect(drafts.drafts, isEmpty);
+    });
+
     testWidgets('a draft that cannot be read is removed with the reason', (
       WidgetTester tester,
     ) async {

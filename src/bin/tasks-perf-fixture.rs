@@ -220,7 +220,7 @@ fn seed_project(
     let root_dir = roots_root.join(&spec.name);
     std::fs::create_dir_all(&root_dir)
         .map_err(|error| AppError::io_path("create the fixture project root", &root_dir, error))?;
-    let info = registry::init_root(data_root, &root_dir, None)?;
+    let info = registry::init_root(data_root, &root_dir, None, None)?;
     let mut store = Store::open_rw(data_root, &info.project_id.to_string())?;
     let tx = store
         .conn
@@ -297,7 +297,7 @@ fn seed_empty_projects(
         std::fs::create_dir_all(&root_dir).map_err(|error| {
             AppError::io_path("create the fixture project root", &root_dir, error)
         })?;
-        registry::init_root(data_root, &root_dir, None)?;
+        registry::init_root(data_root, &root_dir, None, None)?;
         hasher.update(b"project\n");
         hasher.update(name.as_bytes());
         if index % 100 == 99 || index + 1 == count {

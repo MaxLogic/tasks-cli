@@ -185,8 +185,44 @@ void main() {
       expect(harness.playedClips, isEmpty);
       final spoken = harness.announcements.liveRegionText;
       expect(spoken, contains('1 replacement,'));
-      expect(spoken, contains('T-9, T-12'));
+      expect(spoken, contains('T-009, T-012'));
       expect(spoken, isNot(contains('Clipboard enriched')));
+    });
+
+    test(
+      'names unknown references with keys as the CLI reported them',
+      () async {
+        final harness = ClipboardHarness(mode: AnnouncementMode.nvdaOnly);
+        addTearDown(harness.dispose);
+        harness.enricher.answer = testClipboardEnrichment(
+          replacements: 1,
+          unknownIds: const <int>[9],
+          unknownRefs: const <String>['DAK-9', 'DS-4'],
+        );
+
+        await harness.controller.enrichClipboard(testProjectItem(1));
+
+        final spoken = harness.announcements.liveRegionText;
+        expect(spoken, contains('2 unknown IDs'));
+        expect(
+          spoken,
+          contains('Unknown task IDs left unchanged: DAK-9, DS-4.'),
+        );
+      },
+    );
+
+    test('an older CLI without unknown_refs falls back to the keyed form', () {
+      final result = testClipboardEnrichment(unknownIds: const <int>[9]);
+      expect(result.unknownLabels('DAK'), <String>['DAK-009']);
+      expect(result.unknownLabels(null), <String>['T-009']);
+      final decoded = ClipboardEnrichment.fromJson(<String, Object?>{
+        'text': 'x',
+        'replacements': 0,
+        'unknown_ids': <int>[9],
+        'unknown_refs': <String>['DAK-9', 'DS-4'],
+        'clipboard': false,
+      });
+      expect(decoded.unknownLabels('DAK'), <String>['DAK-9', 'DS-4']);
     });
 
     test('says Clipboard unchanged when nothing was replaced', () async {

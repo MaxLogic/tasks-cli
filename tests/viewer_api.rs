@@ -1596,6 +1596,7 @@ fn task_pages_return_the_documented_fields_without_bodies() {
         [
             "created_ms",
             "dependency_count",
+            "display_id",
             "id",
             "labels",
             "priority",
@@ -2247,6 +2248,7 @@ fn viewer_show_matches_legacy_detail_and_adds_running_timestamps() {
         data["dependency_summaries"],
         json!([{
             "id": dependency,
+            "display_id": format!("T-{dependency:03}"),
             "status": "todo",
             "version": 1,
             "title": "dependency"
@@ -2271,10 +2273,16 @@ fn viewer_show_reports_missing_tasks_and_invalid_ids() {
     project
         .run(&["viewer", "show", "T-999"])
         .fails_with_message(EXIT_NOT_FOUND, "not_found", "T-999");
-    project.run(&["viewer", "show", "007"]).fails_with_message(
+    // Bare numbers are task IDs now (T-N, KEY-N and N are all accepted).
+    project.run(&["viewer", "show", "999"]).fails_with_message(
+        EXIT_NOT_FOUND,
+        "not_found",
+        "T-999",
+    );
+    project.run(&["viewer", "show", "T-x"]).fails_with_message(
         EXIT_USAGE,
         "validation",
-        "expected the form T-<digits>",
+        "expected KEY-<digits>, T-<digits> or <digits>",
     );
 }
 
@@ -2814,7 +2822,15 @@ fn to_verify_status_is_filterable_sorted_and_satisfies_runnable_readiness() {
     let error = refused.fails(2, "validation");
     assert_eq!(
         error["open_prerequisites"],
-        json!({"task": dependent, "prerequisites": [{"id": verify, "status": "to-verify"}]})
+        json!({
+            "task": dependent,
+            "task_display_id": format!("T-{dependent:03}"),
+            "prerequisites": [{
+                "id": verify,
+                "display_id": format!("T-{verify:03}"),
+                "status": "to-verify"
+            }]
+        })
     );
     assert_eq!(
         project

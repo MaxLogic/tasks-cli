@@ -1,6 +1,7 @@
 use crate::bulk::BulkRun;
 use crate::model::{
-    HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord, ShowTask, TaskSummary,
+    render_keyed_task_id, HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord,
+    ShowTask, TaskSummary,
 };
 use crate::viewer::{
     ViewerArchivePayload, ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload,
@@ -31,7 +32,14 @@ pub struct ShowPayload {
 pub enum CommandPayload {
     Init {
         project_id: String,
+        project_key: Option<String>,
         db_path: String,
+    },
+    /// `project-key`: the current key; `--set` adds the key it replaced.
+    ProjectKey {
+        project_key: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        previous_key: Option<Option<String>>,
     },
     Bind {
         project_id: String,
@@ -61,6 +69,7 @@ pub enum CommandPayload {
         text: String,
         replacements: usize,
         unknown_ids: Vec<u64>,
+        unknown_refs: Vec<String>,
         clipboard: bool,
     },
     Show(ShowPayload),
@@ -74,18 +83,21 @@ pub enum CommandPayload {
     },
     Create {
         id: u64,
+        display_id: String,
         status: String,
         version: u64,
         event_id: Option<u64>,
     },
     Update {
         id: u64,
+        display_id: String,
         status: String,
         version: u64,
         event_id: Option<u64>,
     },
     History {
         id: u64,
+        display_id: String,
         items: Vec<HistoryEvent>,
         has_more: bool,
         next_after: Option<u64>,
@@ -142,15 +154,23 @@ pub struct Envelope {
     pub schema_version: u8,
     pub project_id: Option<String>,
     pub data: CommandPayload,
+    /// Project key for rendering task IDs in text output; JSON carries each
+    /// object's own `display_id` instead.
+    #[serde(skip)]
+    pub id_key: Option<String>,
 }
 
 impl Envelope {
+    fn rid(&self, id: u64) -> String {
+        render_keyed_task_id(self.id_key.as_deref(), id)
+    }
+
     /// One tab-separated row; the dependency and label columns appear only
     /// when non-empty.
-    fn summary_line(item: &TaskSummary) -> String {
+    fn summary_line(&self, item: &TaskSummary) -> String {
         let mut line = format!(
-            "T-{:03}\t{}\t{}\tv{}\t{}",
-            item.id,
+            "{}\t{}\t{}\tv{}\t{}",
+            self.rid(item.id),
             item.priority,
             item.status,
             item.version,
@@ -160,7 +180,7 @@ impl Envelope {
             let deps = item
                 .deps
                 .iter()
-                .map(|d| format!("T-{d:03}"))
+                .map(|d| self.rid(*d))
                 .collect::<Vec<_>>()
                 .join(",");
             line.push_str(&format!("\t[{deps}]"));
@@ -172,9 +192,9 @@ impl Envelope {
         line
     }
 
-    fn show_lines(task: &ShowTask) -> String {
+    fn show_lines(&self, task: &ShowTask) -> String {
         let mut out = String::new();
-        out.push_str(&format!("id: T-{0:03}\n", task.id));
+        out.push_str(&format!("id: {}\n", self.rid(task.id)));
         out.push_str(&format!("status: {}\n", task.status));
         out.push_str(&format!("priority: {}\n", task.priority));
         out.push_str(&format!("version: {}\n", task.version));
@@ -183,8 +203,11 @@ impl Envelope {
         }
         for dependency in &task.dependency_summaries {
             out.push_str(&format!(
-                "depends_on: T-{0:03}\t{1}\tv{2}\t{3}\n",
-                dependency.id, dependency.status, dependency.version, dependency.title
+                "depends_on: {0}\t{1}\tv{2}\t{3}\n",
+                self.rid(dependency.id),
+                dependency.status,
+                dependency.version,
+                dependency.title
             ));
         }
         out.push_str("title:\n");
@@ -216,13 +239,13 @@ impl Envelope {
         }
     }
 
-    fn import_report_lines(report: &ImportReport) -> String {
+    fn import_report_lines(&self, report: &ImportReport) -> String {
         let mut out = format!("tasks: {}\n", report.task_count);
         out.push_str(&format!("rules: {}\n", report.rules.len()));
         let duplicates = report
             .duplicate_ids
             .iter()
-            .map(|id| format!("T-{id:03}"))
+            .map(|id| self.rid(*id))
             .collect::<Vec<_>>()
             .join(",");
         out.push_str(&format!(
@@ -239,12 +262,17 @@ impl Envelope {
             let deps = task
                 .deps
                 .iter()
-                .map(|dep| format!("T-{dep:03}"))
+                .map(|dep| self.rid(*dep))
                 .collect::<Vec<_>>()
                 .join(",");
             out.push_str(&format!(
-                "T-{0:03} {1} {2} consumed=[{3}] deps=[{4}] {5}\n",
-                task.id, task.status, task.section, consumed, deps, task.title
+                "{0} {1} {2} consumed=[{3}] deps=[{4}] {5}\n",
+                self.rid(task.id),
+                task.status,
+                task.section,
+                consumed,
+                deps,
+                task.title
             ));
         }
         for section in &report.sections {
@@ -295,31 +323,56 @@ impl Envelope {
 
     pub fn text(&self) -> String {
         match &self.data {
-            CommandPayload::Init { project_id, db_path } => {
-                format!("project_id: {project_id}\ndb_path: {db_path}\n")
+            CommandPayload::Init {
+                project_id,
+                project_key,
+                db_path,
+            } => {
+                format!(
+                    "project_id: {project_id}\ndb_path: {db_path}\nproject_key: {}\n",
+                    project_key.as_deref().unwrap_or("none")
+                )
+            }
+            CommandPayload::ProjectKey {
+                project_key,
+                previous_key,
+            } => {
+                let mut out = format!(
+                    "project_key: {}\n",
+                    project_key.as_deref().unwrap_or("none")
+                );
+                if let Some(previous) = previous_key {
+                    out.push_str(&format!(
+                        "previous_key: {}\n",
+                        previous.as_deref().unwrap_or("none")
+                    ));
+                }
+                out
             }
             CommandPayload::Bind { project_id, root } => {
                 format!("project_id: {project_id}\nroot: {root}\n")
             }
             CommandPayload::Create {
-                id,
+                display_id,
                 status,
                 version,
                 event_id,
+                ..
             } => {
                 format!(
-                    "id: T-{id:03}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
+                    "id: {display_id}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
                     event_id.map_or_else(|| "null".to_string(), |id| id.to_string())
                 )
             }
             CommandPayload::Update {
-                id,
+                display_id,
                 status,
                 version,
                 event_id,
+                ..
             } => {
                 format!(
-                    "id: T-{id:03}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
+                    "id: {display_id}\nstatus: {status}\nversion: {version}\nevent_id: {}\n",
                     event_id.map_or_else(|| "null".to_string(), |id| id.to_string())
                 )
             }
@@ -328,7 +381,10 @@ impl Envelope {
                 has_more,
                 next_after,
             } => {
-                let mut out = items.iter().map(Self::summary_line).collect::<String>();
+                let mut out = items
+                    .iter()
+                    .map(|item| self.summary_line(item))
+                    .collect::<String>();
                 out.push_str(&format!("has_more: {has_more}\n"));
                 if let Some(next) = next_after { out.push_str(&format!("next_after: {next}\n")); }
                 out
@@ -336,7 +392,7 @@ impl Envelope {
             CommandPayload::Unlocks { items, has_more, next_offset } => {
                 let mut out = String::new();
                 for item in items {
-                    out.push_str(&format!("{}\tdirect_open_dependents={}\timmediately_runnable={}\n", Self::summary_line(&item.task).trim_end(), item.direct_open_dependents, item.immediately_runnable));
+                    out.push_str(&format!("{}\tdirect_open_dependents={}\timmediately_runnable={}\n", self.summary_line(&item.task).trim_end(), item.direct_open_dependents, item.immediately_runnable));
                 }
                 out.push_str(&format!("has_more: {has_more}\n"));
                 if let Some(next) = next_offset { out.push_str(&format!("next_offset: {next}\n")); }
@@ -354,7 +410,7 @@ impl Envelope {
             } => {
                 let mut out = String::new();
                 for item in items {
-                    out.push_str(&Self::summary_line(item));
+                    out.push_str(&self.summary_line(item));
                 }
                 out.push_str(&format!("has_more: {has_more}\n"));
                 if let Some(next) = next_after {
@@ -369,7 +425,7 @@ impl Envelope {
             }
             CommandPayload::Enrich {text,..} => text.clone(),
             CommandPayload::Show(show) => {
-                let mut out = Self::show_lines(&show.task);
+                let mut out = self.show_lines(&show.task);
                 out.push_str(&Self::rules_lines(show.rule_version, show.rules.as_deref()));
                 out
             }
@@ -380,7 +436,7 @@ impl Envelope {
             } => {
                 let mut out = items
                     .iter()
-                    .map(Self::show_lines)
+                    .map(|task| self.show_lines(task))
                     .collect::<Vec<_>>()
                     .join("\n");
                 out.push_str(&Self::rules_lines(*rule_version, rules.as_deref()));
@@ -428,7 +484,7 @@ impl Envelope {
             } => {
                 let mut out = format!(
                     "file: {path}\napplied: {applied}\nalready_imported: {already_imported}\n{}",
-                    Self::import_report_lines(report)
+                    self.import_report_lines(report)
                 );
                 out.push_str(&Self::import_problem_lines(problems, problem_counts));
                 out
@@ -446,7 +502,7 @@ impl Envelope {
                 );
                 for entry in files {
                     out.push_str(&format!("file: {}\n", entry.path));
-                    out.push_str(&Self::import_report_lines(&entry.report));
+                    out.push_str(&self.import_report_lines(&entry.report));
                 }
                 out.push_str(&Self::import_problem_lines(problems, problem_counts));
                 out
@@ -475,15 +531,21 @@ impl Envelope {
                     run.reports.summary_md,
                     run.reports.unrecognized_md,
                 );
+                for candidate in &run.candidates {
+                    if let Some(problem) = &candidate.key_problem {
+                        out.push_str(&format!("key_problem: {problem}\n"));
+                    }
+                }
                 if let Some(manifest) = &run.reports.quarantine_manifest {
                     out.push_str(&format!("quarantine_manifest: {manifest}\n"));
                 }
                 for candidate in &run.candidates {
                     out.push_str(&format!(
-                        "- {} [{}] project={} tasks={} applied={} verified={}\n",
+                        "- {} [{}] project={} key={} tasks={} applied={} verified={}\n",
                         candidate.relative_directory,
                         candidate.bucket,
                         candidate.project_id,
+                        candidate.project_key.as_deref().unwrap_or("none"),
                         candidate.task_count,
                         candidate.applied,
                         candidate.verified
@@ -537,6 +599,7 @@ mod tests {
                     priority: Default::default(),
                     labels: vec![],
                     id: 1,
+                    display_id: "T-001".to_string(),
                     status: crate::model::TaskStatus::Backlog,
                     version: 1,
                     title: "title".to_string(),
@@ -545,6 +608,7 @@ mod tests {
                 has_more: false,
                 next_after: None,
             },
+            id_key: None,
         };
         let text = envelope.text();
         assert!(text.contains("title"));
@@ -609,6 +673,7 @@ mod tests {
                 already_imported: false,
                 applied: false,
             },
+            id_key: None,
         };
         let text = envelope.text();
         assert!(text.contains("T-001 todo ready consumed=[Status,Body] deps=[] Title"));

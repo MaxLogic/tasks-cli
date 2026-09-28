@@ -5,8 +5,19 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tasks_cli::bulk::{self, BulkOptions};
 use tasks_cli::model::{SourceSchema, TaskStatus};
-use tasks_cli::store::{create_project_db, Store};
+use tasks_cli::store::{create_project_db_with_key, Store};
 use uuid::Uuid;
+
+/// Writes a --key-map giving the workspace root the key WS.
+fn key_map(temp: &std::path::Path, root: &std::path::Path) -> std::path::PathBuf {
+    let path = temp.join("keys.json");
+    fs::write(
+        &path,
+        serde_json::json!({ root.to_str().unwrap(): "WS" }).to_string(),
+    )
+    .unwrap();
+    path
+}
 
 #[test]
 fn failed_bulk_import_preserves_a_project_created_by_another_process() {
@@ -32,6 +43,7 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
         delete_quarantined: false,
         allow_partial: false,
         source_schema: SourceSchema::Canonical,
+        key_map: Some(key_map(temp.path(), &root)),
     })
     .unwrap();
     assert_eq!(preview.failed, 0);
@@ -48,6 +60,8 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
         .arg(&map)
         .arg("--report-dir")
         .arg(temp.path().join("apply"))
+        .arg("--key-map")
+        .arg(key_map(temp.path(), &root))
         .arg("--apply")
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
@@ -74,6 +88,8 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
         .arg("init")
         .arg("--root")
         .arg(&root)
+        .arg("--key")
+        .arg("WS")
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
         .output()
@@ -134,10 +150,11 @@ fn verification_failure_on_a_preexisting_database_reports_retained_mutation() {
         delete_quarantined: false,
         allow_partial: false,
         source_schema: SourceSchema::Canonical,
+        key_map: Some(key_map(temp.path(), &root)),
     })
     .unwrap();
     let project = Uuid::parse_str(&preview.candidates[0].project_id).unwrap();
-    create_project_db(&data, &project).unwrap();
+    create_project_db_with_key(&data, &project, Some("WS")).unwrap();
 
     let report_dir = temp.path().join("apply");
     let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
@@ -151,6 +168,8 @@ fn verification_failure_on_a_preexisting_database_reports_retained_mutation() {
             map.to_str().unwrap(),
             "--report-dir",
             report_dir.to_str().unwrap(),
+            "--key-map",
+            key_map(temp.path(), &root).to_str().unwrap(),
             "--apply",
         ])
         .env("TASKS_TEST_BULK_FAIL_VERIFY", "1")
@@ -188,10 +207,11 @@ fn competing_verification_export_reports_committed_preexisting_db_state() {
         delete_quarantined: false,
         allow_partial: false,
         source_schema: SourceSchema::Canonical,
+        key_map: Some(key_map(temp.path(), &root)),
     })
     .unwrap();
     let project = Uuid::parse_str(&preview.candidates[0].project_id).unwrap();
-    create_project_db(&data, &project).unwrap();
+    create_project_db_with_key(&data, &project, Some("WS")).unwrap();
 
     let report_dir = temp.path().join("apply");
     let ready = temp.path().join("ready-export");
@@ -207,6 +227,8 @@ fn competing_verification_export_reports_committed_preexisting_db_state() {
             map.to_str().unwrap(),
             "--report-dir",
             report_dir.to_str().unwrap(),
+            "--key-map",
+            key_map(temp.path(), &root).to_str().unwrap(),
             "--apply",
         ])
         .env("TASKS_TEST_BULK_READY", &ready)

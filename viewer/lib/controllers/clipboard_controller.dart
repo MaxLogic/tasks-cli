@@ -19,12 +19,16 @@ class ClipboardPreview {
   const ClipboardPreview({
     required this.projectId,
     required this.projectName,
+    this.projectKey,
     required this.original,
     required this.enrichment,
   });
 
   final String projectId;
   final String projectName;
+
+  /// The project's key, for showing unknown IDs from older CLIs.
+  final String? projectKey;
 
   /// The clipboard text exactly as it was read; the dialog shows it unchanged.
   final String original;
@@ -155,6 +159,7 @@ class ClipboardController extends ChangeNotifier {
       return ClipboardPreview(
         projectId: project.projectId,
         projectName: project.name,
+        projectKey: project.projectKey,
         original: text,
         enrichment: result,
       );
@@ -175,9 +180,10 @@ class ClipboardController extends ChangeNotifier {
   /// other two outcomes while NVDA-only mode reads the counts.
   void _announceDirectOutcome(ProjectItem project, ClipboardEnrichment result) {
     final counts = clipboardCountsText(result);
-    if (result.unknownIds.isNotEmpty) {
+    final unknown = result.unknownLabels(project.projectKey);
+    if (unknown.isNotEmpty) {
       announcements.announceStatus(
-        clipboardAttentionText(project.name, counts, result.unknownIds),
+        clipboardAttentionText(project.name, counts, unknown),
         dynamic: true,
       );
       return;
@@ -201,9 +207,10 @@ class ClipboardController extends ChangeNotifier {
     ClipboardEnrichment result,
   ) {
     final counts = clipboardCountsText(result);
-    if (result.unknownIds.isNotEmpty) {
+    final unknown = result.unknownLabels(project.projectKey);
+    if (unknown.isNotEmpty) {
       announcements.announceStatus(
-        clipboardAttentionText(project.name, counts, result.unknownIds),
+        clipboardAttentionText(project.name, counts, unknown),
         dynamic: true,
       );
       return;
@@ -230,7 +237,7 @@ class ClipboardController extends ChangeNotifier {
 /// "3 replacements, 0 unknown IDs": counts only, never clipboard content.
 String clipboardCountsText(ClipboardEnrichment result) =>
     '${clipboardPlural(result.replacements, 'replacement')}, '
-    '${clipboardPlural(result.unknownIds.length, 'unknown ID')}';
+    '${clipboardPlural(result.unknownLabels(null).length, 'unknown ID')}';
 
 /// The one sentence an outcome that needs attention is spoken through.
 ///
@@ -239,14 +246,15 @@ String clipboardCountsText(ClipboardEnrichment result) =>
 String clipboardAttentionText(
   String projectName,
   String counts,
-  List<int> unknownIds,
-) => '$projectName: $counts. ${clipboardUnknownIdsText(unknownIds)}';
+  List<String> unknown,
+) => '$projectName: $counts. ${clipboardUnknownIdsText(unknown)}';
 
 /// The unknown-ID line, shared by the dialog and the spoken sentence.
-String clipboardUnknownIdsText(List<int> unknownIds) {
-  final ids = unknownIds.map((id) => 'T-$id').join(', ');
-  return 'Unknown task IDs left unchanged: $ids.';
-}
+///
+/// [unknown] comes from [ClipboardEnrichment.unknownLabels], so keyed
+/// references read as the CLI reported them (`DAK-9`, `DS-4`).
+String clipboardUnknownIdsText(List<String> unknown) =>
+    'Unknown task IDs left unchanged: ${unknown.join(', ')}.';
 
 /// "1 replacement" vs "2 replacements".
 String clipboardPlural(int count, String noun) =>

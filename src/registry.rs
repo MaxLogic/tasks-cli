@@ -1,6 +1,6 @@
 use crate::error::AppError;
 use crate::storage::{acquire_exclusive_lock, validate_storage_root};
-use crate::store::{create_project_db, StoreInfo};
+use crate::store::{create_project_db_with_key, StoreInfo};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -383,10 +383,51 @@ pub fn bind_root(
     })
 }
 
+/// Runs `f` while holding the registry lock without rewriting the registry.
+/// Project-key changes use it so a key check and its write cannot interleave
+/// with another `init`, `project-key --set` or bulk apply.
+pub fn with_registry_lock<T>(
+    data_root: &Path,
+    f: impl FnOnce(&Path) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let data_root = validate_storage_root(data_root)?;
+    fs::create_dir_all(&data_root)
+        .map_err(|error| AppError::io_path("create data root", &data_root, error))?;
+    let _lock = acquire_exclusive_lock(&data_root.join("registry.lock"))?;
+    f(&data_root)
+}
+
+/// Creates or validates the project database under the registry lock. A new
+/// database receives `key` after the key is checked against every project in
+/// the data root; an existing one must already hold exactly that key.
+pub fn create_or_verify_keyed(
+    data_root: &Path,
+    project_id: &Uuid,
+    key: Option<&str>,
+) -> Result<StoreInfo, AppError> {
+    if let Some(key) = key {
+        crate::keys::ensure_available(data_root, key, Some(project_id))?;
+    }
+    let info = create_project_db_with_key(data_root, project_id, key)?;
+    if let Some(key) = key {
+        if info.project_key.as_deref() != Some(key) {
+            return Err(AppError::Validation(format!(
+                "project {project_id} already exists with {}; init does not change keys. Run tasks project-key --set {key} --project {project_id} to change it",
+                match info.project_key.as_deref() {
+                    Some(existing) => format!("key {existing}"),
+                    None => "no key".to_string(),
+                }
+            )));
+        }
+    }
+    Ok(info)
+}
+
 pub fn init_root(
     data_root: &Path,
     root: &Path,
     explicit_project: Option<Uuid>,
+    key: Option<&str>,
 ) -> Result<StoreInfo, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let canonical_root = root.canonicalize().map_err(|error| {
@@ -424,10 +465,10 @@ pub fn init_root(
                 )));
             }
         }
-        return create_project_db(&data_root, &existing_id);
+        return create_or_verify_keyed(&data_root, &existing_id, key);
     }
     let project_id = explicit_project.unwrap_or_else(Uuid::new_v4);
-    let info = create_project_db(&data_root, &project_id)?;
+    let info = create_or_verify_keyed(&data_root, &project_id, key)?;
     registry.bindings.push(RegistryBinding {
         root: canonical_root.to_string_lossy().to_string(),
         project_id: project_id.to_string(),

@@ -585,7 +585,12 @@ class TaskController extends ChangeNotifier {
     _notify();
   }
 
+  /// The project's key from the latest page, or null when it has none.
+  String? get projectKey => _projectKey;
+  String? _projectKey;
+
   void _applyPage(TaskPage page, {required int pageIndex}) {
+    _projectKey = page.projectKey;
     if (_totalCount != page.totalCount) {
       _totalCount = page.totalCount;
       final resized = List<TaskItem?>.filled(_totalCount, null);

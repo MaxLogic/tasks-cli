@@ -99,12 +99,19 @@ final class ViewerCliErrorFailure extends ViewerFailure {
 /// One prerequisite that is neither done nor cancelled, from the structured
 /// `open_prerequisites` detail of the store's completion-guard refusal.
 final class ViewerOpenPrerequisite {
-  const ViewerOpenPrerequisite({required this.id, required this.status});
+  const ViewerOpenPrerequisite({
+    required this.id,
+    required this.status,
+    this.displayId,
+  });
 
   final int id;
   final String status;
 
-  String get canonicalId => viewerCanonicalTaskId(id);
+  /// `KEY-009` from the CLI; older CLIs send only the number.
+  final String? displayId;
+
+  String get canonicalId => displayId ?? viewerCanonicalTaskId(id);
 }
 
 /// The CLI process did not finish within the client read timeout.
@@ -459,6 +466,7 @@ final class ProjectStats {
 final class ProjectItem {
   const ProjectItem({
     this.archivedAtMs,
+    this.projectKey,
     required this.projectId,
     required this.name,
     required this.roots,
@@ -469,6 +477,9 @@ final class ProjectItem {
   });
 
   final String projectId;
+
+  /// The project key (`DAK`), or null before one is assigned.
+  final String? projectKey;
   final String name;
   final List<String> roots;
   final ProjectAvailability availability;
@@ -481,6 +492,10 @@ final class ProjectItem {
   final int? archivedAtMs;
 
   bool get isAvailable => availability == ProjectAvailability.available;
+
+  /// Name with the project key, for example `DelphiAiKit (DAK)`; the plain
+  /// name when the project has no key.
+  String get displayName => projectKey == null ? name : '$name ($projectKey)';
 
   /// Every bound root, or the label used when the registry has none.
   String get rootSummary => roots.isEmpty ? 'No bound root' : roots.join(', ');
@@ -496,6 +511,7 @@ final class ProjectItem {
           ? _requiredNullableInt(json, 'archived_at_ms', path)
           : null,
       projectId: _requireString(json, 'project_id', path),
+      projectKey: _optionalString(json, 'project_key', path),
       name: _requireString(json, 'name', path),
       roots: _requireStringList(json, 'roots', path),
       availability: ProjectAvailability.fromWire(
@@ -519,6 +535,7 @@ final class ProjectItem {
 
   Map<String, Object?> toJson() => <String, Object?>{
     'project_id': projectId,
+    'project_key': projectKey,
     'name': name,
     'roots': roots,
     'archived_at_ms': archivedAtMs,
@@ -738,8 +755,15 @@ final class ViewerErrorEnvelope {
           if (item is Map<String, Object?>) {
             final id = item['id'];
             final status = item['status'];
+            final displayId = item['display_id'];
             if (id is int && status is String) {
-              open.add(ViewerOpenPrerequisite(id: id, status: status));
+              open.add(
+                ViewerOpenPrerequisite(
+                  id: id,
+                  status: status,
+                  displayId: displayId is String ? displayId : null,
+                ),
+              );
             }
           }
         }
@@ -1206,8 +1230,10 @@ String viewerOpenPrerequisitesMessage(
       'first.';
 }
 
-/// Canonical display form of a task ID: T-007, T-12000.
-String viewerCanonicalTaskId(int id) => 'T-${id.toString().padLeft(3, '0')}';
+/// Canonical display form of a task ID: `DAK-007` for a project with a key,
+/// otherwise T-007, T-12000.
+String viewerCanonicalTaskId(int id, [String? projectKey]) =>
+    '${projectKey ?? 'T'}-${id.toString().padLeft(3, '0')}';
 
 /// Throws unless [value] is one of the canonical statuses.
 String _requireStatus(Object? value, String path) {
@@ -1282,6 +1308,7 @@ final class TaskQuery {
 final class TaskItem {
   const TaskItem({
     required this.id,
+    this.displayId,
     required this.title,
     required this.status,
     required this.priority,
@@ -1295,6 +1322,9 @@ final class TaskItem {
   });
 
   final int id;
+
+  /// `KEY-007` from the CLI; older CLIs send only the number.
+  final String? displayId;
   final String title;
   final String status;
   final String priority;
@@ -1313,11 +1343,12 @@ final class TaskItem {
   final int createdMs;
   final int updatedMs;
 
-  String get canonicalId => viewerCanonicalTaskId(id);
+  String get canonicalId => displayId ?? viewerCanonicalTaskId(id);
 
   factory TaskItem.fromJson(Map<String, Object?> json, {required String path}) {
     return TaskItem(
       id: _requireInt(json, 'id', path),
+      displayId: _optionalString(json, 'display_id', path),
       title: _requireString(json, 'title', path),
       status: _requireStatus(
         _requiredValue(json, 'status', path),
@@ -1350,6 +1381,7 @@ final class TaskItem {
 final class TaskPage {
   const TaskPage({
     required this.protocolVersion,
+    this.projectKey,
     required this.items,
     required this.totalCount,
     required this.offset,
@@ -1360,6 +1392,9 @@ final class TaskPage {
   });
 
   final int protocolVersion;
+
+  /// The project's key, or null when it has none (IDs then read T-N).
+  final String? projectKey;
   final List<TaskItem> items;
   final int totalCount;
   final int offset;
@@ -1378,6 +1413,7 @@ final class TaskPage {
     );
     return TaskPage(
       protocolVersion: _requireProtocolVersion(json, path),
+      projectKey: _optionalString(json, 'project_key', path),
       items: List<TaskItem>.unmodifiable(<TaskItem>[
         for (var index = 0; index < rawItems.length; index++)
           TaskItem.fromJson(
@@ -1399,17 +1435,21 @@ final class TaskPage {
 final class DependencySummary {
   const DependencySummary({
     required this.id,
+    this.displayId,
     required this.title,
     required this.status,
     required this.version,
   });
 
   final int id;
+
+  /// `KEY-007` from the CLI; older CLIs send only the number.
+  final String? displayId;
   final String title;
   final String status;
   final int version;
 
-  String get canonicalId => viewerCanonicalTaskId(id);
+  String get canonicalId => displayId ?? viewerCanonicalTaskId(id);
 
   /// True while this dependency still withholds readiness from the task.
   ///
@@ -1427,6 +1467,7 @@ final class DependencySummary {
   }) {
     return DependencySummary(
       id: _requireInt(json, 'id', path),
+      displayId: _optionalString(json, 'display_id', path),
       title: _requireString(json, 'title', path),
       status: _requireStatus(
         _requiredValue(json, 'status', path),
@@ -1441,6 +1482,8 @@ final class DependencySummary {
 final class TaskDetail {
   const TaskDetail({
     required this.id,
+    this.projectKey,
+    this.displayId,
     required this.title,
     required this.body,
     required this.status,
@@ -1469,7 +1512,14 @@ final class TaskDetail {
   final int createdMs;
   final int updatedMs;
 
-  String get canonicalId => viewerCanonicalTaskId(id);
+  /// The project's key, or null when it has none; the editor uses it to show
+  /// and parse `KEY-N` dependency IDs.
+  final String? projectKey;
+
+  /// `KEY-007` from the CLI; older CLIs send only the number.
+  final String? displayId;
+
+  String get canonicalId => displayId ?? viewerCanonicalTaskId(id, projectKey);
 
   factory TaskDetail.fromJson(
     Map<String, Object?> json, {
@@ -1485,6 +1535,8 @@ final class TaskDetail {
     );
     return TaskDetail(
       id: _requireInt(json, 'id', path),
+      projectKey: _optionalString(json, 'project_key', path),
+      displayId: _optionalString(json, 'display_id', path),
       title: _requireString(json, 'title', path),
       body: _requireString(json, 'body', path),
       status: _requireStatus(
@@ -1687,6 +1739,7 @@ final class ClipboardEnrichment {
     required this.text,
     required this.replacements,
     required this.unknownIds,
+    this.unknownRefs = const <String>[],
     required this.clipboard,
   });
 
@@ -1697,8 +1750,20 @@ final class ClipboardEnrichment {
   /// How many references received a title annotation.
   final int replacements;
 
-  /// Numeric IDs that were left unchanged.
+  /// Numeric IDs of this project that were left unchanged.
   final List<int> unknownIds;
+
+  /// Every unknown reference as the CLI names it (`DAK-9`, `T-4`), including
+  /// another project's; older CLIs omit it.
+  final List<String> unknownRefs;
+
+  /// Unknown references to show: [unknownRefs], or [unknownIds] in the
+  /// project's display form when an older CLI sent only numbers.
+  List<String> unknownLabels(String? projectKey) => unknownRefs.isNotEmpty
+      ? unknownRefs
+      : <String>[
+          for (final id in unknownIds) viewerCanonicalTaskId(id, projectKey),
+        ];
 
   /// True when the CLI read and replaced the clipboard itself.
   final bool clipboard;
@@ -1718,6 +1783,9 @@ final class ClipboardEnrichment {
         for (var index = 0; index < rawUnknown.length; index++)
           _requireIntValue(rawUnknown[index], '$path.unknown_ids[$index]'),
       ]),
+      unknownRefs: json.containsKey('unknown_refs')
+          ? _requireStringList(json, 'unknown_refs', path)
+          : const <String>[],
       clipboard: _requireBool(json, 'clipboard', path),
     );
   }
@@ -1752,6 +1820,14 @@ String _requireString(Map<String, Object?> json, String key, String path) {
     return value;
   }
   throw ViewerMalformedResponseFailure('field "$path.$key" must be a string');
+}
+
+/// A string field newer CLIs send and older ones omit; absent or null is null.
+String? _optionalString(Map<String, Object?> json, String key, String path) {
+  if (!json.containsKey(key)) {
+    return null;
+  }
+  return _requiredNullableString(json, key, path);
 }
 
 String? _requiredNullableString(
