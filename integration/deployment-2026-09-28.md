@@ -54,3 +54,25 @@ against `target\release\tasks.exe` (the installed build), exit 0: 4 passed,
 1 skipped. The skipped case, "a lost save acknowledgement is reconciled against
 the commit", needs a `--features test-hooks` build, which the installed binary
 is not. Log `target/evidence/deploy-2026-09-28/viewer-real-cli.log`.
+
+The viewer was not restarted. Every live store is still on schema 4, and this
+build refuses to read them until they are migrated.
+
+## Live migration: stopped before any store changed
+
+Pre-checks passed. `issues/active/project-key-task-ids/project-keys.csv` has 53
+rows. Every key is 2-6 characters, `[A-Z][A-Z0-9]*`, not `T` plus digits, and
+unique. Every `project_id` is unique, bound in `registry.json` at the CSV path,
+and has `projects/<UUID>/TASKS.sqlite`. The registry and data root contain the
+same 53 projects, so no registered project is missing from the CSV. `doctor`
+reports schema 4 for all 53.
+
+The first project stopped the run: ACV `973b97c0-d88d-4e46-9f84-885c5a84a559`.
+`tasks backup --out ...` exits 6 with "has schema version 4; this build requires 6.
+Run tasks migrate". The installed `backup` command cannot copy a store older than
+schema 6. The only pre-upgrade backup for an old store is the one `migrate` makes
+itself (spec.md, `TASKS.v<from>-pre-migrate-*.sqlite`). No migrate or
+project-key command ran, and no store changed. Log
+`target/evidence/deploy-2026-09-28/migration.log`.
+
+Until the stores are migrated, the installed CLI refuses every live project.
