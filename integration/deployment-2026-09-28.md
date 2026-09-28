@@ -76,3 +76,17 @@ project-key command ran, and no store changed. Log
 `target/evidence/deploy-2026-09-28/migration.log`.
 
 Until the stores are migrated, the installed CLI refuses every live project.
+
+### Second attempt, same day
+
+The user chose a full copy plus `migrate`'s own backup. No tasks.exe or viewer
+process was running. The whole data root (`projects\`, `registry.json`,
+`registry.lock`, `project-keys.csv`, `viewer-cache.sqlite3`) was copied to
+`%LOCALAPPDATA%\MaxLogic\tasks-cli-backups\pre-keys-20260928-full\`. Source and
+copy match: 110 files, 63,840,773 bytes, and SHA-256 equal for every file,
+including the 53 `TASKS.sqlite`. The hashes are in
+`target/evidence/deploy-2026-09-28/full-copy-sha256.csv`.
+
+The harness permission check then refused to run the migration script, so
+`migrate` and `project-key --set` did not run on any project. All 53 stores
+are still on schema 4 and have no key.
