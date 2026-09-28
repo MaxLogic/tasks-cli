@@ -131,6 +131,23 @@ impl Env {
     }
 }
 
+/// Every file under `root` with its bytes.
+fn data_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
 fn s(path: &Path) -> &str {
     path.to_str().expect("UTF-8 path")
 }
@@ -195,8 +212,17 @@ fn init_requires_a_valid_key_and_creates_nothing_without_one() {
 fn a_taken_key_is_refused_with_nothing_written_and_names_the_owner() {
     let env = Env::new();
     let owner = env.init("owner-app", "DAK");
+    assert!(
+        env.data().join("project-keys.json").is_file(),
+        "the first committed init writes the key cache"
+    );
     let other = env.root("other-app");
+    let before = data_files(&env.data());
     let output = env.run(&["init", "--root", s(&other), "--key", "dak"]);
+    assert!(
+        before == data_files(&env.data()),
+        "a refused init leaves the data root byte-identical"
+    );
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     let message = stderr(&output);
     assert!(message.contains("DAK"), "{message}");
@@ -670,15 +696,20 @@ fn bulk_import_requires_a_key_for_every_new_project() {
     // A key another project already has is reported and blocks apply.
     let taken = env.init("elsewhere", "BET");
     fs::write(&keys, r#"{"alpha":"ALP","beta":"BET"}"#).unwrap();
+    let cache = env.data().join("project-keys.json");
+    fs::remove_file(&cache).unwrap();
     let refused = bulk(&["--key-map", s(&keys), "--apply"]);
     assert_eq!(refused.status.code(), Some(2), "{}", stderr(&refused));
     assert!(stderr(&refused).contains(&taken), "{}", stderr(&refused));
     assert_eq!(env.project_dirs(), 1);
+    assert!(!cache.exists(), "a refused apply writes no cache");
 
-    // With every root mapped to a free key, apply creates keyed projects.
+    // With every root mapped to a free key, apply creates keyed projects
+    // and refreshes the key cache after the commit.
     fs::write(&keys, r#"{"alpha":"alp","beta":"BTA"}"#).unwrap();
     let applied = bulk(&["--key-map", s(&keys), "--apply"]);
     assert_eq!(applied.status.code(), Some(0), "{}", stderr(&applied));
+    assert!(cache.is_file(), "a committed apply refreshes the cache");
     let mut keyed = tasks_cli::keys::scan(&env.data(), true)
         .unwrap()
         .into_iter()
@@ -688,6 +719,62 @@ fn bulk_import_requires_a_key_for_every_new_project() {
     assert_eq!(keyed, ["ALP", "BET", "BTA"]);
     let alpha = fs::read_to_string(reports.join("run.jsonl")).unwrap();
     assert!(alpha.contains("\"project_key\":\"ALP\""), "{alpha}");
+}
+
+/// Bulk-import checks keys through the key cache but never writes it: a dry
+/// run over a stale cache still sees a key changed behind the cache's back and
+/// leaves every file in the data root byte-identical.
+#[test]
+fn bulk_dry_run_reads_a_stale_key_cache_without_writing_the_data_root() {
+    let env = Env::new();
+    let first = env.init("first", "ONE");
+    let second = env.init("second", "TWO");
+    let cache = env.data().join("project-keys.json");
+    env.run_stdin(
+        &["--project", &second, "enrich"],
+        "ONE-1
+",
+    );
+    assert!(cache.is_file(), "enrich cached both keys");
+    let conn = rusqlite::Connection::open(data_root_project_path(&env.data(), &first)).unwrap();
+    conn.execute("UPDATE project SET project_key='ALP'", [])
+        .unwrap();
+    drop(conn);
+    let corpus = env.root("corpus");
+    write_ledger(
+        &corpus.join("alpha"),
+        "## todo
+### T-1 Alpha
+body
+",
+    );
+    let map = env.temp.path().join("map.json");
+    fs::write(&map, "{}").unwrap();
+    let keys = env.temp.path().join("keys.json");
+    fs::write(&keys, r#"{"alpha":"ALP"}"#).unwrap();
+    let reports = env.temp.path().join("reports");
+    let before = data_files(&env.data());
+    let dry = env.run(&[
+        "bulk-import",
+        "--scan-root",
+        s(&corpus),
+        "--map-file",
+        s(&map),
+        "--report-dir",
+        s(&reports),
+        "--key-map",
+        s(&keys),
+    ]);
+    assert_eq!(dry.status.code(), Some(0), "{}", stderr(&dry));
+    let text = String::from_utf8_lossy(&dry.stdout).to_string();
+    assert!(
+        text.contains("key_problem:") && text.contains("ALP"),
+        "the changed key must be seen: {text}"
+    );
+    assert!(
+        before == data_files(&env.data()),
+        "a dry run must leave the data root byte-identical"
+    );
 }
 
 /// The reviewed key list for the live projects (a temp copy; the live stores
@@ -774,14 +861,14 @@ fn viewer_payloads_carry_the_key_and_display_ids() {
 }
 
 #[test]
-fn the_key_cache_never_hides_a_changed_key_and_uniqueness_ignores_it() {
+fn the_key_cache_never_hides_a_changed_key_from_lookups_or_uniqueness_checks() {
     let env = Env::new();
     let first = env.init("first", "ONE");
     let second = env.init("second", "TWO");
     env.create(&first, "first task", &[]);
     let cache = env.data().join("project-keys.json");
-    assert!(!cache.exists(), "uniqueness checks never write the cache");
-    // A foreign-key lookup builds the derived cache.
+    assert!(cache.is_file(), "a committed init refreshes the cache");
+    // A foreign-key lookup uses and refreshes the derived cache.
     let output = env.run_stdin(
         &["--project", &second, "enrich"],
         "ONE-1
@@ -817,25 +904,30 @@ fn the_key_cache_never_hides_a_changed_key_and_uniqueness_ignores_it() {
         "NEW-1 (first task) ONE-1
 "
     );
-    // A cache that lies (TWO claimed free) does not fool the uniqueness check,
-    // which reads every database directly.
-    let lie = fs::read_to_string(&cache)
-        .unwrap()
-        .replace("\"TWO\"", "\"ZZZ\"");
-    fs::write(&cache, lie).unwrap();
-    let taken = env.run(&["init", "--root", s(&env.root("third")), "--key", "two"]);
+    // The uniqueness check goes through the same cache and sees a key changed
+    // behind its back: the fingerprint changed, so the database is read again.
+    let conn = rusqlite::Connection::open(data_root_project_path(&env.data(), &second)).unwrap();
+    conn.execute("UPDATE project SET project_key='SEC'", [])
+        .unwrap();
+    drop(conn);
+    let taken = env.run(&["init", "--root", s(&env.root("third")), "--key", "sec"]);
     assert_eq!(taken.status.code(), Some(2), "{}", stderr(&taken));
+    assert!(stderr(&taken).contains(&second), "{}", stderr(&taken));
+    let taken = env.run(&["--project", &first, "project-key", "--set", "sec"]);
+    assert_eq!(taken.status.code(), Some(2), "{}", stderr(&taken));
+    // The old keys are free again.
     env.json(&["init", "--root", s(&env.root("fourth")), "--key", "ONE"]);
+    env.json(&["--project", &first, "project-key", "--set", "TWO"]);
     // A damaged cache is ignored and rebuilt by the next lookup.
     fs::write(&cache, b"not json").unwrap();
     let output = env.run_stdin(
         &["--project", &second, "enrich"],
-        "NEW-1
+        "TWO-1
 ",
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "NEW-1 (first task)
+        "TWO-1 (first task)
 "
     );
     assert!(serde_json::from_slice::<Value>(&fs::read(&cache).unwrap()).is_ok());

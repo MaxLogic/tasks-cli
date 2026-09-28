@@ -283,18 +283,19 @@ unique within a data root: while holding the registry lock, `init`,
 `project-key --set` and `bulk-import --apply` check the key against every
 project database under `<data-root>/projects/` and refuse a taken key with
 exit 2 naming the owning project and its root. The key lives only in the
-project database, so backups carry it. Uniqueness checks always open and read
-every project database directly. Reference lookups (`enrich`, naming the
-owner of a foreign `KEY-N`, import's foreign-heading check) instead use
-`<data-root>/project-keys.json`, which caches each database's key next to its
-fingerprint (file identity, size and mtime of the database and of a non-empty
-WAL or journal), because opening every database costs about 2-6 ms each on
-Windows. A database whose fingerprint changed is opened again, a read is
-cached only when the fingerprint was the same before and after it, and a
-damaged cache is ignored. The cache is derived data, rewritten atomically only
-by those lookups; `init`, `project-key --set` and bulk-import never write it,
-so a bulk dry run and a refused or rolled-back apply leave the data root
-unchanged.
+project database, so backups carry it. Every key lookup, the uniqueness
+checks included, goes through `<data-root>/project-keys.json`, which caches
+each database's key next to its fingerprint (file identity, size and mtime of
+the database and of a non-empty WAL or journal), because opening every
+database costs milliseconds each on Windows. A database without an entry or
+whose fingerprint changed is opened again, a read is cached only when the
+fingerprint was the same before and after it, and a damaged cache is ignored.
+A file modified within the last 2 seconds is read but not cached, for
+filesystems with coarse modification times. The cache is derived data,
+rewritten atomically by the reference lookups (`enrich`, naming the owner of a
+foreign `KEY-N`, import's foreign-heading check) and after a committed `init`,
+`project-key --set` or bulk apply; a refused `init`, a bulk dry run and a
+refused or rolled-back apply leave the data root unchanged.
 
 Task IDs display as `KEY-N` (at least three digits, `DAK-007`) in a keyed
 project and `T-N` otherwise, in text output, `list`/`search`/`show`/`history`/
@@ -429,8 +430,9 @@ back or retry; a caller must inspect state before repeating a create operation.
 
 Use versioned SQL migrations, `PRAGMA user_version`, and explicit column lists.
 Initialize metadata with database project UUID and check it against routing on
-every open. Reads use existing-only read-only connections and do not migrate,
-initialize or perform access-time writes. Unknown newer schemas fail closed.
+every open. Reads use existing-only connections that cannot write data
+(read-only, or `query_only` as below) and do not migrate, initialize or perform
+access-time writes. Unknown newer schemas fail closed.
 
 Minimum tables:
 - `project`: singleton UUID, rules Markdown, rules version, next task number.
@@ -458,7 +460,15 @@ Writer connections use foreign_keys=ON, WAL, synchronous=FULL and a 5-second bus
 timeout. Configure journal mode at initialization/migration, not on every read.
 Keep default automatic checkpointing; no VACUUM/checkpoint or full integrity scan
 per command. Readers may require SQLite sidecar access; do not promise zero
-filesystem activity or use immutable=1 for a live WAL database.
+filesystem activity or use immutable=1 for a live WAL database. A read-only
+SQLite connection creates `-wal`/`-shm` but can never remove them, and every
+later open pays for the leftovers (about 7 ms per read on Windows). So a
+read opens the database read-write with `PRAGMA query_only` when the `-wal`
+is absent or empty, and the last connection's close removes the sidecars;
+with a non-empty `-wal` the read stays a read-only open. A read does not
+checkpoint a WAL that was pending when the read began. Reads may delete empty
+`-wal`/`-shm` files left by older binaries: database bytes are unchanged, but
+the set of files in the data root can change.
 
 Read/validate external files before `BEGIN IMMEDIATE`. Inside a short transaction,
 read current version, reject mismatches, validate references/cycles, update via

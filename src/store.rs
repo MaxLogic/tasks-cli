@@ -69,6 +69,42 @@ pub fn data_root_project_path(data_root: &Path, project_id: &str) -> PathBuf {
         .join("TASKS.sqlite")
 }
 
+/// Opens an existing database for reading only.
+///
+/// A `SQLITE_OPEN_READ_ONLY` connection to a WAL database creates `-wal` and
+/// `-shm` files but cannot remove them when it closes (removal follows the
+/// close-time checkpoint, which a read-only connection may not run), and
+/// every later open of the database pays for the leftovers. So when the WAL
+/// is absent or empty when the read begins, the database is opened read-write
+/// with `PRAGMA query_only`, and the last connection's close removes the
+/// sidecars. A non-empty WAL keeps the read-only open, so a read does not
+/// checkpoint a WAL that was pending when it began. A writer may still
+/// commit while the read-write reader is open; if that reader closes last,
+/// its close checkpoints those committed frames, as any SQLite connection's
+/// close does.
+pub(crate) fn open_for_reading(
+    db_path: &Path,
+    extra: rusqlite::OpenFlags,
+) -> Result<Connection, AppError> {
+    use rusqlite::OpenFlags;
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let nothing_pending = match fs::symlink_metadata(PathBuf::from(wal)) {
+        Ok(meta) => meta.is_file() && meta.len() == 0,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    };
+    if nothing_pending {
+        let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE | extra)?;
+        conn.pragma_update(None, "query_only", true)?;
+        Ok(conn)
+    } else {
+        Ok(Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | extra,
+        )?)
+    }
+}
+
 /// Creates (or validates) a project database without a key, the state of a
 /// database migrated from before project keys. The CLI always passes a key
 /// through [`create_project_db_with_key`].
@@ -437,7 +473,7 @@ fn validate_current_schema(
 }
 
 fn verify_existing_project(db_path: &Path, expected: &Uuid) -> Result<StoreInfo, AppError> {
-    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = open_for_reading(db_path, rusqlite::OpenFlags::empty())?;
     let version = schema_version(&conn)?;
     if version > CURRENT_SCHEMA_VERSION {
         return Err(AppError::Database(format!(
@@ -1000,7 +1036,7 @@ fn validate_backup(
     expected_project: Option<&Uuid>,
     expected_schema: Option<i32>,
 ) -> Result<(), AppError> {
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = open_for_reading(path, rusqlite::OpenFlags::empty())?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     let quick_check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
     if quick_check != "ok" {
@@ -1232,8 +1268,7 @@ fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid, Pa
 impl Store {
     pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
         let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = open_for_reading(&db_path, rusqlite::OpenFlags::empty())?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let user_version = schema_version(&conn)?;
@@ -1263,8 +1298,7 @@ impl Store {
 
     pub fn open_for_diagnostics(data_root: &Path, project: &str) -> Result<Self, AppError> {
         let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = open_for_reading(&db_path, rusqlite::OpenFlags::empty())?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let project_key = crate::keys::read_key(&conn).ok().flatten();

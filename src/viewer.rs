@@ -1158,16 +1158,18 @@ fn sample_project(
     }
 }
 
-/// Open one project database with a zero busy timeout, read its aggregate
+/// Busy timeout of a project-statistics read; see viewer/spec.md.
+const SAMPLE_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Open one project database with a short busy timeout, read its aggregate
 /// statistics and close it before the caller opens the next database.
 fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats, AppError> {
     validate_storage_path(db_path)?;
-    let conn = Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = crate::store::open_for_reading(db_path, rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     let stats = (|| -> Result<ProjectStats, AppError> {
-        conn.busy_timeout(Duration::ZERO)?;
+        // Short, not zero: a CLI read that closes last briefly locks the
+        // database while it removes its -wal/-shm (store::open_for_reading).
+        conn.busy_timeout(SAMPLE_BUSY_TIMEOUT)?;
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
