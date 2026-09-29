@@ -118,6 +118,14 @@ contract; these are the choices the issue left open.
   project in the data root owns that key; `### ISO-8601 dates` stays text.
 - Recovery drafts keep the `T-N` identity and are matched by project and
   numeric ID, so a key (or a key change) never orphans them.
+- Reserved keys (user decision 2026-09-29): `enrich` never treats a fixed
+  list of standard-name prefixes as a task-ID key, so `UTF-8`, `SHA-256` or
+  `ISO-8601` in prose no longer triggers a data-root scan. The list covers
+  encodings, standards bodies, hashes, ciphers and vulnerability IDs (for
+  example UTF, UCS, ISO, IEC, IEEE, RFC, SHA, AES, RSA, CRC, CVE, CWE, ECMA,
+  CP, X86). Project-key validation refuses the same keys, so no project can
+  own a key that enrich ignores; none of the keys in `project-keys.csv`
+  collides with the list.
 
 ## Follow-ups from review
 
