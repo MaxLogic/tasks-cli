@@ -64,11 +64,13 @@ ViewerRecoveryDraft savedDraftForFirstTask({
   int baseVersion = 1,
   Map<String, Object?>? baseFields,
   Map<String, Object?>? draftFields,
+  List<String> projectKeys = const <String>[],
 }) => ViewerRecoveryDraft(
   dataRoot: testDataRoot,
   projectId: firstProjectId,
   taskId: 'T-001',
   baseVersion: baseVersion,
+  projectKeys: projectKeys,
   baseFields:
       baseFields ??
       const <String, Object?>{
@@ -852,6 +854,137 @@ void main() {
 
       await pressAlt(tester, LogicalKeyboardKey.keyE);
     });
+
+    testWidgets(
+      'a draft typed under an older key restores without a dependency error',
+      (WidgetTester tester) async {
+        // The draft was written while the project's key was OLD; the store
+        // now reports NEW (project-key --set NEW), but the fresh record is
+        // still at the draft's base version, so restore takes the
+        // version-matches path. The draft's own persisted `project_keys`
+        // record OLD, so the entry is trusted rather than guessed from the
+        // typed text.
+        final drafts = sinkHoldingDraft(
+          savedDraftForFirstTask(
+            projectKeys: const <String>['OLD'],
+            baseFields: const <String, Object?>{
+              'title': 'First task',
+              'body': 'body text',
+              'status': 'todo',
+              'priority': 'P2',
+              'labels_text': '',
+              'deps_text': '',
+            },
+            draftFields: const <String, Object?>{
+              'title': 'First task',
+              'body': 'body text',
+              'status': 'todo',
+              'priority': 'P2',
+              'labels_text': '',
+              'deps_text': 'OLD-2',
+            },
+          ),
+        );
+        final reads = fakeWorkspaceReads(
+          details: <int, TaskDetail>{
+            1: testTaskDetail(1, title: 'First task', projectKey: 'NEW'),
+          },
+        );
+        final writer = FakeTaskWriter();
+        final harness = await openFirstTask(
+          tester,
+          reads: reads,
+          drafts: drafts,
+          update: writer,
+        );
+
+        await pressAlt(tester, LogicalKeyboardKey.keyR);
+
+        final editor = harness.model.editor;
+        expect(editor.isEditing, isTrue);
+        expect(editor.conflict, isNull);
+        expect(editor.draft?.depsText, 'OLD-2');
+        expect(editor.isDirty, isTrue);
+        editor.validateField(EditorField.deps);
+        expect(
+          editor.errors,
+          isNot(contains(EditorField.deps)),
+          reason:
+              'OLD-2 named the same task before the project key changed to '
+              'NEW and must still be accepted',
+        );
+
+        await pressControl(tester, LogicalKeyboardKey.keyS);
+
+        expect(writer.requests, hasLength(1));
+        expect(writer.lastRequest.changes.deps, <int>[2]);
+        expect(harness.statusText, 'Saved NEW-001, version 2');
+      },
+    );
+
+    testWidgets(
+      'a draft naming another project is rejected, not silently rewritten',
+      (WidgetTester tester) async {
+        // Nothing tells the controller OTHER is a key this draft was ever
+        // written under (no persisted project_keys, and the base record's
+        // own dependency text never named OTHER): OTHER-2 must stay a
+        // foreign-project reference rather than being guessed into T-2 and
+        // saved as this project's task 2.
+        final drafts = sinkHoldingDraft(
+          savedDraftForFirstTask(
+            baseFields: const <String, Object?>{
+              'title': 'First task',
+              'body': 'body text',
+              'status': 'todo',
+              'priority': 'P2',
+              'labels_text': '',
+              'deps_text': '',
+            },
+            draftFields: const <String, Object?>{
+              'title': 'First task',
+              'body': 'body text',
+              'status': 'todo',
+              'priority': 'P2',
+              'labels_text': '',
+              'deps_text': 'OTHER-2',
+            },
+          ),
+        );
+        final reads = fakeWorkspaceReads(
+          details: <int, TaskDetail>{
+            1: testTaskDetail(1, title: 'First task', projectKey: 'NEW'),
+          },
+        );
+        final writer = FakeTaskWriter();
+        final harness = await openFirstTask(
+          tester,
+          reads: reads,
+          drafts: drafts,
+          update: writer,
+        );
+
+        await pressAlt(tester, LogicalKeyboardKey.keyR);
+
+        final editor = harness.model.editor;
+        expect(editor.draft?.depsText, 'OTHER-2');
+        editor.validateField(EditorField.deps);
+        expect(
+          editor.errors[EditorField.deps],
+          contains('belongs to another project'),
+        );
+
+        await pressControl(tester, LogicalKeyboardKey.keyS);
+
+        expect(
+          writer.requests,
+          isEmpty,
+          reason:
+              'an invalid dependency must refuse the save, never send a '
+              'guessed ID',
+        );
+        expect(editor.draft?.depsText, 'OTHER-2');
+      },
+    );
   });
 
   group('diskWriteFailure', () {

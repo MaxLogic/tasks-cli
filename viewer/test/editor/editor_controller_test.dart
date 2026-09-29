@@ -36,6 +36,7 @@ TaskDetail editorDetail({
   int version = editorBaseVersion,
   List<String> labels = const <String>['needs-human', 'zeta'],
   List<int> deps = const <int>[2],
+  String? projectKey,
 }) => testTaskDetail(
   id,
   title: title,
@@ -45,6 +46,7 @@ TaskDetail editorDetail({
   version: version,
   labels: labels,
   deps: deps,
+  projectKey: projectKey,
 );
 
 /// The record the store holds once another writer touched it: version 4 with
@@ -857,6 +859,39 @@ void main() {
         expect(result.message, 'There is no unresolved save to reconcile.');
         expect(harness.writer.requests, isEmpty);
         expect(harness.reads.detailRequests, isEmpty);
+      },
+    );
+
+    test(
+      'a keyed dependency reconciles when the fresh record already has it',
+      () async {
+        final harness = editorHarness(
+          detail: editorDetail(deps: const <int>[2], projectKey: 'TSK'),
+        );
+        final controller = harness.controller;
+        controller.beginEdit();
+        controller.setField(EditorField.deps, 'TSK-2, TSK-4');
+        harness.writer.failure = const ViewerTimeoutFailure(
+          Duration(seconds: 30),
+        );
+        // The write actually landed: the fresh read already has TSK-4, typed
+        // by the project's own key, not T-4 or a bare 4.
+        harness.reads.details[editorTaskId] = editorDetail(
+          deps: const <int>[2, 4],
+          version: editorBaseVersion + 1,
+          projectKey: 'TSK',
+        );
+
+        final result = await controller.save();
+
+        expect(
+          result.outcome,
+          EditorSaveOutcome.reconciled,
+          reason:
+              'the fresh record already holds every dependency the lost '
+              'write intended, keyed as TSK-4',
+        );
+        expect(result.message, contains('acknowledgement was lost'));
       },
     );
   });
