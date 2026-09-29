@@ -551,6 +551,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       baseFields: baseFields,
       baseVersion: draft.baseVersion,
       draftFields: draftFields,
+      draftProjectKeys: draft.projectKeys,
     );
     // The draft stays on disk until the restored form is saved or discarded.
     editor.settleRecoveryDraft(draft);

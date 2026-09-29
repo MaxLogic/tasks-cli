@@ -371,6 +371,7 @@ final class ViewerRecoveryDraft {
     required this.baseFields,
     required this.draftFields,
     required this.updatedMs,
+    this.projectKeys = const <String>[],
   });
 
   final String dataRoot;
@@ -380,6 +381,11 @@ final class ViewerRecoveryDraft {
   final Map<String, Object?> baseFields;
   final Map<String, Object?> draftFields;
   final int updatedMs;
+
+  /// Every project key the draft's text was written under, autosave to
+  /// autosave, newest last (TSK-011). Empty for a draft saved before this
+  /// field existed, or one written under no key at all.
+  final List<String> projectKeys;
 
   /// Stable identity of one editor draft.
   String get draftId => viewerRecoveryDraftId(
@@ -409,6 +415,17 @@ final class ViewerRecoveryDraft {
         updatedMs is! int) {
       throw const FormatException('recovery draft identity is incomplete');
     }
+    final rawKeys = json['project_keys'];
+    final List<String> projectKeys;
+    if (rawKeys == null) {
+      projectKeys = const <String>[];
+    } else if (rawKeys is List<Object?> && rawKeys.every((k) => k is String)) {
+      projectKeys = List<String>.unmodifiable(rawKeys.cast<String>());
+    } else {
+      throw const FormatException(
+        'recovery draft field "project_keys" must be a list of strings',
+      );
+    }
     return ViewerRecoveryDraft(
       dataRoot: dataRoot,
       projectId: projectId,
@@ -417,6 +434,7 @@ final class ViewerRecoveryDraft {
       baseFields: fields('base_fields'),
       draftFields: fields('draft_fields'),
       updatedMs: updatedMs,
+      projectKeys: projectKeys,
     );
   }
 
@@ -428,6 +446,7 @@ final class ViewerRecoveryDraft {
     'base_fields': baseFields,
     'draft_fields': draftFields,
     'updated_ms': updatedMs,
+    if (projectKeys.isNotEmpty) 'project_keys': projectKeys,
   };
 }
 

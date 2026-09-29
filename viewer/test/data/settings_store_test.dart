@@ -310,5 +310,50 @@ void main() {
       expect(loaded.length, 1);
       expect(loaded.single.taskId, 'T-001');
     });
+
+    test('projectKeys survives a restart (TSK-011)', () async {
+      final store = SettingsStore(settingsRoot: _root.path);
+      await store.recoveryDrafts.save(
+        ViewerRecoveryDraft(
+          dataRoot: r'C:\store',
+          projectId: 'p1',
+          taskId: 'T-007',
+          baseVersion: 3,
+          baseFields: const <String, Object?>{'title': 'Original'},
+          draftFields: const <String, Object?>{'title': 'Edited'},
+          updatedMs: 1700000000000,
+          projectKeys: const <String>['OLD', 'NEW'],
+        ),
+      );
+      final restored = await SettingsStore(
+        settingsRoot: _root.path,
+      ).recoveryDrafts.loadAll();
+      expect(restored.single.projectKeys, <String>['OLD', 'NEW']);
+    });
+
+    test(
+      'a draft with no project_keys field decodes to an empty list',
+      () async {
+        // Backward compatibility: a draft saved before TSK-011 added the
+        // field must still load, with an empty list rather than a decode
+        // failure.
+        final draftWithoutKeys = draft();
+        expect(
+          draftWithoutKeys.toJson().containsKey('project_keys'),
+          isFalse,
+          reason: 'an empty list is omitted, not written as []',
+        );
+        final decoded = ViewerRecoveryDraft.fromJson(draftWithoutKeys.toJson());
+        expect(decoded.projectKeys, isEmpty);
+      },
+    );
+
+    test('a non-string project_keys entry is rejected', () {
+      final json = draft().toJson()..['project_keys'] = <Object?>['OLD', 3];
+      expect(
+        () => ViewerRecoveryDraft.fromJson(json),
+        throwsA(isA<FormatException>()),
+      );
+    });
   });
 }

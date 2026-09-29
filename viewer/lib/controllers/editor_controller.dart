@@ -434,6 +434,46 @@ class ViewerEditorController extends ChangeNotifier {
     );
   }
 
+  /// A `KEY-` prefix in dependency text, the same shape editor_validation.dart
+  /// accepts as naming another project.
+  static final RegExp _depKeyPrefix = RegExp(
+    r'(?:^|[,\s])([A-Za-z][A-Za-z0-9]{1,5})-(?=\d)',
+  );
+
+  /// Keys spelled out in [text] other than the storage form `T-N`.
+  Set<String> _keysIn(String text) => <String>{
+    for (final match in _depKeyPrefix.allMatches(text))
+      if (match.group(1)!.toUpperCase() != 'T') match.group(1)!,
+  };
+
+  /// Prior keys a restored draft's dependency text was written under, so
+  /// [_parseable] keeps those entries valid through a `project-key --set`
+  /// that happened while the draft sat on disk (spec.md "Project keys": keys
+  /// are changed, never removed).
+  ///
+  /// [persisted] is the draft's own record of every key it was written under
+  /// (TSK-011, [ViewerRecoveryDraft.projectKeys]). A draft saved before that
+  /// field existed carries none, so this falls back to whatever key
+  /// [baseFields]' dependency text names: that text is rendered by the
+  /// controller from the stored record, never typed by hand, so it names a
+  /// real prior key rather than guessing from user text -- a foreign key or a
+  /// key-shaped typo the user typed into the draft must still be rejected.
+  Set<String> _restoredDraftKeys(
+    List<String> persisted,
+    TaskEditFields baseFields,
+  ) {
+    final keys = persisted.isNotEmpty
+        ? persisted.toSet()
+        : _keysIn(baseFields.depsText);
+    final current = _projectKey;
+    if (current == null) {
+      return keys;
+    }
+    return keys
+        .where((key) => key.toUpperCase() != current.toUpperCase())
+        .toSet();
+  }
+
   /// Opens the editor on the confirmed record with no changes yet.
   void beginEdit() {
     final base = _base;
@@ -454,16 +494,22 @@ class ViewerEditorController extends ChangeNotifier {
   /// [baseFields] is the base the draft was written against; [current] is the
   /// freshly read record. A version difference opens the conflict workflow
   /// instead of pretending the draft is still based on the current record.
+  /// [draftProjectKeys] is the draft's own persisted record of every key its
+  /// text was written under ([ViewerRecoveryDraft.projectKeys]); empty for a
+  /// draft saved before that field existed.
   void restoreDraft({
     required String projectId,
     required TaskDetail current,
     required TaskEditFields baseFields,
     required int baseVersion,
     required TaskEditFields draftFields,
+    List<String> draftProjectKeys = const <String>[],
   }) {
     _projectKey =
         current.projectKey ?? (projectId == _projectId ? _projectKey : null);
-    _draftKeys.clear();
+    _draftKeys
+      ..clear()
+      ..addAll(_restoredDraftKeys(draftProjectKeys, baseFields));
     _projectId = projectId;
     _taskId = current.id;
     _editing = true;
@@ -691,6 +737,7 @@ class ViewerEditorController extends ChangeNotifier {
             baseFields: base.toJson(),
             draftFields: draft.toJson(),
             updatedMs: _clock().millisecondsSinceEpoch,
+            projectKeys: <String>[..._draftKeys, ?_projectKey],
           ),
         );
       }
@@ -1239,7 +1286,11 @@ class ViewerEditorController extends ChangeNotifier {
     }
     if (changes.deps != null) {
       final stored = fresh.deps.toSet();
-      final wanted = parseEditorDependencyText(intended.depsText).ids.toSet();
+      // changes.deps is already the parsed ID list a save would send, so
+      // re-parsing intended.depsText (and needing the right key for it)
+      // is unnecessary and cannot be broken by a key change between the
+      // save and a later retryReconciliation.
+      final wanted = changes.deps!.toSet();
       if (stored.length != wanted.length || !stored.containsAll(wanted)) {
         return false;
       }
