@@ -836,6 +836,42 @@ WSL-to-Windows delegation separately, including process/interop startup, and rep
 its overhead rather than applying native timing targets to it. These are diagnostic
 targets, not timing assertions in normal CI.
 
+`unlocks` budget (separate fixture, TSK-005): dense-edge profile
+`perf-100k-dense` (one project, 100000 tasks, 150000 dependency edges
+concentrated on open, non-terminal tasks, deterministic from `--seed`).
+Proposed target, not yet met: `unlocks --limit 20` p95 <=250 ms on Windows
+(same budget as substring search). Observed on the development Windows
+machine (release build, 5 warmups + 50 fresh-process runs, `target/perf-cli`):
+before the TSK-005 query rewrite, p50 3868 ms / p95 4188 ms (n=50); after
+replacing the per-edge correlated `NOT EXISTS` with a single per-task
+unsatisfied-prerequisite count (a `WITH unsat AS (...)` CTE joined once per
+row instead of a rescan of t's other dependencies per (p,t) edge), p50
+1451 ms / p95 1701 ms (n=50) — about 2.5-2.7x faster, but still a miss
+against the 250 ms target on this fixture. `EXPLAIN QUERY PLAN` before showed
+a full `SCAN d` (150k rows) with two correlated subqueries per row, the
+second of which (`other`/`prerequisite`) rescanned each dependent's edges;
+after, the rescan is gone and only the cheap `needs-human` label check
+remains correlated. The residual cost is dominated by two things unrelated
+to the join strategy: opening/reading this 100k-row, ~530 MiB tasks table
+(a bare `list --limit 1` on the same fixture already costs about 800 ms
+fresh-process, versus about 80 ms for `tasks --help`), and the up to ~450k
+still-necessary rowid lookups (`unsat`'s prerequisite lookup, plus `t` and
+`p` in the main join) across that large table. Closing the remaining gap
+would need a smaller per-row footprint or a materialized/cached readiness
+view, which this slice does not add (see AGENTS.md: no caches without
+profiling evidence, no durability weakening). Results and ranking are
+unchanged: verified byte-for-byte identical output on this fixture between
+the old and new query, across all 33847 grouped rows and the top-20 page.
+Repeated natively on Linux (WSL2 Ubuntu, Linux-owned `CARGO_TARGET_DIR` and
+temp data/roots outside `/mnt`, same fixture profile and seed, same 5
+warmups + 50 fresh-process runs): before, p50 1707 ms / p95 3643 ms (n=50,
+min 1407 ms, max 4001 ms); after, p50 661 ms / p95 839 ms (n=50, min 555 ms,
+max 1523 ms) — about 2.6x faster at p50 and 4.3x at p95, closer to the
+proposed 250 ms target than Windows but still a miss. Linux p95 is noisier
+than the p50 suggests (WSL2 VM I/O variance); the same query-plan change
+applies on both platforms since it is pure SQL with no platform-specific
+path.
+
 List default output <=6 KiB for fixture titles/dependencies; one typical show
 should include only that task, shared rules and direct dependency summaries.
 Measure output bytes; only claim token counts when a named tokenizer was used.
