@@ -1671,14 +1671,30 @@ impl Store {
             AppError::Validation("unlocks --offset exceeds SQLite's integer range".into())
         })?;
         let snapshot = self.conn.unchecked_transaction()?;
+        // `runnable_count` used to run a correlated NOT EXISTS per (p,t) edge,
+        // rescanning t's other dependencies on every row (O(edges * local
+        // degree) on a dense-edge graph). The outer WHERE already guarantees
+        // p.status is not 'done'/'cancelled'/'to-verify', so p always counts
+        // toward t's unsatisfied-prerequisite total (the `unsat` CTE, whose
+        // filter is the same NOT IN ('done','to-verify') the old subquery
+        // used for "other" prerequisites). That makes "no other unsatisfied
+        // prerequisite besides p" equivalent to "t has exactly one
+        // unsatisfied prerequisite total", computed once per t instead of
+        // once per edge (TSK-005).
         let mut statement = snapshot.prepare(
-            "SELECT p.id,p.status,p.version,p.title,p.priority,COUNT(*) AS direct_count,
+            "WITH unsat AS (
+                SELECT d.task_id AS task_id, COUNT(*) AS unsat_count
+                FROM dependencies d JOIN tasks prerequisite ON prerequisite.id=d.depends_on_id
+                WHERE prerequisite.status NOT IN ('done','to-verify')
+                GROUP BY d.task_id
+             )
+             SELECT p.id,p.status,p.version,p.title,p.priority,COUNT(*) AS direct_count,
                     SUM(CASE WHEN t.status IN ('todo','in-progress')
+                      AND unsat.unsat_count=1
                       AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
-                      AND NOT EXISTS(SELECT 1 FROM dependencies other JOIN tasks prerequisite ON prerequisite.id=other.depends_on_id
-                          WHERE other.task_id=t.id AND other.depends_on_id!=p.id AND prerequisite.status NOT IN ('done','to-verify'))
                       THEN 1 ELSE 0 END) AS runnable_count
              FROM tasks p JOIN dependencies d ON d.depends_on_id=p.id JOIN tasks t ON t.id=d.task_id
+                  JOIN unsat ON unsat.task_id=t.id
              WHERE p.status NOT IN ('done','cancelled','to-verify') AND t.status NOT IN ('done','cancelled')
              GROUP BY p.id ORDER BY runnable_count DESC,direct_count DESC,p.priority,p.id
              LIMIT ?1 OFFSET ?2"

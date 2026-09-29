@@ -2,9 +2,12 @@
 //!
 //! The profiles match viewer/spec.md section 10: 100 projects with 1000 tasks
 //! each, one project with 100000 tasks (one 1 MiB body and 1000 dependency
-//! edges), 1000 empty projects for the project-virtualization measurement and
-//! a tiny probe profile that proves the recorded seed reproduces the same
-//! logical content. The generator never reads the clock or the environment;
+//! edges), a dense-edge variant of that profile with about 150000 dependency
+//! edges concentrated on open tasks (spec.md "Performance and output
+//! targets", `unlocks`), 1000 empty projects for the project-virtualization
+//! measurement and a tiny probe profile that proves the recorded seed
+//! reproduces the same logical content. The generator never reads the clock
+//! or the environment;
 //! every choice comes from the SplitMix64 stream seeded by `--seed`, and the
 //! printed digest covers the canonical content stream.
 
@@ -50,6 +53,10 @@ enum Profile {
     /// One project with 100000 tasks, one 1 MiB body and 1000 dependencies.
     #[value(name = "perf-100k")]
     Perf100k,
+    /// One project with 100000 tasks and about 150000 dependency edges, for
+    /// stressing `unlocks` (TSK-005).
+    #[value(name = "perf-100k-dense")]
+    Perf100kDense,
     /// 1000 projects with no tasks.
     #[value(name = "perf-empty-1000")]
     PerfEmpty1000,
@@ -61,6 +68,7 @@ impl Profile {
             Profile::PerfProbe => "perf-probe",
             Profile::Perf100x1000 => "perf-100x1000",
             Profile::Perf100k => "perf-100k",
+            Profile::Perf100kDense => "perf-100k-dense",
             Profile::PerfEmpty1000 => "perf-empty-1000",
         }
     }
@@ -127,6 +135,10 @@ struct ProjectSpec {
     tasks: usize,
     big_body: bool,
     dependencies: usize,
+    /// When true, dependency edges are drawn only from tasks whose status is
+    /// `todo`, `in-progress` or `blocked` (open, non-terminal), so the graph
+    /// stresses the `unlocks` query's open/open filters densely.
+    dense: bool,
 }
 
 struct DependencyPlan {
@@ -175,6 +187,59 @@ fn labels_for(id: usize, seed: u64) -> Vec<String> {
         set.insert("needs-human".to_string());
     }
     set.into_iter().collect()
+}
+
+fn status_for(id: usize, seed: u64) -> &'static str {
+    STATUSES[(id + seed as usize) % STATUSES.len()]
+}
+
+fn is_open_status(id: usize, seed: u64) -> bool {
+    matches!(status_for(id, seed), "todo" | "in-progress" | "blocked")
+}
+
+/// Like `seed_dependencies`, but both endpoints of every edge are drawn from
+/// `pool` (ascending task ids), so the resulting graph concentrates edges
+/// among the given (open) tasks instead of spreading them over all statuses.
+fn seed_dependencies_dense(
+    tx: &Transaction<'_>,
+    pool: &[usize],
+    target: usize,
+    stride: u64,
+    hasher: &mut Sha256,
+) -> Result<usize, AppError> {
+    if pool.len() < 2 {
+        return Err(AppError::usage(
+            "the dense fixture open-task pool has fewer than 2 tasks; choose another seed"
+                .to_string(),
+        ));
+    }
+    let mut stmt = tx.prepare_cached(
+        "INSERT OR IGNORE INTO dependencies(task_id,depends_on_id) VALUES (?1,?2)",
+    )?;
+    let mut inserted = 0usize;
+    let mut step: u64 = 0;
+    let n = pool.len();
+    let cap = target as u64 * 64 + 1024;
+    while inserted < target && step < cap {
+        let pos = 1 + ((step.wrapping_mul(stride) as usize) % (n - 1));
+        let dep_pos = (step.wrapping_mul(31) as usize) % pos;
+        let task = pool[pos];
+        let dep = pool[dep_pos];
+        let changed = stmt.execute(params![task as i64, dep as i64])?;
+        if changed == 1 {
+            hasher.update(b"dep\n");
+            hasher.update((task as u64).to_le_bytes());
+            hasher.update((dep as u64).to_le_bytes());
+            inserted += 1;
+        }
+        step += 1;
+    }
+    if inserted < target {
+        return Err(AppError::usage(format!(
+            "the dense fixture dependency plan placed {inserted} of {target} edges; choose another seed"
+        )));
+    }
+    Ok(inserted)
 }
 
 fn seed_dependencies(
@@ -238,7 +303,7 @@ fn seed_project(
                 "perf task {id:06} {}",
                 TITLE_SUFFIXES[(id + seed as usize) % TITLE_SUFFIXES.len()]
             );
-            let status = STATUSES[(id + seed as usize) % STATUSES.len()];
+            let status = status_for(id, seed);
             let priority = PRIORITIES[(id * 3 + seed as usize) % PRIORITIES.len()];
             let body = build_body(id, seed, spec.big_body && id == 1);
             let stamp = BASE_MS + (((id + seed as usize) % 97) as i64) * 1_000;
@@ -262,15 +327,22 @@ fn seed_project(
             }
         }
         if spec.dependencies > 0 {
-            dependency_count = seed_dependencies(
-                &tx,
-                &DependencyPlan {
-                    last_id: spec.tasks,
-                    target: spec.dependencies,
-                    stride,
-                },
-                hasher,
-            )?;
+            dependency_count = if spec.dense {
+                let pool: Vec<usize> = (1..=spec.tasks)
+                    .filter(|&id| is_open_status(id, seed))
+                    .collect();
+                seed_dependencies_dense(&tx, &pool, spec.dependencies, stride, hasher)?
+            } else {
+                seed_dependencies(
+                    &tx,
+                    &DependencyPlan {
+                        last_id: spec.tasks,
+                        target: spec.dependencies,
+                        stride,
+                    },
+                    hasher,
+                )?
+            };
         }
     }
     tx.execute(
@@ -321,6 +393,7 @@ fn run(args: Args) -> Result<(), AppError> {
                     tasks: 5,
                     big_body: false,
                     dependencies: 2,
+                    dense: false,
                 };
                 seed_project(
                     &args.data_root,
@@ -342,6 +415,7 @@ fn run(args: Args) -> Result<(), AppError> {
                     tasks: 1_000,
                     big_body: index == 0,
                     dependencies: 10,
+                    dense: false,
                 };
                 seed_project(
                     &args.data_root,
@@ -360,6 +434,7 @@ fn run(args: Args) -> Result<(), AppError> {
                 tasks: 100_000,
                 big_body: true,
                 dependencies: 1_000,
+                dense: false,
             };
             seed_project(
                 &args.data_root,
@@ -370,6 +445,24 @@ fn run(args: Args) -> Result<(), AppError> {
                 &mut hasher,
             )?;
             (1usize, 100_000usize, 1_000usize)
+        }
+        Profile::Perf100kDense => {
+            let spec = ProjectSpec {
+                name: "perf-huge-dense".to_string(),
+                tasks: 100_000,
+                big_body: false,
+                dependencies: 150_000,
+                dense: true,
+            };
+            seed_project(
+                &args.data_root,
+                &args.roots_root,
+                &spec,
+                args.seed,
+                stride,
+                &mut hasher,
+            )?;
+            (1usize, 100_000usize, 150_000usize)
         }
         Profile::PerfEmpty1000 => {
             seed_empty_projects(&args.data_root, &args.roots_root, 1_000, &mut hasher)?;
