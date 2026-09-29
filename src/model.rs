@@ -490,9 +490,20 @@ pub const LEGACY_KEY: &str = "T";
 pub const PROJECT_KEY_MIN_CHARS: usize = 2;
 pub const PROJECT_KEY_MAX_CHARS: usize = 6;
 
+/// Standard-name prefixes routinely written as `NAME-number` in prose: text
+/// encodings (UTF, UCS, CP code pages), standards bodies and documents (ISO,
+/// IEC, IEEE, RFC, ECMA), hashes, ciphers and checksums (SHA, AES, RSA, CRC),
+/// vulnerability IDs (CVE, CWE) and the X86 architecture name. `enrich` never
+/// treats one of these as a task-ID key, so no project may own one either.
+pub const RESERVED_KEYS: &[&str] = &[
+    "UTF", "UCS", "ISO", "IEC", "IEEE", "RFC", "SHA", "AES", "RSA", "CRC", "CVE", "CWE", "ECMA",
+    "CP", "X86",
+];
+
 /// Validates a project key and returns it uppercased: 2-6 ASCII letters and
 /// digits, starting with a letter. Input is case-insensitive; `T` is reserved
-/// for the legacy `T-N` form.
+/// for the legacy `T-N` form, and a standard-name prefix `enrich` ignores
+/// (see [`RESERVED_KEYS`]) is reserved as well.
 pub fn parse_project_key(input: &str) -> Result<String, String> {
     let key = input.trim().to_ascii_uppercase();
     // `T12` would read like the legacy `T12`/`T-12` spelling of task 12.
@@ -503,6 +514,11 @@ pub fn parse_project_key(input: &str) -> Result<String, String> {
     {
         return Err(format!(
             "invalid project key '{input}': T and T followed by digits are reserved for legacy T-N task IDs; choose 2-6 letters or digits such as DAK"
+        ));
+    }
+    if RESERVED_KEYS.contains(&key.as_str()) {
+        return Err(format!(
+            "invalid project key '{input}': {key} is reserved because enrich ignores {key}-N; choose another key"
         ));
     }
     let len = key.chars().count();
