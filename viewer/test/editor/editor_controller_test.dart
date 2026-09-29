@@ -643,6 +643,67 @@ void main() {
       expect(result.message, 'Saved T-007, version 5');
     });
 
+    test('a conflict read refreshes the tracked project key for later '
+        'comparisons (TSK-012)', () async {
+      final harness = editorHarness(
+        detail: editorDetail(deps: const <int>[2], projectKey: 'OLD'),
+      );
+      final controller = harness.controller;
+      controller.beginEdit();
+      controller.setField(EditorField.title, 'Mine title');
+      // The store now answers with the key changed to NEW.
+      harness.reads.details[editorTaskId] = editorDetail(
+        title: 'Store title',
+        deps: const <int>[2],
+        version: editorBaseVersion + 1,
+        projectKey: 'NEW',
+      );
+      harness.writer.failure = const ViewerCliErrorFailure(
+        code: 'version_conflict',
+        message: 'task 7 changed since version 3',
+        exitCode: 4,
+      );
+
+      final result = await controller.save();
+
+      expect(result.outcome, EditorSaveOutcome.conflict);
+      expect(
+        controller.projectKey,
+        'NEW',
+        reason:
+            'the conflict read must update the controller\'s own tracked '
+            'key, not just the fresh record it renders',
+      );
+      expect(
+        result.conflict!.conflictFields,
+        isNot(contains(EditorField.deps)),
+        reason:
+            'the unchanged dependency, keyed under the new project key, '
+            'must not itself be reported as conflicting',
+      );
+
+      // Typing a dependency under the new key must not be flagged as
+      // belonging to another project: the controller's key is stale
+      // otherwise, even though the conflict dialog itself shows NEW.
+      controller.setField(EditorField.deps, 'NEW-4');
+      controller.validateField(EditorField.deps);
+      expect(controller.errors[EditorField.deps], isNull);
+
+      // Resolving the conflict and saving must send the dependency as
+      // plain ID 4, not reject it or mis-parse it.
+      controller.applyConflictReview(<EditorField, EditorConflictChoice>{
+        EditorField.title: EditorConflictChoice.mine,
+      });
+      harness.writer
+        ..nextVersion = editorBaseVersion + 2
+        ..nextEventId = 90;
+
+      final saved = await controller.save();
+
+      expect(saved.outcome, EditorSaveOutcome.saved);
+      expect(harness.writer.lastRequest.changes.deps, <int>[4]);
+    });
+
     test(
       'reloadCurrentAndDiscardDraft adopts the store and clears the draft',
       () async {
@@ -764,6 +825,50 @@ void main() {
         'changes': <String, Object?>{'title': 'Review parser v2'},
       });
       expect(second.outcome, EditorSaveOutcome.saved);
+    });
+
+    test('an unsaved outcome refreshes the tracked project key so Retry sends '
+        'the correct dependency (TSK-012)', () async {
+      final harness = editorHarness(
+        detail: editorDetail(deps: const <int>[2], projectKey: 'OLD'),
+      );
+      final controller = harness.controller;
+      controller.beginEdit();
+      controller.setField(EditorField.deps, 'OLD-4');
+      harness.writer.failure = const ViewerTimeoutFailure(
+        Duration(seconds: 30),
+      );
+      // The store never saw the write, but the fresh read reports the key
+      // changed to NEW, at the same (unchanged) version.
+      harness.reads.details[editorTaskId] = editorDetail(
+        deps: const <int>[2],
+        projectKey: 'NEW',
+      );
+
+      final result = await controller.save();
+
+      expect(result.outcome, EditorSaveOutcome.unsaved);
+      expect(
+        controller.projectKey,
+        'NEW',
+        reason:
+            '_reconcile\'s own fresh read must refresh the tracked key, '
+            'not just the unsaved-branch reasoning',
+      );
+
+      // Typing a dependency under the new key must validate cleanly.
+      controller.setField(EditorField.deps, 'NEW-4');
+      controller.validateField(EditorField.deps);
+      expect(controller.errors[EditorField.deps], isNull);
+
+      // Retry (a second Save) must send it as plain ID 4.
+      harness.writer
+        ..nextVersion = editorBaseVersion + 1
+        ..nextEventId = 95;
+      final retried = await controller.save();
+
+      expect(retried.outcome, EditorSaveOutcome.saved);
+      expect(harness.writer.lastRequest.changes.deps, <int>[4]);
     });
 
     test('a record at another version opens the conflict instead', () async {
