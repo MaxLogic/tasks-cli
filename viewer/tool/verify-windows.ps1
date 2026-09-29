@@ -389,6 +389,31 @@ function Get-FlutterTestCount {
     }
 }
 
+function Test-HasConsoleWindow {
+    <#
+    .SYNOPSIS
+    True when this process itself owns a console window.
+
+    .DESCRIPTION
+    Decision 2026-09-29 (spec.md section 11): the gate accepts
+    `test/data/system_launcher_console_test.dart` self-skipping only in a run
+    that could not have proven it anyway. The test decides with the exact
+    same Win32 call (`GetConsoleWindow`), so this mirrors it rather than
+    guessing from the launching shell or an environment variable; a run with
+    a real console must still make that test pass.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not ('Verify.NativeMethods' -as [type])) {
+        Add-Type -Namespace Verify -Name NativeMethods -MemberDefinition '
+            [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+            public static extern System.IntPtr GetConsoleWindow();
+        '
+    }
+    return [Verify.NativeMethods]::GetConsoleWindow() -ne [System.IntPtr]::Zero
+}
+
 function Invoke-TasksCli {
     <#
     .SYNOPSIS
@@ -620,6 +645,14 @@ function Initialize-ViewerVerifyFixture {
     if ([string]::IsNullOrWhiteSpace($alphaName) -or [string]::IsNullOrWhiteSpace($betaName)) {
         throw 'The viewer project page reported no name for a fixture project.'
     }
+    # The Projects pane row shows `name (KEY)`; the manifest carries the key
+    # too so the viewer suite can match the row it actually renders instead
+    # of the bare directory name.
+    $alphaKey = [string]$alphaItem[0].project_key
+    $betaKey = [string]$betaItem[0].project_key
+    if ([string]::IsNullOrWhiteSpace($alphaKey) -or [string]::IsNullOrWhiteSpace($betaKey)) {
+        throw 'The viewer project page reported no project key for a fixture project.'
+    }
 
     $taskRequest = Join-Path $requestDirectory 'tasks.json'
     Set-Content -LiteralPath $taskRequest -Value '{"offset":0,"limit":200}' -Encoding utf8NoBOM
@@ -656,6 +689,7 @@ function Initialize-ViewerVerifyFixture {
             [ordered]@{
                 role            = 'alpha'
                 name            = $alphaName
+                project_key     = $alphaKey
                 project_id      = $alphaId
                 task_count      = $alphaTotal
                 open_task_count = $openTasks
@@ -663,6 +697,7 @@ function Initialize-ViewerVerifyFixture {
             [ordered]@{
                 role            = 'beta'
                 name            = $betaName
+                project_key     = $betaKey
                 project_id      = $betaId
                 task_count      = $betaTotal
                 open_task_count = $BetaTaskCount
@@ -1022,6 +1057,12 @@ function Invoke-VerifyWindows {
     $uiaStatus = 'not-run'
     $uiaLog = $null
     $hookSkipMarker = 'has no TASKS_PRECOMMIT_READY_FILE test hook'
+    # Decision 2026-09-29 (spec.md section 11): matched by the test's own
+    # skip reason, never by count alone.
+    $consoleSkipMarker = 'this runner has no console window; run from an ' +
+    'interactive console to prove CREATE_NO_WINDOW'
+    $hasConsoleWindow = Test-HasConsoleWindow
+    $consoleWindowProof = 'not run'
 
     try {
         Write-VerifyMessage -Message 'verify: collecting the toolchains'
@@ -1115,18 +1156,35 @@ function Invoke-VerifyWindows {
         if ($fullCounts.Failed -gt 0 -or -not $fullCounts.Succeeded -or $fullCounts.Passed -eq 0) {
             throw "The full Flutter suite failed (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
         }
-        $hookSkipSeen = ($fullResult.StdOut + "`n" + $fullResult.StdErr).Contains($hookSkipMarker, [System.StringComparison]::Ordinal)
+        $fullLogText = $fullResult.StdOut + "`n" + $fullResult.StdErr
+        $hookSkipSeen = $fullLogText.Contains($hookSkipMarker, [System.StringComparison]::Ordinal)
+        $consoleSkipSeen = $fullLogText.Contains($consoleSkipMarker, [System.StringComparison]::Ordinal)
+        if ($hasConsoleWindow -and $consoleSkipSeen) {
+            throw ("The full Flutter suite skipped the console-window CREATE_NO_WINDOW case (" +
+                "system_launcher_console_test.dart) although this run has an interactive console; " +
+                "decision 2026-09-29 (spec.md section 11) requires it to pass here; see $fullLog")
+        }
+        $expectedSkipped = if ($hasConsoleWindow) { 1 } else { 2 }
         if ($fullCounts.Skipped -eq 0) {
             $fullDetail = "passed $($fullCounts.Passed), skipped 0: the CLI already carries the test hooks"
+            $consoleWindowProof = if ($hasConsoleWindow) { 'passed' } else { 'unproven: no interactive console in this run (decision 2026-09-29, pending TSK-008)' }
         }
-        elseif ($fullCounts.Skipped -eq 1 -and $hookSkipSeen) {
-            $fullDetail = "passed $($fullCounts.Passed), skipped 1: the documented acknowledgement-loss case, closed by G06"
+        elseif ($fullCounts.Skipped -eq $expectedSkipped -and $hookSkipSeen -and ($hasConsoleWindow -or $consoleSkipSeen)) {
+            if ($hasConsoleWindow) {
+                $fullDetail = "passed $($fullCounts.Passed), skipped 1: the documented acknowledgement-loss case, closed by G06"
+                $consoleWindowProof = 'passed'
+            }
+            else {
+                $fullDetail = "passed $($fullCounts.Passed), skipped 2: the documented acknowledgement-loss case (closed by G06) and the console-window CREATE_NO_WINDOW case (no interactive console in this run; decision 2026-09-29, pending TSK-008)"
+                $consoleWindowProof = 'unproven: no interactive console in this run (decision 2026-09-29, pending TSK-008)'
+            }
         }
         else {
-            throw "The full Flutter suite skipped $($fullCounts.Skipped) cases and only the documented test-hooks skip is accepted here (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
+            throw "The full Flutter suite skipped $($fullCounts.Skipped) cases and only the documented test-hooks skip, plus the console-window skip when this run has no interactive console, is accepted here (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
         }
         Add-VerifyGate -Gates $gates -Id 'G05' -Name 'flutter test (full suite)' -Status 'passed' `
-            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Log $fullLog -Detail $fullDetail
+            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Log $fullLog `
+            -Detail "$fullDetail; console_window_proof: $consoleWindowProof"
 
         Write-VerifyMessage -Message "verify: $hookBuildCommand"
         $hookBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $hookBuildArgs `
@@ -1414,6 +1472,7 @@ function Invoke-VerifyWindows {
         uia_fixture_root = $uiaFixtureResolved
         fixture_kept     = [bool]$KeepFixtureRoot
         ok               = $ok
+        console_window_proof = $consoleWindowProof
         gates            = @($gates)
         counts           = [ordered]@{
             full_suite    = $fullCounts
@@ -1448,6 +1507,7 @@ function Invoke-VerifyWindows {
     $markdown.Add("fixture_root: $fixtureResolved (kept: $([bool]$KeepFixtureRoot))")
     $markdown.Add("e2e_fixture_root: $e2eFixtureResolved (the end-to-end gate seeds its own store)")
     $markdown.Add("uia_fixture_root: $uiaFixtureResolved (G11 seeds its own store with the packaged CLI)")
+    $markdown.Add("console_window_proof: $consoleWindowProof (decision 2026-09-29, spec.md section 11)")
     $markdown.Add('')
     $markdown.Add('Scope: headless Flutter gates plus an external UIA or MSAA check of one packaged-release')
     $markdown.Add('window and its Settings dialog on a synthetic store. No keyboard or pointer input,')
