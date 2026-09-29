@@ -273,7 +273,12 @@ earlier steps. Schema-5 binaries refuse schema 6 through the newer-schema check.
 
 Project keys. Each project has at most one key, always chosen by a person: the
 CLI never invents one. Input is case-insensitive and stored uppercase; `T` and
-`T` followed only by digits (`T12`) are reserved for the legacy form. `init --key` is required: a missing, malformed or
+`T` followed only by digits (`T12`) are reserved for the legacy form, as is a
+fixed list of standard-name prefixes routinely written as `NAME-number` in
+prose (encodings, standards bodies, hashes, ciphers and vulnerability IDs, for
+example `UTF`, `ISO`, `IEEE`, `SHA`, `CVE`; the full list is `RESERVED_KEYS` in
+src/model.rs) so that `enrich` never mistakes `UTF-8` or `ISO-8601` for a
+task-ID key. `init --key` is required: a missing, malformed or
 taken key exits 2 and creates nothing (no project directory, binding or
 identity file). Re-running `init` on a bound root must name the key the project
 already has; init never changes a key. `project-key` prints the key (`none`

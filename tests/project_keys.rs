@@ -209,6 +209,38 @@ fn init_requires_a_valid_key_and_creates_nothing_without_one() {
 }
 
 #[test]
+fn reserved_keys_are_refused_as_project_keys() {
+    let env = Env::new();
+    let root = env.root("app");
+    for key in ["utf", "UTF", "SHA", "iso", "IEEE", "cve", "X86"] {
+        let output = env.run(&["init", "--root", s(&root), "--key", key]);
+        assert_eq!(output.status.code(), Some(2), "{key}: {}", stderr(&output));
+        let message = stderr(&output);
+        assert!(message.contains("reserved"), "{key}: {message}");
+        assert!(
+            message
+                .to_ascii_uppercase()
+                .contains(&key.to_ascii_uppercase()),
+            "{key}: {message}"
+        );
+    }
+    assert!(
+        !env.data().exists(),
+        "a refused init must not create the data root"
+    );
+
+    // A non-reserved key is unaffected; project-key --set also refuses.
+    let project = env.init("app", "DAK");
+    let set = env.run(&["--project", &project, "project-key", "--set", "SHA"]);
+    assert_eq!(set.status.code(), Some(2), "{}", stderr(&set));
+    assert!(stderr(&set).contains("reserved"), "{}", stderr(&set));
+    assert_eq!(
+        env.json(&["--project", &project, "project-key"])["project_key"],
+        "DAK"
+    );
+}
+
+#[test]
 fn a_taken_key_is_refused_with_nothing_written_and_names_the_owner() {
     let env = Env::new();
     let owner = env.init("owner-app", "DAK");
@@ -719,6 +751,35 @@ fn bulk_import_requires_a_key_for_every_new_project() {
     assert_eq!(keyed, ["ALP", "BET", "BTA"]);
     let alpha = fs::read_to_string(reports.join("run.jsonl")).unwrap();
     assert!(alpha.contains("\"project_key\":\"ALP\""), "{alpha}");
+}
+
+#[test]
+fn bulk_import_key_map_refuses_a_reserved_key() {
+    let env = Env::new();
+    let corpus = env.root("corpus");
+    write_ledger(&corpus.join("alpha"), "## todo\n### T-1 Alpha\nbody\n");
+    let map = env.temp.path().join("map.json");
+    fs::write(&map, "{}").unwrap();
+    let reports = env.temp.path().join("reports");
+    let keys = env.temp.path().join("keys.json");
+    fs::write(&keys, r#"{"alpha":"SHA"}"#).unwrap();
+    let output = env.run(&[
+        "bulk-import",
+        "--scan-root",
+        s(&corpus),
+        "--map-file",
+        s(&map),
+        "--report-dir",
+        s(&reports),
+        "--key-map",
+        s(&keys),
+        "--apply",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("reserved"), "{}", stderr(&output));
+    assert_eq!(env.project_dirs(), 0, "nothing written for a reserved key");
+    assert_eq!(env.bindings(), 0);
+    assert!(!env.data().join("project-keys.json").exists());
 }
 
 /// Bulk-import checks keys through the key cache but never writes it: a dry

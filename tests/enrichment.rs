@@ -105,6 +105,42 @@ fn refuses_excessive_title_expansion_without_partial_output() {
 }
 
 #[test]
+fn reserved_prefixes_are_never_task_references() {
+    let (_root, store) = fixture();
+    let context = enrich::EnrichContext {
+        own_key: store.project_key.as_deref(),
+        own_project: Some(&store.project_id),
+        data_root: Some(&store.data_root),
+    };
+    let input = "See UTF-8, SHA-256 and ISO-8601 plus T1.";
+    let result = enrich::enrich_with(&store.conn, input, context).unwrap();
+    assert_eq!(
+        result.text,
+        "See UTF-8, SHA-256 and ISO-8601 plus T1 (Repair cache Ω)."
+    );
+    assert_eq!(result.replacements, 1);
+    assert!(result.unknown_refs.is_empty(), "{:?}", result.unknown_refs);
+    assert!(result.unknown_ids.is_empty(), "{:?}", result.unknown_ids);
+
+    // Reserved-only text must not touch the data-root key scan/cache.
+    let cache = store.data_root.join("project-keys.json");
+    assert!(!cache.exists(), "no scan should have happened yet");
+    let reserved_only = "UTF-8, SHA-256, ISO-8601, IEEE-754, CVE-2024, RFC-822, AES-256, RSA-2048, CRC-32, CWE-79, ECMA-262, CP-1252, X86-64.";
+    let result2 = enrich::enrich_with(&store.conn, reserved_only, context).unwrap();
+    assert_eq!(result2.text, reserved_only);
+    assert_eq!(result2.replacements, 0);
+    assert!(
+        result2.unknown_refs.is_empty(),
+        "{:?}",
+        result2.unknown_refs
+    );
+    assert!(
+        !cache.exists(),
+        "reserved-only text must not trigger a data-root scan"
+    );
+}
+
+#[test]
 fn enriches_slash_separated_task_references_without_rewriting_paths() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("CREATE TABLE tasks(id INTEGER PRIMARY KEY, title TEXT NOT NULL)")

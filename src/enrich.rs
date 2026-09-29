@@ -89,6 +89,15 @@ pub fn enrich_with(
             (None, None, Some(number)) => (None, number),
             (Some(key), Some(number), _) => {
                 let key = key.as_str();
+                // Reserved standard-name prefixes (UTF-8, SHA-256, ISO-8601,
+                // ...) are never task-ID keys; a project set up through this
+                // CLI can never own one (see `parse_project_key`), so this
+                // cannot shadow a real key. A pre-existing store whose key
+                // column was written outside the CLI's validation (the
+                // schema CHECK does not forbid it) is not covered.
+                if crate::model::RESERVED_KEYS.contains(&key) {
+                    continue;
+                }
                 if Some(key) == context.own_key {
                     (None, number)
                 } else {
