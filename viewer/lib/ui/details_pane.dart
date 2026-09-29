@@ -323,7 +323,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     widget.api.revealRegion(ViewerRegion.details);
     editor.beginEdit();
     widget.api.announce(
-      'Editing ${base.canonicalId}, base version ${base.version}.',
+      'Editing ${editor.canonicalTaskId ?? base.canonicalId}, base version ${base.version}.',
       dynamic: true,
     );
     _focusEditorField(EditorField.title);
@@ -1051,6 +1051,9 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       'Created ${viewerTimestamp(context, detail.createdMs)}',
       'Updated ${viewerTimestamp(context, detail.updatedMs)}',
     ];
+    final markDoneHint = detail.status == 'done'
+        ? null
+        : viewerMarkDoneHint(detail.dependencySummaries);
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
       child: Column(
@@ -1085,12 +1088,42 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                 ),
                 Tooltip(
                   message: 'Ctrl+D',
-                  child: TextButton(
-                    focusNode: _markDoneActionFocus,
-                    onPressed: _markDoneEnabled
-                        ? () => unawaited(markDone())
-                        : null,
-                    child: const Text('Mark done'),
+                  // One Wrap child: the button and its hint stay together, so
+                  // wrapping never separates the hint from Mark done or
+                  // attaches it to a neighboring button instead.
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      TextButton(
+                        focusNode: _markDoneActionFocus,
+                        onPressed: _markDoneEnabled
+                            ? () => unawaited(markDone())
+                            : null,
+                        // The button stays enabled: the CLI is the authority
+                        // and explains a refusal if the loaded list is stale.
+                        // Merged into the button node as its description.
+                        child: Semantics(
+                          hint: markDoneHint,
+                          child: const Text('Mark done'),
+                        ),
+                      ),
+                      // Visible twin of the button's description; excluded so
+                      // a screen reader does not hear it twice.
+                      if (markDoneHint != null)
+                        ExcludeSemantics(
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 12, bottom: 4),
+                            child: Text(
+                              markDoneHint,
+                              key: const ValueKey<String>(
+                                'details-mark-done-hint',
+                              ),
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 Tooltip(
@@ -1367,6 +1400,11 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
 
   // ---------------------------------------------------------- dependencies
 
+  /// True while the open task itself is done or cancelled: no dependency
+  /// row of it reads as waiting, whatever its prerequisites' statuses are.
+  bool _dependentIsTerminal(TaskDetailController state) =>
+      viewerStatusIsTerminal(state.detail?.status ?? '');
+
   Widget _buildDependenciesPanel(
     BuildContext context,
     TaskDetailController state,
@@ -1382,13 +1420,17 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       itemKeyBuilder: (index) =>
           ValueKey<String>('dependency-${dependencies[index].id}'),
       rowSemanticsBuilder: (index) => AccessibleRowSemantics(
-        label: viewerDependencyRowLabel(dependencies[index]),
+        label: viewerDependencyRowLabel(
+          dependencies[index],
+          dependentIsTerminal: _dependentIsTerminal(state),
+        ),
         value: viewerRowPosition(index, dependencies.length),
       ),
       onActivate: _openDependencyAt,
       rowBuilder: (context, index, selected) => _DependencyRowTile(
         dependency: dependencies[index],
         selected: selected,
+        dependentIsTerminal: _dependentIsTerminal(state),
       ),
     );
   }
@@ -1541,10 +1583,15 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
 /// One dependency row: the whole row is the activating control, so its
 /// accessible name is reached through the shared row label.
 class _DependencyRowTile extends StatelessWidget {
-  const _DependencyRowTile({required this.dependency, required this.selected});
+  const _DependencyRowTile({
+    required this.dependency,
+    required this.selected,
+    required this.dependentIsTerminal,
+  });
 
   final DependencySummary dependency;
   final bool selected;
+  final bool dependentIsTerminal;
 
   @override
   Widget build(BuildContext context) {
@@ -1576,7 +1623,10 @@ class _DependencyRowTile extends StatelessWidget {
             ],
           ),
           Text(
-            viewerDependencyReadinessText(dependency),
+            viewerDependencyReadinessText(
+              dependency,
+              dependentIsTerminal: dependentIsTerminal,
+            ),
             style: theme.textTheme.bodySmall,
           ),
         ],

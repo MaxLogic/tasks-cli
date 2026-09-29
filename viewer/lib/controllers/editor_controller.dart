@@ -236,10 +236,18 @@ class ViewerEditorController extends ChangeNotifier {
   String? get canonicalTaskId =>
       _taskId == null ? null : viewerCanonicalTaskId(_taskId!, _projectKey);
 
-  /// Key of the project the confirmed record belongs to, if it has one.
-  String? get projectKey => _base?.projectKey;
+  /// Key of the project the task belongs to, if it has one.
+  ///
+  /// It follows the newest read (a task page or a detail), so a key changed
+  /// from a terminal reaches an open editor without reloading the task.
+  String? get projectKey => _projectKey;
+  String? _projectKey;
 
-  String? get _projectKey => projectKey;
+  /// Every key an open draft's dependency text was written under, before the
+  /// bound project's newest one (OLD -> NEW -> NEWER keeps both OLD and NEW).
+  /// Their `KEY-N` entries still name this project, so they keep parsing
+  /// although the draft text stays exactly as typed.
+  final Set<String> _draftKeys = <String>{};
 
   /// Confirmed record the draft is based on.
   TaskDetail? get base => _base;
@@ -259,8 +267,8 @@ class ViewerEditorController extends ChangeNotifier {
       return false;
     }
     return EditorFieldChanges.between(
-      base,
-      draft,
+      _parseable(base),
+      _parseable(draft),
       projectKey: _projectKey,
     ).isNotEmpty;
   }
@@ -272,7 +280,11 @@ class ViewerEditorController extends ChangeNotifier {
     if (base == null || draft == null) {
       return const EditorFieldChanges();
     }
-    return EditorFieldChanges.between(base, draft, projectKey: _projectKey);
+    return EditorFieldChanges.between(
+      _parseable(base),
+      _parseable(draft),
+      projectKey: _projectKey,
+    );
   }
 
   bool get isSaving => _saving;
@@ -337,10 +349,17 @@ class ViewerEditorController extends ChangeNotifier {
   /// A refresh that lands while the user is editing never overwrites the
   /// draft: an intervening write has to become a conflict on Save instead.
   void observeDetail(TaskDetail? detail, {String? projectId}) {
+    final nextProject = projectId ?? _projectId;
+    if (detail != null) {
+      // A key change reaches the editor even while it is open.
+      observeProjectKey(detail.projectKey, projectId: nextProject);
+    }
     if (_editing) {
       return;
     }
-    final nextProject = projectId ?? _projectId;
+    if (nextProject != _projectId) {
+      _projectKey = null;
+    }
     if (detail == null) {
       if (_base == null && _projectId == nextProject) {
         return;
@@ -359,13 +378,60 @@ class ViewerEditorController extends ChangeNotifier {
       return;
     }
     _projectId = nextProject;
+    _projectKey = detail.projectKey ?? _projectKey;
     _taskId = detail.id;
     _base = detail;
-    _baseFields = TaskEditFields.fromDetail(detail);
+    _baseFields = TaskEditFields.fromDetail(detail, projectKey: _projectKey);
     _draft = null;
     _conflict = null;
     _awaitingReconciliation = false;
     _notify();
+  }
+
+  /// A newer read reported [key] for the bound project.
+  ///
+  /// Keys can be changed but never removed (spec.md "Project keys"), so null
+  /// means "not reported" and changes nothing. A closed editor re-keys its
+  /// base text; an open draft keeps its text and [_draftKeys] keeps every
+  /// prior key it was written under valid, through any number of changes.
+  void observeProjectKey(String? key, {required String? projectId}) {
+    if (key == null || key == _projectKey || projectId != _projectId) {
+      return;
+    }
+    final previous = _projectKey;
+    _projectKey = key;
+    final base = _base;
+    if (_editing) {
+      if (previous != null) {
+        _draftKeys.add(previous);
+      }
+    } else if (base != null) {
+      _baseFields = TaskEditFields.fromDetail(base, projectKey: key);
+    }
+    _notify();
+  }
+
+  /// [base]'s ID in the current key, for status text and summaries.
+  String _nameOf(TaskDetail base) =>
+      viewerCanonicalTaskId(base.id, _projectKey);
+
+  /// [fields] with dependency entries in any of [_draftKeys] respelled as
+  /// `T-N`, the form every key accepts, for comparison and validation only.
+  TaskEditFields _parseable(TaskEditFields fields) {
+    final former = _draftKeys.where((key) => key != _projectKey);
+    if (former.isEmpty) {
+      return fields;
+    }
+    final entry = RegExp(
+      '(^|[,\\s])(?:${former.map(RegExp.escape).join('|')})-(?=\\d)',
+      caseSensitive: false,
+    );
+    return fields.copyWith(
+      depsText: fields.depsText.replaceAllMapped(
+        entry,
+        (match) => '${match[1]}T-',
+      ),
+    );
   }
 
   /// Opens the editor on the confirmed record with no changes yet.
@@ -395,6 +461,9 @@ class ViewerEditorController extends ChangeNotifier {
     required int baseVersion,
     required TaskEditFields draftFields,
   }) {
+    _projectKey =
+        current.projectKey ?? (projectId == _projectId ? _projectKey : null);
+    _draftKeys.clear();
     _projectId = projectId;
     _taskId = current.id;
     _editing = true;
@@ -438,7 +507,7 @@ class ViewerEditorController extends ChangeNotifier {
       return;
     }
     final message = validateEditorFields(
-      fields,
+      _parseable(fields),
       taskId: _taskId,
       projectKey: _projectKey,
     ).errors[field];
@@ -479,6 +548,13 @@ class ViewerEditorController extends ChangeNotifier {
   }
 
   void _closeEditor() {
+    final base = _base;
+    if (_draftKeys.isNotEmpty && base != null) {
+      // The key changed while the draft was open; the next draft starts from
+      // text in the current key.
+      _baseFields = TaskEditFields.fromDetail(base, projectKey: _projectKey);
+    }
+    _draftKeys.clear();
     _editing = false;
     _draft = null;
     _conflict = null;
@@ -686,8 +762,8 @@ class ViewerEditorController extends ChangeNotifier {
       );
     }
     final changes = EditorFieldChanges.between(
-      baseFields,
-      draft,
+      _parseable(baseFields),
+      _parseable(draft),
       projectKey: _projectKey,
     );
     if (changes.isEmpty) {
@@ -701,7 +777,7 @@ class ViewerEditorController extends ChangeNotifier {
       changes: changes,
       intended: _applyChanges(baseFields, changes),
       statusText: (result) =>
-          'Saved ${base.canonicalId}, version ${result.version}',
+          'Saved ${_nameOf(base)}, version ${result.version}',
     );
   }
 
@@ -722,7 +798,7 @@ class ViewerEditorController extends ChangeNotifier {
     if (base.status == 'done') {
       return EditorSaveResult(
         EditorSaveOutcome.noop,
-        message: '${base.canonicalId} is already done.',
+        message: '${_nameOf(base)} is already done.',
         version: base.version,
       );
     }
@@ -754,8 +830,8 @@ class ViewerEditorController extends ChangeNotifier {
         );
       }
       changes = EditorFieldChanges.between(
-        baseFields,
-        _draft!,
+        _parseable(baseFields),
+        _parseable(_draft!),
         projectKey: _projectKey,
       ).copyWith(status: 'done');
     }
@@ -763,7 +839,7 @@ class ViewerEditorController extends ChangeNotifier {
       changes: changes,
       intended: _applyChanges(baseFields, changes),
       statusText: (result) =>
-          '${base.canonicalId} is done, version ${result.version}',
+          '${_nameOf(base)} is done, version ${result.version}',
     );
   }
 
@@ -798,17 +874,11 @@ class ViewerEditorController extends ChangeNotifier {
     final currentFields = conflict.currentFields;
     var next = draft;
     for (final field in EditorField.values) {
-      final userChanged = _differs(
-        conflict.baseFields,
-        draft,
-        field,
-        _projectKey,
-      );
+      final userChanged = _differs(conflict.baseFields, draft, field);
       final currentChanged = _differs(
         conflict.baseFields,
         currentFields,
         field,
-        _projectKey,
       );
       final choice = choices[field] ?? conflict.choices[field];
       if (!userChanged) {
@@ -906,7 +976,7 @@ class ViewerEditorController extends ChangeNotifier {
         return EditorSaveResult(
           EditorSaveOutcome.failed,
           message: viewerOpenPrerequisitesMessage(
-            base.canonicalId,
+            _nameOf(base),
             failure.openPrerequisites,
           ),
         );
@@ -1072,8 +1142,8 @@ class ViewerEditorController extends ChangeNotifier {
     final changed = <EditorField>[];
     final conflicting = <EditorField>[];
     for (final field in EditorField.values) {
-      final userChanged = _differs(base, draft, field, _projectKey);
-      final currentChanged = _differs(base, currentFields, field, _projectKey);
+      final userChanged = _differs(base, draft, field);
+      final currentChanged = _differs(base, currentFields, field);
       if (userChanged || currentChanged) {
         changed.add(field);
       }
@@ -1101,7 +1171,7 @@ class ViewerEditorController extends ChangeNotifier {
       );
     }
     final result = validateEditorFields(
-      draft,
+      _parseable(draft),
       taskId: _taskId,
       projectKey: _projectKey,
     );
@@ -1177,16 +1247,12 @@ class ViewerEditorController extends ChangeNotifier {
     return true;
   }
 
-  static bool _differs(
-    TaskEditFields base,
-    TaskEditFields other,
-    EditorField field,
-    String? projectKey,
-  ) => EditorFieldChanges.between(
-    base,
-    other,
-    projectKey: projectKey,
-  ).fields.contains(field);
+  bool _differs(TaskEditFields base, TaskEditFields other, EditorField field) =>
+      EditorFieldChanges.between(
+        _parseable(base),
+        _parseable(other),
+        projectKey: _projectKey,
+      ).fields.contains(field);
 
   void _notify() {
     if (!_disposed) {

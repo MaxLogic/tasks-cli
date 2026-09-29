@@ -489,6 +489,14 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   }
 
   void _onTasksChanged() {
+    // A refreshed page may carry a key changed from a terminal; the open task
+    // and its editor adopt it without a reload. Keys are never removed, so a
+    // page without one leaves the known key alone.
+    final key = _tasks?.projectKey;
+    if (key != null) {
+      _detail?.projectKey = key;
+      editor.observeProjectKey(key, projectId: _appliedProjectId);
+    }
     final id = _tasks?.selectedTaskId;
     if (id != _appliedTaskId) {
       _appliedTaskId = id;
@@ -497,7 +505,8 @@ class ViewerWorkspaceModel extends ChangeNotifier {
         if (id == null) {
           detail.clearSelection();
         } else {
-          detail.projectKey = _tasks?.projectKey ?? detail.projectKey;
+          // The key propagation above already covers this task; a second
+          // assignment here would just repeat the same value.
           detail.selectTask(id);
         }
       }

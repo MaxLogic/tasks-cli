@@ -241,6 +241,10 @@ class FakeWorkspaceReads
   final Map<int, TaskDetail> details;
   final Map<int, List<HistoryEvent>> history;
 
+  /// Key every task page reports, as `viewer tasks` sends `project_key`;
+  /// change it to simulate `tasks project-key --set`.
+  String? projectKey;
+
   /// Delay before every answer, so a test can observe loading feedback.
   Duration latency;
 
@@ -334,6 +338,7 @@ class FakeWorkspaceReads
     final next = query.offset + items.length;
     return TaskPage(
       protocolVersion: 1,
+      projectKey: projectKey,
       items: items,
       totalCount: matched.length,
       offset: query.offset,

@@ -87,16 +87,35 @@ enum _Scene {
 
   /// [taskOpen] in a project with the longest key and 5-digit task IDs.
   taskOpenKeyed,
+
+  /// An open task with several unfinished prerequisites: the Mark done hint
+  /// is long enough to wrap onto its own line under the button.
+  markDoneHintWrap,
+
+  /// The task list's context menu, open on a row whose task is loaded and
+  /// carries a Mark done hint.
+  taskMenuHint,
 }
 
 /// File-name stem of a scene's goldens.
-String _sceneName(_Scene scene) =>
-    scene == _Scene.taskOpenKeyed ? 'taskOpen_keyed' : scene.name;
+String _sceneName(_Scene scene) => switch (scene) {
+  _Scene.taskOpenKeyed => 'taskOpen_keyed',
+  _Scene.markDoneHintWrap => 'markDoneHint_wrap',
+  _Scene.taskMenuHint => 'taskMenu_hint',
+  _ => scene.name,
+};
 
-/// Window sizes each scene renders at; the refusal and keyed scenes need only
-/// the smaller reference size.
-List<Size> _sizes(_Scene scene) =>
-    scene == _Scene.verifyRefused || scene == _Scene.taskOpenKeyed
+/// Scenes that need only the smaller reference size.
+const Set<_Scene> _narrowScenes = <_Scene>{
+  _Scene.verifyRefused,
+  _Scene.taskOpenKeyed,
+  _Scene.markDoneHintWrap,
+  _Scene.taskMenuHint,
+};
+
+/// Window sizes each scene renders at; the refusal, keyed and Mark done hint
+/// scenes need only the smaller reference size.
+List<Size> _sizes(_Scene scene) => _narrowScenes.contains(scene)
     ? const <Size>[Size(1280, 720)]
     : const <Size>[Size(2000, 800), Size(1280, 720)];
 
@@ -168,6 +187,47 @@ const ViewerCliErrorFailure _refusal = ViewerCliErrorFailure(
   ],
 );
 
+/// An open task with several unfinished prerequisites, so the Mark done hint
+/// is long enough to wrap under the button and shows up in the list context
+/// menu once the task's detail is loaded.
+FakeWorkspaceReads _hintedReads(List<ProjectItem> projects) {
+  final prerequisites = <DependencySummary>[
+    testDependency(2, title: 'Draft the migration plan', status: 'todo'),
+    testDependency(
+      3,
+      title: 'Review the storage layout',
+      status: 'in-progress',
+    ),
+    testDependency(4, title: 'Confirm the backup policy', status: 'blocked'),
+    testDependency(5, title: 'Update the release notes', status: 'draft'),
+  ];
+  return fakeWorkspaceReads(
+    projects: projects,
+    tasks: <String, List<TaskItem>>{
+      for (final project in projects)
+        project.projectId: <TaskItem>[
+          testTaskItem(
+            1,
+            title: 'Render goldens on Windows',
+            priority: 'P1',
+            dependencyCount: prerequisites.length,
+            waitingDependencyCount: prerequisites.length,
+          ),
+        ],
+    },
+    details: <int, TaskDetail>{
+      1: testTaskDetail(
+        1,
+        title: 'Render goldens on Windows',
+        priority: 'P1',
+        body: 'Keep the layout regression deterministic.',
+        deps: const <int>[2, 3, 4, 5],
+        dependencySummaries: prerequisites,
+      ),
+    },
+  );
+}
+
 FakeWorkspaceReads _reads(_Scene scene) {
   if (scene == _Scene.taskOpenKeyed) {
     return _keyedReads();
@@ -177,6 +237,9 @@ FakeWorkspaceReads _reads(_Scene scene) {
     _project(2, 'tasks-cli', 42.5),
     _project(3, 'DelphiAiKit', 12),
   ];
+  if (scene == _Scene.markDoneHintWrap || scene == _Scene.taskMenuHint) {
+    return _hintedReads(projects);
+  }
   if (scene == _Scene.verifyRefused) {
     return fakeWorkspaceReads(
       projects: projects,
@@ -336,6 +399,21 @@ void main() {
               expect(find.textContaining('ABCDEF-12000'), findsWidgets);
               expect(find.textContaining('ABCDEF-12001'), findsWidgets);
               expect(find.textContaining('T-12000'), findsNothing);
+            }
+            if (scene == _Scene.markDoneHintWrap ||
+                scene == _Scene.taskMenuHint) {
+              await model.selectTaskRow(0);
+              await tester.pumpAndSettle();
+              await model.openTaskIndex(0);
+              await tester.pumpAndSettle();
+              const hint = 'Needs T-002, T-003, T-004 and T-005 done first';
+              expect(find.text(hint), findsOneWidget);
+              if (scene == _Scene.taskMenuHint) {
+                await tester.tap(find.byTooltip('Actions for T-001'));
+                await tester.pumpAndSettle();
+                expect(find.text('Mark done (D)'), findsOneWidget);
+                expect(find.text(hint), findsNWidgets(2));
+              }
             }
             // With the real font every selected-project action is on screen
             // inside the Projects pane, even at 720 pixels.

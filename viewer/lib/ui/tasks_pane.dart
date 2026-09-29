@@ -999,6 +999,13 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         );
     final canWrite =
         widget.model.editor.canWrite && !widget.model.editor.isSaving;
+    // Only the open task's dependencies are loaded; another row gets no hint
+    // rather than an extra CLI call.
+    final loaded = widget.model.detail?.detail;
+    final doneHint =
+        loaded != null && loaded.id == item.id && loaded.status != 'done'
+        ? viewerMarkDoneHint(loaded.dependencySummaries)
+        : null;
     final action = await showMenu<_TaskMenuAction>(
       context: context,
       requestFocus: true,
@@ -1008,7 +1015,12 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       ),
       items: [
         for (final action in _TaskMenuAction.values)
-          _TaskActionMenuItem(action: action, item: item, canWrite: canWrite),
+          _TaskActionMenuItem(
+            action: action,
+            item: item,
+            canWrite: canWrite,
+            hint: action == _TaskMenuAction.done ? doneHint : null,
+          ),
       ],
     );
     if (!mounted) return;
@@ -1290,17 +1302,21 @@ class _TaskActionMenuItem extends PopupMenuItem<_TaskMenuAction> {
     required this.action,
     required this.item,
     required this.canWrite,
+    String? hint,
   }) : super(
          value: action,
          enabled: _taskActionEnabled(action, item, canWrite),
-         child: Text(switch (action) {
-           _TaskMenuAction.copySummary => 'Copy ID and name (C)',
-           _TaskMenuAction.copyContent => 'Copy content (V)',
-           _TaskMenuAction.edit => 'Edit task (E)',
-           _TaskMenuAction.done => 'Mark done (D)',
-           _TaskMenuAction.block => 'Block task (B)',
-           _TaskMenuAction.cancel => 'Cancel task (X)',
-         }),
+         child: _TaskActionLabel(
+           label: switch (action) {
+             _TaskMenuAction.copySummary => 'Copy ID and name (C)',
+             _TaskMenuAction.copyContent => 'Copy content (V)',
+             _TaskMenuAction.edit => 'Edit task (E)',
+             _TaskMenuAction.done => 'Mark done (D)',
+             _TaskMenuAction.block => 'Block task (B)',
+             _TaskMenuAction.cancel => 'Cancel task (X)',
+           },
+           hint: hint,
+         ),
        );
   final _TaskMenuAction action;
   final TaskItem item;
@@ -1340,4 +1356,34 @@ class _TaskActionMenuItemState
     },
     child: super.build(context),
   );
+}
+
+/// A menu item's text, with an optional [hint] shown under it and spoken as
+/// the item's description (the Mark done prerequisites hint).
+class _TaskActionLabel extends StatelessWidget {
+  const _TaskActionLabel({required this.label, this.hint});
+
+  final String label;
+  final String? hint;
+
+  @override
+  Widget build(BuildContext context) {
+    final hint = this.hint;
+    if (hint == null) {
+      return Text(label);
+    }
+    return Semantics(
+      hint: hint,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(label),
+          ExcludeSemantics(
+            child: Text(hint, style: Theme.of(context).textTheme.bodySmall),
+          ),
+        ],
+      ),
+    );
+  }
 }
