@@ -1331,13 +1331,16 @@ final class TaskItem {
   final int version;
   final List<String> labels;
   final int dependencyCount;
+
+  /// Prerequisites that are not done, including cancelled ones.
   final int waitingDependencyCount;
 
   /// Prerequisites in `to-verify`. They are part of [waitingDependencyCount]
   /// because they still block completion, but they do not block starting.
   final int verifyingDependencyCount;
 
-  /// Waiting prerequisites that also keep the task from starting.
+  /// Waiting prerequisites that also keep the task from starting, cancelled
+  /// ones included.
   int get blockingDependencyCount =>
       waitingDependencyCount - verifyingDependencyCount;
   final int createdMs;
@@ -1453,9 +1456,11 @@ final class DependencySummary {
 
   /// True while this dependency still withholds readiness from the task.
   ///
-  /// Dependency waiting is separate from an explicit blocked status, so a
-  /// terminal dependency is shown but stops preventing readiness.
-  bool get preventsReadiness => !viewerStatusIsTerminal(status);
+  /// Dependency waiting is separate from an explicit blocked status. Only a
+  /// done dependency stops preventing readiness: a cancelled one remains
+  /// unsatisfied (spec.md "CLI and output contract"), although it no longer
+  /// blocks completion.
+  bool get preventsReadiness => status != 'done';
 
   /// True for a `to-verify` dependency: it still waits for its batch gate, so
   /// it blocks completion, but it does not block starting the task.

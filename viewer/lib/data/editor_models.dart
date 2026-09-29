@@ -42,17 +42,22 @@ final class TaskEditFields {
     required this.depsText,
   });
 
-  /// Canonical starting text for one stored record.
-  factory TaskEditFields.fromDetail(TaskDetail detail) => TaskEditFields(
-    title: detail.title,
-    body: detail.body,
-    status: detail.status,
-    priority: detail.priority,
-    labelsText: detail.labels.join(', '),
-    depsText: detail.deps
-        .map((id) => viewerCanonicalTaskId(id, detail.projectKey))
-        .join(', '),
-  );
+  /// Canonical starting text for one stored record. [projectKey] overrides
+  /// the key the record was read with, for a key that changed since.
+  factory TaskEditFields.fromDetail(TaskDetail detail, {String? projectKey}) =>
+      TaskEditFields(
+        title: detail.title,
+        body: detail.body,
+        status: detail.status,
+        priority: detail.priority,
+        labelsText: detail.labels.join(', '),
+        depsText: detail.deps
+            .map(
+              (id) =>
+                  viewerCanonicalTaskId(id, projectKey ?? detail.projectKey),
+            )
+            .join(', '),
+      );
 
   final String title;
   final String body;

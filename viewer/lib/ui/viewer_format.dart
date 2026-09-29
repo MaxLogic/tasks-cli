@@ -134,17 +134,55 @@ List<String> viewerDependencyCountParts(TaskItem item) {
 }
 
 /// Readiness wording of one dependency row (design.md section 7).
-String viewerDependencyReadinessText(DependencySummary dependency) {
+///
+/// [dependentIsTerminal] is whether the task the row belongs to is itself
+/// done or cancelled: a terminal task has nothing left pending, so no row
+/// reads as waiting on it, whatever its prerequisites' statuses are (the CLI
+/// reports zero waiting/verifying counts for it for the same reason).
+String viewerDependencyReadinessText(
+  DependencySummary dependency, {
+  required bool dependentIsTerminal,
+}) {
+  if (dependentIsTerminal) {
+    return 'Does not withhold readiness';
+  }
   if (dependency.awaitsVerification) {
     return 'Awaiting verification; does not block starting';
+  }
+  if (dependency.status == 'cancelled') {
+    return 'Cancelled; still withholds readiness';
   }
   return dependency.preventsReadiness
       ? 'Waiting for this dependency'
       : 'Does not withhold readiness';
 }
 
+/// Mark done hint from the loaded [dependencies], for example "Needs T-009
+/// done first", or null when the done guard would accept the task.
+///
+/// Lists only what the guard counts (spec.md "CLI and output contract"):
+/// draft, todo, in-progress, to-verify and blocked prerequisites. Done and
+/// cancelled ones never block completion. The CLI stays the authority, so a
+/// stale list is corrected by its refusal, not by disabling Mark done.
+String? viewerMarkDoneHint(Iterable<DependencySummary> dependencies) {
+  final open = <String>[
+    for (final dependency in dependencies)
+      if (!viewerStatusIsTerminal(dependency.status)) dependency.canonicalId,
+  ];
+  if (open.isEmpty) {
+    return null;
+  }
+  final listed = open.length == 1
+      ? open.single
+      : '${open.sublist(0, open.length - 1).join(', ')} and ${open.last}';
+  return 'Needs $listed done first';
+}
+
 /// Accessible name of one dependency row (design.md section 7).
-String viewerDependencyRowLabel(DependencySummary dependency) {
+String viewerDependencyRowLabel(
+  DependencySummary dependency, {
+  required bool dependentIsTerminal,
+}) {
   final buffer = StringBuffer()
     ..write(dependency.canonicalId)
     ..write(', ')
@@ -153,7 +191,12 @@ String viewerDependencyRowLabel(DependencySummary dependency) {
     ..write(dependency.title);
   buffer
     ..write('. ')
-    ..write(viewerDependencyReadinessText(dependency));
+    ..write(
+      viewerDependencyReadinessText(
+        dependency,
+        dependentIsTerminal: dependentIsTerminal,
+      ),
+    );
   return buffer.toString();
 }
 

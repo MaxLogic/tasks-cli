@@ -174,6 +174,8 @@ pub struct TaskItem {
     #[serde(default)]
     pub labels: Vec<String>,
     pub dependency_count: u64,
+    /// Prerequisites that are not done, including cancelled ones; always 0
+    /// for a done or cancelled task, since it has nothing left pending.
     pub waiting_dependency_count: u64,
     /// Prerequisites in `to-verify`: counted in `waiting_dependency_count`
     /// (they still block completion) but they do not block starting.
@@ -1724,9 +1726,13 @@ fn task_filter_sql(query: &TaskQuery, key: Option<&str>) -> (String, Vec<SqlValu
         Readiness::Runnable => {
             conditions.push(crate::store::RUNNABLE_PREDICATE.to_string())
         }
+        // Any prerequisite that is not done: nonterminal ones block completion
+        // and cancelled ones withhold readiness (spec.md "Cancelled
+        // prerequisites remain unsatisfied"), so no open task falls through
+        // both Runnable and Waiting because of its prerequisites.
         Readiness::Waiting => conditions.push(
             "t.status NOT IN ('done','cancelled')
-             AND EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status NOT IN ('done','cancelled'))"
+             AND EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status <> 'done')"
                 .to_string(),
         ),
     }
@@ -1886,7 +1892,10 @@ fn populate_task_items(conn: &Connection, items: &mut [TaskItem]) -> Result<(), 
     Ok(())
 }
 
-/// Per task: (all prerequisites, nonterminal ones, to-verify ones).
+/// Per task: (all prerequisites, not-done ones, to-verify ones). Not done
+/// includes cancelled: it withholds readiness like any other unfinished one.
+/// A row whose own task is done or cancelled reports zero for the last two:
+/// a terminal task has nothing left pending, whatever its prerequisites are.
 fn dependency_counts(
     conn: &Connection,
     ids: &[u64],
@@ -1897,9 +1906,13 @@ fn dependency_counts(
     }
     let sql = format!(
         "SELECT d.task_id, COUNT(*),
-                COALESCE(SUM(CASE WHEN p.status NOT IN ('done','cancelled') THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.status = 'to-verify' THEN 1 ELSE 0 END), 0)
-         FROM dependencies d JOIN tasks p ON p.id = d.depends_on_id
+                COALESCE(SUM(CASE WHEN t.status NOT IN ('done','cancelled')
+                                   AND p.status <> 'done' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN t.status NOT IN ('done','cancelled')
+                                   AND p.status = 'to-verify' THEN 1 ELSE 0 END), 0)
+         FROM dependencies d
+         JOIN tasks p ON p.id = d.depends_on_id
+         JOIN tasks t ON t.id = d.task_id
          WHERE d.task_id IN ({})
          GROUP BY d.task_id",
         placeholders(ids.len())

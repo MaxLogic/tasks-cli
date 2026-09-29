@@ -1771,14 +1771,16 @@ fn task_filters_combine_scope_status_priority_labels_and_readiness() {
     );
 
     // Readiness is separate from explicit blocked status: a blocked task is
-    // never runnable, and a cancelled dependency neither waits nor satisfies.
+    // never runnable, and a cancelled dependency does not satisfy readiness,
+    // so its dependent waits (spec.md: cancelled prerequisites remain
+    // unsatisfied).
     assert_eq!(
         query(json!({"scope": "all", "readiness": "runnable", "sort": "id"})),
         [todo, progress, satisfied]
     );
     assert_eq!(
         query(json!({"scope": "all", "readiness": "waiting", "sort": "id"})),
-        [waiting]
+        [waiting, cancelled_dep]
     );
 
     // The runnable set must equal the existing store selection predicate.
@@ -2840,4 +2842,114 @@ fn to_verify_status_is_filterable_sorted_and_satisfies_runnable_readiness() {
             .version,
         1
     );
+}
+
+#[test]
+fn cancelled_prerequisite_withholds_readiness_and_counts_as_waiting() {
+    let project = Project::new();
+    let cancelled = project.add_plain("dropped", TaskStatus::Cancelled);
+    let finished = project.add_plain("finished", TaskStatus::Done);
+    let dependent = project.add(
+        "dependent",
+        TaskStatus::Ready,
+        Priority::P2,
+        &[],
+        vec![cancelled, finished],
+    );
+    let free = project.add_plain("free", TaskStatus::Ready);
+    let query = |document: Value| ids(&project.tasks(document));
+
+    // spec.md: cancelled prerequisites remain unsatisfied for readiness.
+    assert_eq!(
+        query(json!({"readiness": "runnable", "sort": "id"})),
+        [free],
+        "a cancelled prerequisite withholds runnable readiness"
+    );
+    assert_eq!(
+        query(json!({"readiness": "waiting", "sort": "id"})),
+        [dependent],
+        "the task is waiting, so one of the two filters shows it"
+    );
+    let row = project.tasks(json!({"statuses": ["todo"], "sort": "id"}))["items"][0].clone();
+    assert_eq!(row["id"], dependent);
+    assert_eq!(row["dependency_count"], 2);
+    assert_eq!(row["waiting_dependency_count"], 1);
+    assert_eq!(row["verifying_dependency_count"], 0);
+    let blocking = row["waiting_dependency_count"].as_u64().unwrap()
+        - row["verifying_dependency_count"].as_u64().unwrap();
+    assert_eq!(blocking, 1, "the cancelled prerequisite blocks starting");
+
+    // The done guard is unchanged: a cancelled prerequisite never refuses done.
+    let data = update(
+        project.data_root.path(),
+        &project.id,
+        json!({"id": dependent, "expect_version": 1, "changes": {"status": "done"}}),
+    )
+    .data();
+    assert_eq!(data["status"], "done");
+}
+
+#[test]
+fn a_terminal_dependent_reports_zero_waiting_and_verifying_counts() {
+    // A done or cancelled task has nothing left pending, whatever its
+    // prerequisites' statuses are, so its own row never reads as waiting.
+    let project = Project::new();
+    let cancelled_prereq = project.add_plain("dropped", TaskStatus::Cancelled);
+    let verify_prereq = project.add_plain("awaiting gate", TaskStatus::ToVerify);
+    let done_dependent = project.add(
+        "done dependent",
+        TaskStatus::Done,
+        Priority::P2,
+        &[],
+        vec![cancelled_prereq, verify_prereq],
+    );
+    let cancelled_dependent = project.add(
+        "cancelled dependent",
+        TaskStatus::Cancelled,
+        Priority::P2,
+        &[],
+        vec![cancelled_prereq, verify_prereq],
+    );
+
+    let rows = project.tasks(json!({
+        "scope": "all",
+        "statuses": ["done", "cancelled"],
+        "sort": "id",
+        "limit": 200,
+    }));
+    let row = |id: u64| {
+        rows["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap_or_else(|| panic!("row {id} missing from {rows}"))
+            .clone()
+    };
+
+    for id in [done_dependent, cancelled_dependent] {
+        let row = row(id);
+        assert_eq!(row["dependency_count"], 2, "row {id}: {row}");
+        assert_eq!(
+            row["waiting_dependency_count"], 0,
+            "a terminal task reports no waiting prerequisites: row {id}: {row}"
+        );
+        assert_eq!(
+            row["verifying_dependency_count"], 0,
+            "a terminal task reports no verifying prerequisites: row {id}: {row}"
+        );
+    }
+
+    // An open task with the same prerequisites still reports them normally.
+    let open_dependent = project.add(
+        "open dependent",
+        TaskStatus::Ready,
+        Priority::P2,
+        &[],
+        vec![cancelled_prereq, verify_prereq],
+    );
+    let open_row = project.tasks(json!({"statuses": ["todo"], "sort": "id"}))["items"][0].clone();
+    assert_eq!(open_row["id"], open_dependent);
+    assert_eq!(open_row["waiting_dependency_count"], 2);
+    assert_eq!(open_row["verifying_dependency_count"], 1);
 }

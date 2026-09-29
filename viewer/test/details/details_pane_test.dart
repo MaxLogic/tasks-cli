@@ -273,6 +273,95 @@ void main() {
       }
     });
 
+    testWidgets(
+      'a cancelled prerequisite still withholds readiness on an open task',
+      (WidgetTester tester) async {
+        final semantics = tester.ensureSemantics();
+        try {
+          final reads = fakeWorkspaceReads(
+            details: <int, TaskDetail>{
+              1: testTaskDetail(
+                1,
+                title: 'First task',
+                status: 'todo',
+                deps: <int>[8],
+                dependencySummaries: <DependencySummary>[
+                  testDependency(8, title: 'Dropped idea', status: 'cancelled'),
+                ],
+              ),
+            },
+          );
+          await pumpTaskDetails(tester, reads: reads);
+          await pressKey(tester, LogicalKeyboardKey.f3);
+          await pressAlt(tester, LogicalKeyboardKey.digit2);
+
+          // spec.md: cancelled prerequisites remain unsatisfied for readiness.
+          expect(
+            detailsRow(
+              RegExp(
+                r'^T-008, Cancelled, Dropped idea\. '
+                r'Cancelled; still withholds readiness$',
+              ),
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.text('Cancelled; still withholds readiness'),
+            findsOneWidget,
+          );
+          expect(find.text('Waiting for this dependency'), findsNothing);
+          expect(find.text('Does not withhold readiness'), findsNothing);
+        } finally {
+          semantics.dispose();
+        }
+      },
+    );
+
+    testWidgets(
+      'a cancelled prerequisite of a done task no longer withholds readiness',
+      (WidgetTester tester) async {
+        final semantics = tester.ensureSemantics();
+        try {
+          final reads = fakeWorkspaceReads(
+            details: <int, TaskDetail>{
+              1: testTaskDetail(
+                1,
+                title: 'First task',
+                status: 'done',
+                deps: <int>[8],
+                dependencySummaries: <DependencySummary>[
+                  testDependency(8, title: 'Dropped idea', status: 'cancelled'),
+                ],
+              ),
+            },
+          );
+          await pumpTaskDetails(tester, reads: reads);
+          await pressKey(tester, LogicalKeyboardKey.f3);
+          await pressAlt(tester, LogicalKeyboardKey.digit2);
+
+          // A done task has nothing left pending, whatever its prerequisites'
+          // statuses are; the row never reads as waiting or withholding.
+          expect(
+            detailsRow(
+              RegExp(
+                r'^T-008, Cancelled, Dropped idea\. '
+                r'Does not withhold readiness$',
+              ),
+            ),
+            findsOneWidget,
+          );
+          expect(find.text('Does not withhold readiness'), findsOneWidget);
+          expect(find.text('Waiting for this dependency'), findsNothing);
+          expect(
+            find.text('Cancelled; still withholds readiness'),
+            findsNothing,
+          );
+        } finally {
+          semantics.dispose();
+        }
+      },
+    );
+
     testWidgets('Alt+L reaches the list; Alt+O opens it and Alt+Left returns', (
       WidgetTester tester,
     ) async {
@@ -716,6 +805,137 @@ void main() {
       expect(harness.model.detail!.hasDetail, isTrue);
       expect(find.text('body text'), findsOneWidget);
       expect(find.text('Could not load task'), findsNothing);
+    });
+  });
+
+  group('Mark done hint', () {
+    /// The header's Mark done button, as a screen reader reaches it.
+    SemanticsData markDoneButton(WidgetTester tester) => tester
+        .getSemantics(
+          find.descendant(
+            of: find.byType(ViewerDetailsPane),
+            matching: find.ancestor(
+              of: find.text('Mark done'),
+              matching: find.byType(TextButton),
+            ),
+          ),
+        )
+        .getSemanticsData();
+
+    FakeWorkspaceReads readsWith(List<DependencySummary> dependencies) =>
+        fakeWorkspaceReads(
+          details: <int, TaskDetail>{
+            1: testTaskDetail(
+              1,
+              title: 'First task',
+              deps: <int>[for (final d in dependencies) d.id],
+              dependencySummaries: dependencies,
+            ),
+          },
+        );
+
+    testWidgets('lists only the prerequisites the done guard counts', (
+      WidgetTester tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await pumpTaskDetails(
+          tester,
+          reads: readsWith(<DependencySummary>[
+            testDependency(7, status: 'todo'),
+            testDependency(8, status: 'cancelled'),
+            testDependency(9, status: 'done'),
+            testDependency(10, status: 'to-verify'),
+            testDependency(11, status: 'blocked'),
+            testDependency(12, status: 'draft'),
+            testDependency(13, status: 'in-progress'),
+          ]),
+        );
+        const hint = 'Needs T-007, T-010, T-011, T-012 and T-013 done first';
+        expect(
+          find.byKey(const ValueKey<String>('details-mark-done-hint')),
+          findsOneWidget,
+        );
+        expect(find.text(hint), findsOneWidget);
+        final button = markDoneButton(tester);
+        expect(button.label, 'Mark done');
+        expect(button.hint, hint);
+        expect(
+          button.flagsCollection.isEnabled,
+          Tristate.isTrue,
+          reason: 'the CLI stays the authority; the button is not disabled',
+        );
+
+        // The context menu of the open task's row carries the same text.
+        await pressKey(tester, LogicalKeyboardKey.f2);
+        await pressKey(tester, LogicalKeyboardKey.contextMenu);
+        expect(find.text('Mark done (D)'), findsOneWidget);
+        expect(find.text(hint), findsNWidgets(2));
+        final item = tester
+            .getSemantics(find.text('Mark done (D)'))
+            .getSemanticsData();
+        expect(item.label, 'Mark done (D)');
+        expect(item.hint, hint);
+        await pressKey(tester, LogicalKeyboardKey.escape);
+      } finally {
+        semantics.dispose();
+      }
+    });
+
+    testWidgets('uses keyed display IDs', (WidgetTester tester) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await pumpTaskDetails(
+          tester,
+          reads: readsWith(const <DependencySummary>[
+            DependencySummary(
+              id: 9,
+              displayId: 'DAK-009',
+              title: 'Keyed prerequisite',
+              status: 'to-verify',
+              version: 1,
+            ),
+          ]),
+        );
+        expect(find.text('Needs DAK-009 done first'), findsOneWidget);
+        expect(markDoneButton(tester).hint, 'Needs DAK-009 done first');
+      } finally {
+        semantics.dispose();
+      }
+    });
+
+    testWidgets('is absent when every prerequisite is done or cancelled', (
+      WidgetTester tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await pumpTaskDetails(
+          tester,
+          reads: readsWith(<DependencySummary>[
+            testDependency(8, status: 'cancelled'),
+            testDependency(9, status: 'done'),
+          ]),
+        );
+        expect(
+          find.byKey(const ValueKey<String>('details-mark-done-hint')),
+          findsNothing,
+        );
+        expect(find.textContaining('done first'), findsNothing);
+        expect(markDoneButton(tester).hint, isEmpty);
+
+        await pressKey(tester, LogicalKeyboardKey.f2);
+        await pressKey(tester, LogicalKeyboardKey.contextMenu);
+        expect(
+          tester
+              .getSemantics(find.text('Mark done (D)'))
+              .getSemanticsData()
+              .hint,
+          isEmpty,
+        );
+        await pressKey(tester, LogicalKeyboardKey.escape);
+      } finally {
+        semantics.dispose();
+      }
     });
   });
 }

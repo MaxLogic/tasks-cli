@@ -1243,4 +1243,90 @@ void main() {
       expect(harness.statusText, 'Saved T-001, version 2');
     });
   });
+
+  group('projectKey', () {
+    /// T-001 depending on T-002 in a project whose key is [key].
+    void keyedCatalog(FakeWorkspaceReads reads, String key) {
+      reads
+        ..projectKey = key
+        ..tasks[reads.projects.single.projectId] = <TaskItem>[
+          testTaskItem(1, title: 'First task', displayId: '$key-001'),
+          testTaskItem(2, title: 'Second task', displayId: '$key-002'),
+        ]
+        ..details[1] = testTaskDetail(
+          1,
+          title: 'First task',
+          projectKey: key,
+          deps: const <int>[2],
+          dependencySummaries: <DependencySummary>[
+            DependencySummary(
+              id: 2,
+              displayId: '$key-002',
+              title: 'Second task',
+              status: 'todo',
+              version: 1,
+            ),
+          ],
+        );
+    }
+
+    testWidgets('project key change refreshes the editor', (
+      WidgetTester tester,
+    ) async {
+      final catalog = <ProjectItem>[testProjectItem(1)];
+      final reads = fakeWorkspaceReads(projects: catalog);
+      keyedCatalog(reads, 'OLD');
+      final writer = FakeTaskWriter();
+      final harness = await openFirstTask(tester, reads: reads, update: writer);
+      final editor = harness.model.editor;
+
+      await pressKey(tester, LogicalKeyboardKey.f4);
+      await tester.enterText(editorField('Title (Alt+T)'), 'Typed title');
+      await tester.pumpAndSettle();
+      final draft = editor.draft;
+      expect(draft?.depsText, 'OLD-002');
+      expect(find.textContaining('Editing OLD-001  '), findsWidgets);
+
+      // `tasks project-key --set NEW` from a terminal, then F5.
+      keyedCatalog(reads, 'NEW');
+      await harness.model.refresh();
+      await tester.pumpAndSettle();
+
+      expect(editor.isEditing, isTrue);
+      expect(editor.canonicalTaskId, 'NEW-001');
+      expect(editor.projectKey, 'NEW');
+      expect(find.textContaining('Editing NEW-001  '), findsWidgets);
+      expect(find.textContaining('Editing OLD-001  '), findsNothing);
+      expect(
+        find.textContaining('NEW-7, T-7 or 7'),
+        findsWidgets,
+        reason: 'the dependency field names the accepted forms in the new key',
+      );
+      expect(harness.model.detail!.canonicalTaskId, 'NEW-001');
+      expect(
+        harness.model.detail!.dependencies.single.canonicalId,
+        'NEW-002',
+        reason: 'the details pane shows dependency IDs in the new key',
+      );
+
+      // The dirty draft is kept exactly as typed, and its old-key entry still
+      // names this project: no validation error and no dependency change.
+      expect(editor.draft, draft);
+      expect(editor.isDirty, isTrue);
+      editor.validateField(EditorField.deps);
+      expect(editor.errors, isEmpty);
+      expect(editor.changes.deps, isNull);
+
+      await pressControl(tester, LogicalKeyboardKey.keyS);
+
+      expect(writer.requests, hasLength(1));
+      expect(writer.lastRequest.changes.title, 'Typed title');
+      expect(writer.lastRequest.changes.deps, isNull);
+      expect(harness.statusText, 'Saved NEW-001, version 2');
+
+      // The next draft starts from text in the new key.
+      await pressKey(tester, LogicalKeyboardKey.f4);
+      expect(editor.draft?.depsText, 'NEW-002');
+    });
+  });
 }
