@@ -20,17 +20,31 @@ class ViewerE2eProject {
     required this.projectId,
     required this.taskCount,
     required this.openTaskCount,
+    required this.projectKey,
   });
 
   final String role;
   final String name;
   final String projectId;
 
+  /// The project key the harness assigned (`ALPHA`). `init --key` is
+  /// required (viewer/spec.md section 11, DAK-212), so the seeding script
+  /// always writes one or throws; a manifest without one is malformed, not a
+  /// legacy manifest to tolerate.
+  final String projectKey;
+
   /// Total tasks the project statistics must report.
   final int taskCount;
 
   /// Tasks the default (open) list scope must report.
   final int openTaskCount;
+
+  /// The Projects pane row name, `name (KEY)`.
+  ///
+  /// Mirrors `ProjectItem.displayName` in `lib/data/models.dart`, which the
+  /// Projects pane row semantics label (`viewerProjectRowLabel`) is built
+  /// from.
+  String get displayName => '$name ($projectKey)';
 
   static ViewerE2eProject fromJson(Map<String, Object?> json) {
     return ViewerE2eProject(
@@ -39,6 +53,7 @@ class ViewerE2eProject {
       projectId: json['project_id']! as String,
       taskCount: json['task_count']! as int,
       openTaskCount: json['open_task_count']! as int,
+      projectKey: json['project_key']! as String,
     );
   }
 }

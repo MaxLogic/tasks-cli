@@ -295,6 +295,8 @@ Use focused tests for each slice with a meaningful failing test before behaviora
 
 All process, integration and performance tests receive unique `--data-root` and `--settings-root`; child CLI calls must inherit the fixture root explicitly. A test must fail closed if configuration is absent. Never mutate live backlogs, project identity files, clipboard contents from an unattended user session, or running installed executables. Automated clipboard tests run in a controlled test desktop; manual clipboard tests use synthetic text deliberately placed by the tester. Clean only exact run-owned roots after verifying their resolved boundaries.
 
+Decision 2026-09-29: `test/data/system_launcher_console_test.dart` proves the packaged viewer gives a console-subsystem child (`tasks.exe`) no console window (`CREATE_NO_WINDOW`); it can only prove this when the test process itself owns a console, so it self-skips otherwise with a fixed reason string. `verify-windows.ps1`'s full-suite gate (G05) accepts that skip only when the gate run itself has no interactive console, detected the same way the test decides (`GetConsoleWindow()`), and matches it by that exact skip reason, never by raising the tolerated skip count blindly. A run with an interactive console must still make the test pass; the gate fails loudly if it is skipped there instead. When the skip is accepted, the run's evidence (`verify-summary.json`/`.md`, the G05 gate detail) records `console_window_proof: unproven ... pending TSK-008` so a non-interactive run is never read as having proven it.
+
 ### Required test matrix
 
 | ID | Tests and expected proof |

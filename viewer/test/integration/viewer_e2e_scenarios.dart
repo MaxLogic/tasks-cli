@@ -61,7 +61,7 @@ void viewerE2eScenarios() {
             expect(window.projects.totalCount, fixture.projects.length);
             for (final project in fixture.projects) {
               final row = find.bySemanticsLabel(
-                RegExp('^${RegExp.escape(project.name)}\\. '),
+                RegExp('^${RegExp.escape(project.displayName)}\\. '),
               );
               expect(
                 row,
