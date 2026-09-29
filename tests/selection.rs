@@ -135,6 +135,58 @@ fn priority_cursor_versions_history_and_markdown_preserve_priority() {
 }
 
 #[test]
+fn cursor_pagination_covers_default_open_needs_human_and_explicit_status_views() {
+    // Interleaves todo/in-progress at the same priority so a page boundary
+    // falls mid-way through the default view's UNION ALL arms (TSK-014
+    // review): the merged, globally priority/id-ordered page must still
+    // split and resume correctly across the arm boundary.
+    let f = Fixture::new();
+    f.add(TaskStatus::Ready, vec![], vec![]); // 1 todo
+    f.add(TaskStatus::InProgress, vec![], vec![]); // 2 in-progress
+    f.add(TaskStatus::Ready, vec![], vec![]); // 3 todo
+    f.add(TaskStatus::InProgress, vec![], vec![]); // 4 in-progress
+    f.add(TaskStatus::Backlog, vec![], vec![]); // 5 draft
+    f.add(TaskStatus::Blocked, vec![], vec![]); // 6 blocked
+    f.add(TaskStatus::Ready, vec![], vec!["needs-human".into()]); // 7 todo, needs-human
+
+    // Default view (RUNNABLE_PREDICATE's two-arm union: todo/in-progress,
+    // excluding needs-human): a 2-item page crosses the arm boundary and
+    // resumes correctly.
+    let page = f.run(&["list", "--limit", "2"]);
+    assert_eq!(ids(&page), [1, 2]);
+    let next = page["next_after"].as_str().unwrap().to_string();
+    assert_eq!(ids(&f.run(&["list", "--after", &next])), [3, 4]);
+
+    // --open (five-arm union over every non-terminal status): a 3-item page
+    // crosses two arm boundaries (todo/in-progress -> draft -> blocked) and
+    // resumes correctly, including the needs-human task --open still shows.
+    let open_page = f.run(&["list", "--open", "--limit", "3"]);
+    assert_eq!(ids(&open_page), [1, 2, 3]);
+    let open_next = open_page["next_after"].as_str().unwrap().to_string();
+    assert_eq!(
+        ids(&f.run(&["list", "--open", "--after", &open_next])),
+        [4, 5, 6, 7]
+    );
+
+    // --needs-human (five-arm union, needs-human-labeled only) with a
+    // cursor positioned before the sole match.
+    assert_eq!(
+        ids(&f.run(&["list", "--needs-human", "--after", &next])),
+        [7]
+    );
+
+    // Explicit --status (single-arm, readiness bypassed: includes the
+    // needs-human task) combined with --after.
+    let status_page = f.run(&["list", "--status", "todo", "--limit", "1"]);
+    assert_eq!(ids(&status_page), [1]);
+    let status_next = status_page["next_after"].as_str().unwrap().to_string();
+    assert_eq!(
+        ids(&f.run(&["list", "--status", "todo", "--after", &status_next])),
+        [3, 7]
+    );
+}
+
+#[test]
 fn unlocks_counts_direct_open_and_immediately_runnable_dependents() {
     let f = Fixture::new();
     f.add(TaskStatus::Backlog, vec![], vec![]); // 1

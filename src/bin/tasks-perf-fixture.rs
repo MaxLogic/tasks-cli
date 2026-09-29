@@ -60,6 +60,17 @@ enum Profile {
     /// 1000 projects with no tasks.
     #[value(name = "perf-empty-1000")]
     PerfEmpty1000,
+    /// One project, spec.md's baseline shape (10000 tasks, 2 KiB bodies),
+    /// with almost every task `done`/`cancelled` and only a handful
+    /// runnable, for the default `tasks list` budget (TSK-014).
+    #[value(name = "perf-10k-few-runnable")]
+    Perf10kFewRunnable,
+    /// One project, spec.md's baseline shape (10000 tasks, 2 KiB bodies),
+    /// with about 90% of tasks non-terminal -- the opposite shape from
+    /// `perf-10k-few-runnable` -- for the default/`--open`/`--needs-human`
+    /// UNION ALL views' worse-selectivity case (TSK-014 review).
+    #[value(name = "perf-10k-open-heavy")]
+    Perf10kOpenHeavy,
 }
 
 impl Profile {
@@ -70,9 +81,19 @@ impl Profile {
             Profile::Perf100k => "perf-100k",
             Profile::Perf100kDense => "perf-100k-dense",
             Profile::PerfEmpty1000 => "perf-empty-1000",
+            Profile::Perf10kFewRunnable => "perf-10k-few-runnable",
+            Profile::Perf10kOpenHeavy => "perf-10k-open-heavy",
         }
     }
 }
+
+/// Number of intentionally-runnable tasks in the `perf-10k-few-runnable`
+/// profile: no `needs-human` label, no unmet dependency, status
+/// `todo`/`in-progress`. Placed at the highest task ids with priority `P3`
+/// (last in `ORDER BY priority,id`) so the default list scan must pass over
+/// nearly the whole priority index before it can fill the page — the
+/// worst case for a store shape where few tasks are runnable.
+const FEW_RUNNABLE_COUNT: usize = 8;
 
 const STATUSES: [&str; 6] = [
     "draft",
@@ -139,6 +160,16 @@ struct ProjectSpec {
     /// `todo`, `in-progress` or `blocked` (open, non-terminal), so the graph
     /// stresses the `unlocks` query's open/open filters densely.
     dense: bool,
+    /// When set, the last N task ids (N = the value) are forced runnable
+    /// (see `FEW_RUNNABLE_COUNT`) and every other task is `done`/`cancelled`,
+    /// instead of the even 6-way status split `status_for` otherwise uses.
+    few_runnable: Option<usize>,
+    /// When true, about 90% of tasks are non-terminal (spread over
+    /// `draft`/`todo`/`in-progress`/`blocked`) and 10% are `done`/
+    /// `cancelled` -- the opposite shape from `few_runnable`, for stressing
+    /// the default/`--open` UNION ALL views' worse-selectivity case
+    /// (TSK-014 review). Mutually exclusive with `few_runnable`.
+    open_heavy: bool,
 }
 
 struct DependencyPlan {
@@ -191,6 +222,70 @@ fn labels_for(id: usize, seed: u64) -> Vec<String> {
 
 fn status_for(id: usize, seed: u64) -> &'static str {
     STATUSES[(id + seed as usize) % STATUSES.len()]
+}
+
+const OPEN_HEAVY_NON_TERMINAL: [&str; 4] = ["draft", "todo", "in-progress", "blocked"];
+
+/// Status assignment for `perf-10k-few-runnable` and `perf-10k-open-heavy`.
+/// `few_runnable`: the top `count` ids (see `FEW_RUNNABLE_COUNT`) alternate
+/// `todo`/`in-progress` (runnable, given no dependencies and no
+/// `needs-human` label); every other id is `done`, with a modest
+/// `cancelled` fraction for realism. `open_heavy`: about 90% of ids are
+/// non-terminal (evenly split over `OPEN_HEAVY_NON_TERMINAL`), the rest
+/// terminal (`done`/`cancelled`, evenly split). Falls back to the even
+/// 6-way split when neither applies.
+fn status_for_profile(
+    id: usize,
+    seed: u64,
+    tasks: usize,
+    few_runnable: Option<usize>,
+    open_heavy: bool,
+) -> &'static str {
+    if open_heavy {
+        return if id.is_multiple_of(10) {
+            if id.is_multiple_of(20) {
+                "done"
+            } else {
+                "cancelled"
+            }
+        } else {
+            OPEN_HEAVY_NON_TERMINAL[(id + seed as usize) % OPEN_HEAVY_NON_TERMINAL.len()]
+        };
+    }
+    match few_runnable {
+        Some(count) if id > tasks.saturating_sub(count) => {
+            if id.is_multiple_of(2) {
+                "todo"
+            } else {
+                "in-progress"
+            }
+        }
+        Some(_) => {
+            if id.is_multiple_of(20) {
+                "cancelled"
+            } else {
+                "done"
+            }
+        }
+        None => status_for(id, seed),
+    }
+}
+
+/// Priority assignment paired with `status_for_profile`: the `few_runnable`
+/// tail gets `P3` (last in `ORDER BY priority,id`), so the default list
+/// scan must pass over the whole priority index before it can fill the
+/// page. `open_heavy` uses the ordinary varied priority formula: with ~90%
+/// of rows already matching, the worst case is selectivity, not placement.
+fn priority_for_profile(
+    id: usize,
+    seed: u64,
+    tasks: usize,
+    few_runnable: Option<usize>,
+) -> &'static str {
+    match few_runnable {
+        Some(count) if id > tasks.saturating_sub(count) => "P3",
+        _ => PRIORITIES[(id * 3 + seed as usize) % PRIORITIES.len()],
+    }
 }
 
 fn is_open_status(id: usize, seed: u64) -> bool {
@@ -303,8 +398,9 @@ fn seed_project(
                 "perf task {id:06} {}",
                 TITLE_SUFFIXES[(id + seed as usize) % TITLE_SUFFIXES.len()]
             );
-            let status = status_for(id, seed);
-            let priority = PRIORITIES[(id * 3 + seed as usize) % PRIORITIES.len()];
+            let status =
+                status_for_profile(id, seed, spec.tasks, spec.few_runnable, spec.open_heavy);
+            let priority = priority_for_profile(id, seed, spec.tasks, spec.few_runnable);
             let body = build_body(id, seed, spec.big_body && id == 1);
             let stamp = BASE_MS + (((id + seed as usize) % 97) as i64) * 1_000;
             task_stmt.execute(params![id as i64, title, body, status, stamp, priority])?;
@@ -394,6 +490,8 @@ fn run(args: Args) -> Result<(), AppError> {
                     big_body: false,
                     dependencies: 2,
                     dense: false,
+                    few_runnable: None,
+                    open_heavy: false,
                 };
                 seed_project(
                     &args.data_root,
@@ -416,6 +514,8 @@ fn run(args: Args) -> Result<(), AppError> {
                     big_body: index == 0,
                     dependencies: 10,
                     dense: false,
+                    few_runnable: None,
+                    open_heavy: false,
                 };
                 seed_project(
                     &args.data_root,
@@ -435,6 +535,8 @@ fn run(args: Args) -> Result<(), AppError> {
                 big_body: true,
                 dependencies: 1_000,
                 dense: false,
+                few_runnable: None,
+                open_heavy: false,
             };
             seed_project(
                 &args.data_root,
@@ -453,6 +555,8 @@ fn run(args: Args) -> Result<(), AppError> {
                 big_body: false,
                 dependencies: 150_000,
                 dense: true,
+                few_runnable: None,
+                open_heavy: false,
             };
             seed_project(
                 &args.data_root,
@@ -467,6 +571,46 @@ fn run(args: Args) -> Result<(), AppError> {
         Profile::PerfEmpty1000 => {
             seed_empty_projects(&args.data_root, &args.roots_root, 1_000, &mut hasher)?;
             (1_000usize, 0usize, 0usize)
+        }
+        Profile::Perf10kFewRunnable => {
+            let spec = ProjectSpec {
+                name: "perf-few-runnable".to_string(),
+                tasks: 10_000,
+                big_body: false,
+                dependencies: 0,
+                dense: false,
+                few_runnable: Some(FEW_RUNNABLE_COUNT),
+                open_heavy: false,
+            };
+            seed_project(
+                &args.data_root,
+                &args.roots_root,
+                &spec,
+                args.seed,
+                stride,
+                &mut hasher,
+            )?;
+            (1usize, 10_000usize, 0usize)
+        }
+        Profile::Perf10kOpenHeavy => {
+            let spec = ProjectSpec {
+                name: "perf-open-heavy".to_string(),
+                tasks: 10_000,
+                big_body: false,
+                dependencies: 0,
+                dense: false,
+                few_runnable: None,
+                open_heavy: true,
+            };
+            seed_project(
+                &args.data_root,
+                &args.roots_root,
+                &spec,
+                args.seed,
+                stride,
+                &mut hasher,
+            )?;
+            (1usize, 10_000usize, 0usize)
         }
     };
     let digest = hasher.finalize();

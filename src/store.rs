@@ -36,6 +36,79 @@ pub(crate) const RUNNABLE_PREDICATE: &str = "t.status IN ('todo','in-progress')
                    AND NOT EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')
                    AND NOT EXISTS(SELECT 1 FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=t.id AND p.status NOT IN ('done','to-verify'))";
 
+/// The two statuses RUNNABLE_PREDICATE's own `t.status IN (...)` term can
+/// match. Pinned against that constant's literal text by
+/// `runnable_statuses_match_runnable_predicate_text` below, so `select_tasks`'s
+/// default-view UNION ALL arms can't silently drift from the predicate they
+/// exist to serve.
+const RUNNABLE_STATUSES: [&str; 2] = ["todo", "in-progress"];
+
+/// The non-terminal statuses (every `TaskStatus` variant except `Done` and
+/// `Cancelled`), as their SQL text (via `Display`), built directly from
+/// `TaskStatus` so this list cannot drift from the enum: adding or removing
+/// a status changes this automatically, with no separate literal list to
+/// maintain.
+fn non_terminal_statuses() -> Vec<String> {
+    use clap::ValueEnum;
+    crate::model::TaskStatus::value_variants()
+        .iter()
+        .filter(|status| !status.is_terminal())
+        .map(|status| status.to_string())
+        .collect()
+}
+
+/// Pushes a bound value and returns its numbered placeholder (`"?N"`),
+/// so every caller names its own placeholder inline instead of the whole
+/// query committing to one fixed position layout; the same placeholder text
+/// may be spliced into the SQL more than once (SQLite numbered parameters
+/// may repeat).
+fn push_bind(
+    binds: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    value: impl rusqlite::ToSql + 'static,
+) -> String {
+    binds.push(Box::new(value));
+    format!("?{}", binds.len())
+}
+
+/// Builds `UNION ALL`-joined per-status arms over
+/// `idx_tasks_status_priority_id`, each already sorted `t.priority,t.id` so
+/// the outer `ORDER BY ... LIMIT` can merge them instead of sorting the
+/// whole union (see `select_tasks`'s doc comment). `extra` is spliced
+/// verbatim into every arm's `WHERE` (a literal AND-clause, not a bind
+/// parameter); `label_ph`, `cursor_clause` and `limit_ph` are placeholder
+/// text from `push_bind` (or, for `cursor_clause`, an empty string when
+/// there is no cursor -- omitting the clause entirely rather than guarding
+/// it with `?N IS NULL`, so a deep page still seeks `status=? AND
+/// priority>?` instead of losing that to an unresolvable bound-parameter OR).
+fn union_arms_sql<S: AsRef<str>>(
+    statuses: &[S],
+    extra: &str,
+    label_ph: &str,
+    cursor_clause: &str,
+    limit_ph: &str,
+) -> String {
+    let arms: Vec<String> = statuses
+        .iter()
+        .map(|status| {
+            let status = status.as_ref();
+            format!(
+                "SELECT * FROM (
+                    SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks t
+                     WHERE t.status='{status}'
+                       {extra}
+                       AND ({label_ph} IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label={label_ph}))
+                       {cursor_clause}
+                     ORDER BY t.priority,t.id
+                )"
+            )
+        })
+        .collect();
+    format!(
+        "{}\n ORDER BY priority,id LIMIT {limit_ph}",
+        arms.join("\n UNION ALL\n")
+    )
+}
+
 fn create_selection_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch("ALTER TABLE tasks ADD COLUMN priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'));
         CREATE INDEX idx_tasks_priority_id ON tasks(priority,id);
@@ -1585,26 +1658,99 @@ impl Store {
             .map(|v| v.to_string());
         let size = validate_limit(limit)?;
         let snapshot = self.conn.unchecked_transaction()?;
-        let sql = format!(
-            "SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks t
-             WHERE (?1 IS NULL OR t.status=?1)
-               AND (?1 IS NOT NULL OR t.status NOT IN ('done','cancelled'))
-               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label=?2))
-               AND (NOT ?3 OR (t.status NOT IN ('done','cancelled') AND EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')))
-               AND (?1 IS NOT NULL OR ?3 OR ?4 OR ({RUNNABLE_PREDICATE}))
-               AND (?5 IS NULL OR (t.priority,t.id) > (?5,?6))
-             ORDER BY t.priority,t.id LIMIT ?7"
-        );
+        // Every branch below is chosen in Rust from `status`/`open`/
+        // `needs_human`, all known at call time, rather than encoded as a
+        // `?N IS NULL OR ...`-guarded predicate bound at query time: SQLite
+        // cannot tell at prepare time which side of a bound-parameter OR is
+        // live, so a single shared query always fell back to a full
+        // `idx_tasks_priority_id` scan evaluating RUNNABLE_PREDICATE's
+        // correlated subqueries on every row, even when almost all rows are
+        // done/cancelled (TSK-014, following TSK-013's finding on
+        // perf-100k-dense). A first attempt replaced the scan's status
+        // predicate with a literal `t.status IN (...)`, which does pick a
+        // status-indexed SEARCH, but only after adding `USE TEMP B-TREE FOR
+        // ORDER BY` (the single scan can no longer stream the whole result
+        // in priority order, so it loses the LIMIT early exit) -- a real
+        // regression on open-heavy stores (TSK-014 review). Instead each
+        // needed status becomes its own `SELECT ... WHERE t.status=<literal>
+        // ... ORDER BY t.priority,t.id` arm over `idx_tasks_status_priority_id`
+        // (already sorted the way each arm needs), joined with `UNION ALL`
+        // and a single outer `ORDER BY priority,id LIMIT`. SQLite recognizes
+        // that each arm already emits its slice in the compound's sort order
+        // and merges them (`MERGE (UNION ALL)`) instead of sorting the
+        // union, so the LIMIT early exit survives.
+        // Placeholders are named inline via `push_bind` rather than committed
+        // to one fixed position layout, so a cursor can be omitted entirely
+        // (not just `?N IS NULL`-guarded) when there is none: a real
+        // `AND (t.priority,t.id) > (?,?)` clause lets a deep page seek
+        // `status=? AND priority>?` on `idx_tasks_status_priority_id`
+        // instead of a bound-parameter OR the planner can't resolve.
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let label_ph = push_bind(&mut binds, label.clone());
+        let cursor_clause = match &after {
+            Some(cursor) => {
+                let priority_ph = push_bind(&mut binds, cursor.priority.to_string());
+                let id_ph = push_bind(&mut binds, cursor.id);
+                format!("AND (t.priority,t.id) > ({priority_ph},{id_ph})")
+            }
+            None => String::new(),
+        };
+        let sql = if let Some(explicit_status) = &status {
+            let status_ph = push_bind(&mut binds, explicit_status.clone());
+            let limit_ph = push_bind(&mut binds, (size + 1) as i64);
+            let needs_human_clause = if needs_human {
+                "AND t.status NOT IN ('done','cancelled')
+                 AND EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')"
+            } else {
+                ""
+            };
+            format!(
+                "SELECT t.id,t.status,t.version,t.title,t.priority FROM tasks t
+                 WHERE t.status={status_ph}
+                   {needs_human_clause}
+                   AND ({label_ph} IS NULL OR EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label={label_ph}))
+                   {cursor_clause}
+                 ORDER BY t.priority,t.id LIMIT {limit_ph}"
+            )
+        } else {
+            let limit_ph = push_bind(&mut binds, (size + 1) as i64);
+            if needs_human {
+                // Bypasses RUNNABLE_PREDICATE regardless of `--open` (matches
+                // the previous shared-query semantics): every non-terminal
+                // status, restricted to the needs-human label.
+                union_arms_sql(
+                    &non_terminal_statuses(),
+                    "AND EXISTS(SELECT 1 FROM task_labels l WHERE l.task_id=t.id AND l.label='needs-human')",
+                    &label_ph,
+                    &cursor_clause,
+                    &limit_ph,
+                )
+            } else if open {
+                // Bypasses RUNNABLE_PREDICATE: every non-terminal status,
+                // unfiltered by readiness.
+                union_arms_sql(
+                    &non_terminal_statuses(),
+                    "",
+                    &label_ph,
+                    &cursor_clause,
+                    &limit_ph,
+                )
+            } else {
+                // Default view: RUNNABLE_PREDICATE's own `t.status IN
+                // (...)` term already restricts matches to these two
+                // statuses, so only they need an arm.
+                union_arms_sql(
+                    &RUNNABLE_STATUSES,
+                    &format!("AND ({RUNNABLE_PREDICATE})"),
+                    &label_ph,
+                    &cursor_clause,
+                    &limit_ph,
+                )
+            }
+        };
         let mut statement = snapshot.prepare(&sql)?;
-        let mut rows = statement.query(params![
-            status,
-            label,
-            needs_human,
-            open,
-            after.map(|v| v.priority.to_string()),
-            after.map(|v| v.id),
-            (size + 1) as i64
-        ])?;
+        let mut rows =
+            statement.query(rusqlite::params_from_iter(binds.iter().map(|b| b.as_ref())))?;
         let mut items = Vec::new();
         while let Some(row) = rows.next()? {
             items.push(Self::selection_summary(row)?);
@@ -3223,5 +3369,60 @@ mod tests {
         assert!(validate_title_body("test", "ok", &"x".repeat(BODY_MAX_BYTES + 1)).is_err());
         assert!(validate_status("in-progress").is_ok());
         assert!(validate_status("unknown").is_err());
+    }
+
+    /// Pins `RUNNABLE_STATUSES` (the arms `select_tasks`'s default view
+    /// unions) against `RUNNABLE_PREDICATE`'s own literal `t.status IN
+    /// (...)` term, so the two constants can't silently drift apart.
+    #[test]
+    fn runnable_statuses_match_runnable_predicate_text() {
+        for status in RUNNABLE_STATUSES {
+            assert!(
+                RUNNABLE_PREDICATE.contains(&format!("'{status}'")),
+                "RUNNABLE_STATUSES has {status:?}, which RUNNABLE_PREDICATE's \
+                 text no longer mentions: {RUNNABLE_PREDICATE}"
+            );
+        }
+        let mentioned = RUNNABLE_PREDICATE
+            .split("IN (")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("RUNNABLE_PREDICATE starts with a `t.status IN (...)` term");
+        let mentioned_count = mentioned.matches('\'').count() / 2;
+        assert_eq!(
+            mentioned_count,
+            RUNNABLE_STATUSES.len(),
+            "RUNNABLE_PREDICATE's status list and RUNNABLE_STATUSES have \
+             different lengths; update RUNNABLE_STATUSES to match: {RUNNABLE_PREDICATE}"
+        );
+    }
+
+    /// Pins `non_terminal_statuses()` against every `TaskStatus` variant:
+    /// adding or removing a variant must change this test's expected count,
+    /// and every non-terminal variant's SQL text must be present.
+    #[test]
+    fn non_terminal_statuses_covers_every_non_terminal_task_status_variant() {
+        use crate::model::TaskStatus;
+        use clap::ValueEnum;
+        let variants = TaskStatus::value_variants();
+        let expected_non_terminal = variants.iter().filter(|s| !s.is_terminal()).count();
+        let expected_terminal = variants.iter().filter(|s| s.is_terminal()).count();
+        // If this fails, a TaskStatus variant was added/removed/renamed:
+        // update this test (and re-check the derivation above) accordingly.
+        assert_eq!(
+            expected_terminal, 2,
+            "expected exactly 'done' and 'cancelled' to be terminal"
+        );
+        let got = non_terminal_statuses();
+        assert_eq!(got.len(), expected_non_terminal);
+        for status in variants {
+            if status.is_terminal() {
+                continue;
+            }
+            assert!(
+                got.iter().any(|s| *s == status.to_string()),
+                "non_terminal_statuses() is missing {status}"
+            );
+        }
     }
 }

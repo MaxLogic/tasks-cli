@@ -872,6 +872,66 @@ than the p50 suggests (WSL2 VM I/O variance); the same query-plan change
 applies on both platforms since it is pure SQL with no platform-specific
 path.
 
+`list` on stores where few tasks are runnable (TSK-014): a single shared
+`select_tasks` query whose default-view status filter was guarded by a bound
+parameter (`?1 IS NULL OR t.status NOT IN ('done','cancelled')`) forced
+SQLite to fall back to a full `idx_tasks_priority_id` scan regardless of
+status selectivity, since the planner cannot resolve a bound-parameter `OR`
+branch at prepare time. On `perf-10k-few-runnable` (one project, 10000
+tasks, 2048-byte bodies, no dependency edges, 8 intentionally-runnable
+tasks placed at the highest ids/priority `P3` so they sort last, the rest
+`done`/`cancelled`; `--seed 20260929`), default `list --limit 30` measured
+(Windows, `target/perf-cli`, 5 warmups + 50-100 fresh-process runs) p50
+70.2 ms / p95 149.6 ms (n=100) -- a miss against the 100 ms budget, isolated
+via a `--open` control run (same process/table-open cost, bypasses the
+predicate) at p95 94.9 ms, plus a raw `sqlite3` CLI run of the exact query
+at 44-60 ms. A first fix replaced the guarded predicate with a literal
+`t.status IN ('draft','todo','in-progress','to-verify','blocked')` for the
+default view; this picks a status-indexed `SEARCH` and fixed the
+few-runnable case, but regressed open-heavy stores: on `perf-100k` (even
+6-way status split, ~66666 non-terminal of 100000) default `list --limit 30`
+went from ~1-8 ms to 185-360 ms query time (end-to-end ~80 ms to
+245-330 ms), because a literal `IN (5 values)` predicate loses the
+priority-ordered scan's `LIMIT` early exit (`EXPLAIN QUERY PLAN` shows
+`USE TEMP B-TREE FOR ORDER BY`: every matching row must be sorted before
+`LIMIT` applies). The fix landed instead: each needed status becomes its
+own `SELECT ... WHERE t.status='<literal>' ... ORDER BY t.priority,t.id`
+arm over `idx_tasks_status_priority_id` (already the arm's own sort order),
+joined with `UNION ALL` and one outer `ORDER BY priority,id LIMIT`; SQLite
+recognizes each arm is pre-sorted and merges them (`MERGE (UNION ALL)`)
+instead of sorting the union, so the `LIMIT` early exit survives. Which
+statuses are unioned is chosen in Rust from `status`/`open`/`needs_human`
+(known at call time, not bound parameters): an explicit `--status` stays a
+single arm; the default view unions only `todo`/`in-progress` (the two
+statuses RUNNABLE_PREDICATE's own `t.status IN (...)` term can ever match);
+`--open`/`--needs-human` union all five non-terminal statuses (built from
+`TaskStatus::value_variants()` filtered by `!is_terminal()`, not a
+hand-maintained literal list). Re-measured on three shapes (Windows
+`target/perf-cli` and native Linux/WSL2 Ubuntu, `TASKS_WINDOWS_EXE` unset,
+Linux-owned `CARGO_TARGET_DIR`; 5 warmups + 50 fresh-process runs;
+default/`--open`/`--needs-human`, `--limit 30`): `perf-10k-few-runnable`
+p50 18.1-19.0 ms / p95 22.8-26.9 ms (Windows), p50 7-10 ms / p95 10-13 ms
+(Linux); `perf-100k` (even split) p50 17.9-20.2 ms / p95 21.8-24.5 ms
+(Windows), p50 9 ms / p95 11-12 ms (Linux); `perf-10k-open-heavy` (new
+fixture, ~90% non-terminal, the opposite shape from few-runnable) p50
+18.1-20.4 ms / p95 21.3-31.3 ms (Windows), p50 9-11 ms / p95 11-13 ms
+(Linux) -- every shape and view now meets the 100 ms p95 budget on both
+platforms. `EXPLAIN QUERY PLAN` confirmed `MERGE (UNION ALL)` with no temp
+b-tree on all three shapes. Output is unchanged: verified byte-for-byte
+identical between the base-commit query and the fixed query across every
+shape/view combination above plus `--status` and two-page `--after`
+pagination crossing a union-arm boundary. As a side effect (not targeted by
+this fix), `perf-100k-dense`'s (TSK-005/TSK-013's dense-edge, 0-runnable
+fixture) default `list --limit 30` improved from TSK-013's pre-fix
+835-1236 ms (`--limit 1`) to p50 386.0 ms / p95 490.9 ms (Windows, n=10) /
+p50 105 ms / p95 150 ms (Linux, n=10) -- still over budget, because that
+fixture concentrates 150000 dependency edges on its open tasks specifically
+to stress RUNNABLE_PREDICATE's dependency-satisfaction subquery and 0 tasks
+are ever runnable, so any query shape must exhaustively evaluate that
+subquery for every candidate row; unchanged from TSK-013's "deliberately
+extreme ... P3" scoping, not this task's fixture. Evidence:
+`target/evidence/tsk-014/`.
+
 List default output <=6 KiB for fixture titles/dependencies; one typical show
 should include only that task, shared rules and direct dependency summaries.
 Measure output bytes; only claim token counts when a named tokenizer was used.
