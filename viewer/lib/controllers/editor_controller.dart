@@ -1111,6 +1111,7 @@ class ViewerEditorController extends ChangeNotifier {
         message: 'Could not read the task back: ${failure.message}',
       );
     }
+    observeProjectKey(fresh.projectKey, projectId: projectId);
     _awaitingReconciliation = false;
     _intendedFields = null;
     _intendedChanges = null;
@@ -1161,6 +1162,7 @@ class ViewerEditorController extends ChangeNotifier {
     }
     try {
       final fresh = await reader.fetchTaskDetail(projectId, taskId);
+      observeProjectKey(fresh.projectKey, projectId: projectId);
       final conflict = _buildConflict(fresh);
       _conflict = conflict;
       _notify();
