@@ -154,3 +154,23 @@ window) per instruction, even though G11 failed:
   concluding which.
 - Console-window proof (`CREATE_NO_WINDOW`) remains unproven pending TSK-008,
   unchanged from the previous entry.
+
+### TSK-015: G11 UIA probe fix (this entry)
+
+Root cause: `verify-windows.ps1` passed the bare project name ("alpha") to
+`verify-release-uia.ps1 -ExpectedProjectName`, but the Projects pane row
+renders `ProjectItem.displayName` = "name (KEY)" per viewer/spec.md section
+11 (the same defect already fixed for the headless e2e fixture in 1d27666).
+Fixed by building the expected name from the fixture manifest's `name` and
+`project_key` fields. Also hardened the probe's row matcher
+(`verify-release-uia.ps1`) with `[WildcardPattern]::Escape` on the project
+name so a key containing `[`/`]`/`*`/`?` still matches literally, and added
+Pester cases for a keyed row and a bracketed-name row.
+
+- Full gate rerun: `pwsh -NoProfile -File viewer/tool/verify-windows.ps1`,
+  exit 0, all 12 gates passed including G11 (packaged release UI Automation).
+  Evidence: `viewer/target/evidence/viewer/2026-09-30-193351-verify-windows/`.
+- Pester: `Invoke-Pester viewer/tool/tests/verify-release-uia.Tests.ps1`,
+  8 passed, 0 failed (includes the new keyed-row and bracketed-name cases).
+- Viewer relaunched visibly from the freshly packaged
+  `target\viewer-release\tasks_viewer.exe` as PID `282344`; left running.
