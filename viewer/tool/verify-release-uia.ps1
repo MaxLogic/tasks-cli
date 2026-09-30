@@ -214,7 +214,255 @@ function Test-ReleaseUiaSnapshot {
     }
 }
 
+function Test-ReleaseUiaBareFlutterViewSnapshot {
+    <#
+    .SYNOPSIS
+    True when a snapshot is exactly the OS's own default MSAA object for the
+    FLUTTERVIEW child window, not anything Flutter's accessibility bridge
+    produced.
+
+    .DESCRIPTION
+    A 2026-09-30 run (HEAD 47ab4f5) timed out after 45 s with a snapshot of
+    exactly one node: Name "FLUTTERVIEW" (the raw win32 class name, which
+    Windows uses as a fallback display name when nothing set a real
+    accessible name) and a generic "MSAA.Role.<n>" type (the synthesized
+    label `Get-ReleaseMsaaNode` uses for any MSAA role it doesn't recognize
+    as one of Flutter's own control roles). That combination only appears
+    when Windows answered the query with its own default accessible object
+    for the window instead of Flutter's, i.e. the accessibility bridge had
+    not attached at all. Flutter's own nodes never carry this signature: a
+    working run's single nodes (if any existed) would have a recognized
+    ControlType/role or non-default content.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Nodes)
+
+    if ($Nodes.Count -ne 1) { return $false }
+    $node = $Nodes[0]
+    return ($node.Name -eq 'FLUTTERVIEW') -and ([string]$node.Type).StartsWith('MSAA.Role.', [System.StringComparison]::Ordinal)
+}
+
+function Invoke-ReleaseUiaAttempt {
+    <#
+    .SYNOPSIS
+    Launches one packaged viewer and runs the timed UIA/MSAA wait loop once.
+    Never throws: returns a result object whose Ok flag and Findings/Nodes
+    describe either the successful snapshot or why the attempt failed, so
+    the caller can decide whether a bare-FLUTTERVIEW timeout deserves one
+    retry.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ViewerExe,
+        [Parameter(Mandatory)][string]$BundleFull,
+        [Parameter(Mandatory)][string]$CliExe,
+        [Parameter(Mandatory)][string]$DataRootFull,
+        [Parameter(Mandatory)][string]$SettingsRootFull,
+        [Parameter(Mandatory)][string]$ExpectedProjectName,
+        [Parameter(Mandatory)][int]$ExpectedOpenCount,
+        [Parameter(Mandatory)][int]$ExpectedTotalCount,
+        [Parameter(Mandatory)][int]$TimeoutSeconds
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $ViewerExe
+    $startInfo.WorkingDirectory = $BundleFull
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in @('--test-mode', '--data-root', $DataRootFull,
+            '--tasks-exe', $CliExe, '--settings-root', $SettingsRootFull)) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    try {
+        $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+        $condition = [System.Windows.Automation.PropertyCondition]::new(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id)
+        $lastNodes = @()
+        $lastCheck = $null
+        $windowName = $null
+        do {
+            if ($process.HasExited) {
+                return [pscustomobject]@{
+                    Ok = $false
+                    Reason = "The packaged viewer exited before the UIA tree was ready (exit $($process.ExitCode))."
+                    Nodes = @()
+                    NodeCount = 0
+                    ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                    Backend = $null
+                    WindowName = $null
+                    SettingsChecks = $null
+                    SettingsNodes = @()
+                    ProcessId = $process.Id
+                }
+            }
+            $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+                [System.Windows.Automation.TreeScope]::Children, $condition)
+            for ($i = 0; $i -lt $windows.Count; $i++) {
+                $window = $windows.Item($i)
+                if ($window.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window) { continue }
+                $windowName = $window.Current.Name
+                $lastNodes = @(Get-ReleaseUiaNode -Window $window)
+                $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
+                    -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
+                $backend = 'UIA'
+                if (-not $lastCheck.Ok) {
+                    $lastNodes = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
+                    if ($lastNodes.Count -eq 0) { continue }
+                    $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
+                        -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
+                    $backend = 'MSAA'
+                }
+                if ($lastCheck.Ok) {
+                    if ($backend -eq 'MSAA') {
+                        $settingsButton = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle -IncludeElement |
+                            Where-Object { $_.Name -like 'Settings*' -and $_.Type -eq 'ControlType.Button' })
+                        if ($settingsButton.Count -ne 1) {
+                            return [pscustomobject]@{
+                                Ok = $false
+                                Reason = 'Expected exactly one accessible Settings button.'
+                                Nodes = $lastNodes
+                                NodeCount = $lastNodes.Count
+                                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                                Backend = $backend
+                                WindowName = $windowName
+                                SettingsChecks = $null
+                                SettingsNodes = @()
+                                ProcessId = $process.Id
+                            }
+                        }
+                        $settingsButton[0].Element.accDoDefaultAction($settingsButton[0].Child)
+                    }
+                    else {
+                        $settingsButton = Find-ReleaseUiaElement -Window $window -Name 'Settings*' `
+                            -ControlType ([System.Windows.Automation.ControlType]::Button)
+                        if ($null -eq $settingsButton) {
+                            return [pscustomobject]@{
+                                Ok = $false
+                                Reason = 'Settings is absent from the packaged release UIA tree.'
+                                Nodes = $lastNodes
+                                NodeCount = $lastNodes.Count
+                                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                                Backend = $backend
+                                WindowName = $windowName
+                                SettingsChecks = $null
+                                SettingsNodes = @()
+                                ProcessId = $process.Id
+                            }
+                        }
+                        $invoke = $settingsButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                        if ($null -eq $invoke) {
+                            return [pscustomobject]@{
+                                Ok = $false
+                                Reason = 'Settings has no native UIA Invoke action.'
+                                Nodes = $lastNodes
+                                NodeCount = $lastNodes.Count
+                                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                                Backend = $backend
+                                WindowName = $windowName
+                                SettingsChecks = $null
+                                SettingsNodes = @()
+                                ProcessId = $process.Id
+                            }
+                        }
+                        $invoke.Invoke()
+                    }
+                    $settingsCheck = $null
+                    $settingsNodes = @()
+                    do {
+                        if ($process.HasExited) {
+                            return [pscustomobject]@{
+                                Ok = $false
+                                Reason = 'The packaged viewer exited while opening Settings.'
+                                Nodes = $lastNodes
+                                NodeCount = $lastNodes.Count
+                                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                                Backend = $backend
+                                WindowName = $windowName
+                                SettingsChecks = $null
+                                SettingsNodes = @()
+                                ProcessId = $process.Id
+                            }
+                        }
+                        $settingsNodes = if ($backend -eq 'MSAA') {
+                            @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
+                        } else { @(Get-ReleaseUiaNode -Window $window) }
+                        $settingsCheck = Test-ReleaseUiaSettingsSnapshot -Nodes $settingsNodes
+                        if ($settingsCheck.Ok) { break }
+                        Start-Sleep -Milliseconds 200
+                    } while ([datetime]::UtcNow -lt $deadline)
+                    if (-not $settingsCheck.Ok) {
+                        return [pscustomobject]@{
+                            Ok = $false
+                            Reason = "Settings was not accessible through $backend`: $($settingsCheck.Findings -join ' ')"
+                            Nodes = $lastNodes
+                            NodeCount = $lastNodes.Count
+                            ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                            Backend = $backend
+                            WindowName = $windowName
+                            SettingsChecks = $settingsCheck
+                            SettingsNodes = $settingsNodes
+                            ProcessId = $process.Id
+                        }
+                    }
+                    return [pscustomobject]@{
+                        Ok = $true
+                        Reason = $null
+                        Nodes = $lastNodes
+                        NodeCount = $lastNodes.Count
+                        ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+                        Backend = $backend
+                        WindowName = $windowName
+                        Checks = $lastCheck
+                        SettingsChecks = $settingsCheck
+                        SettingsNodes = $settingsNodes
+                        ProcessId = $process.Id
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 300
+        } while ([datetime]::UtcNow -lt $deadline)
+
+        $reason = if ($null -eq $lastCheck) { 'No window owned by the launched process appeared in UIA.' }
+        else { $lastCheck.Findings -join ' ' }
+        return [pscustomobject]@{
+            Ok = $false
+            Reason = "Release UIA check timed out after $TimeoutSeconds s. $reason"
+            Nodes = $lastNodes
+            NodeCount = $lastNodes.Count
+            ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+            Backend = $null
+            WindowName = $windowName
+            SettingsChecks = $null
+            SettingsNodes = @()
+            ProcessId = $process.Id
+            TimedOut = $true
+        }
+    }
+    finally {
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(10000)) {
+                throw "The probe could not stop its own packaged viewer process $($process.Id)."
+            }
+        }
+        $process.Dispose()
+    }
+}
+
 function Invoke-ReleaseUiaProbe {
+    <#
+    .DESCRIPTION
+    Runs one timed attempt against the packaged viewer. A 2026-09-30 run
+    (HEAD 47ab4f5) timed out after 45 s with the OS's own default
+    FLUTTERVIEW MSAA object (see Test-ReleaseUiaBareFlutterViewSnapshot);
+    the identical exe hash re-ran cleanly moments later. When, and only
+    when, a timed-out attempt ends on that exact bare-default signature,
+    this relaunches the packaged viewer and runs one more timed attempt
+    before failing; any other failure (a real content mismatch, a crash, a
+    Settings defect) fails on the first attempt with no retry. The first
+    attempt's own snapshot, node count and elapsed time are always kept in
+    the result so a retry is visible rather than silently swallowed.
+    #>
     param(
         [Parameter(Mandatory)][string]$BundleRoot,
         [Parameter(Mandatory)][string]$DataRoot,
@@ -222,7 +470,11 @@ function Invoke-ReleaseUiaProbe {
         [Parameter(Mandatory)][string]$ExpectedProjectName,
         [int]$ExpectedOpenCount = 27,
         [int]$ExpectedTotalCount = 28,
-        [int]$TimeoutSeconds = 45
+        [int]$TimeoutSeconds = 45,
+        # Test seam only: real callers never pass this. It lets Pester stub
+        # the timed launch-and-wait attempt so the retry-on-bare-FLUTTERVIEW
+        # decision can be unit-tested without opening a real window.
+        [scriptblock]$AttemptFunction = (Get-Item Function:\Invoke-ReleaseUiaAttempt).ScriptBlock
     )
 
     if (-not $IsWindows) { throw 'The release UIA gate requires Windows.' }
@@ -242,108 +494,61 @@ function Invoke-ReleaseUiaProbe {
     $viewerHash = (Get-FileHash -LiteralPath $viewerExe -Algorithm SHA256).Hash.ToLowerInvariant()
     $cliHash = (Get-FileHash -LiteralPath $cliExe -Algorithm SHA256).Hash.ToLowerInvariant()
     $appHash = (Get-FileHash -LiteralPath $appImage -Algorithm SHA256).Hash.ToLowerInvariant()
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $viewerExe
-    $startInfo.WorkingDirectory = $bundleFull
-    $startInfo.UseShellExecute = $false
-    foreach ($argument in @('--test-mode', '--data-root', [System.IO.Path]::GetFullPath($DataRoot),
-            '--tasks-exe', $cliExe, '--settings-root', [System.IO.Path]::GetFullPath($SettingsRoot))) {
-        [void]$startInfo.ArgumentList.Add($argument)
+    $dataRootFull = [System.IO.Path]::GetFullPath($DataRoot)
+    $settingsRootFull = [System.IO.Path]::GetFullPath($SettingsRoot)
+
+    $attemptArgs = @{
+        ViewerExe = $viewerExe
+        BundleFull = $bundleFull
+        CliExe = $cliExe
+        DataRootFull = $dataRootFull
+        SettingsRootFull = $settingsRootFull
+        ExpectedProjectName = $ExpectedProjectName
+        ExpectedOpenCount = $ExpectedOpenCount
+        ExpectedTotalCount = $ExpectedTotalCount
+        TimeoutSeconds = $TimeoutSeconds
     }
 
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    try {
-        $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
-        $condition = [System.Windows.Automation.PropertyCondition]::new(
-            [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id)
-        $lastNodes = @()
-        $lastCheck = $null
-        do {
-            if ($process.HasExited) { throw "The packaged viewer exited before the UIA tree was ready (exit $($process.ExitCode))." }
-            $windows = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
-                [System.Windows.Automation.TreeScope]::Children, $condition)
-            for ($i = 0; $i -lt $windows.Count; $i++) {
-                $window = $windows.Item($i)
-                if ($window.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window) { continue }
-                $lastNodes = @(Get-ReleaseUiaNode -Window $window)
-                $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
-                    -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
-                $backend = 'UIA'
-                if (-not $lastCheck.Ok) {
-                    $lastNodes = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
-                    if ($lastNodes.Count -eq 0) { continue }
-                    $lastCheck = Test-ReleaseUiaSnapshot -Nodes $lastNodes -ProjectName $ExpectedProjectName `
-                        -OpenCount $ExpectedOpenCount -TotalCount $ExpectedTotalCount
-                    $backend = 'MSAA'
-                }
-                if ($lastCheck.Ok) {
-                    if ($backend -eq 'MSAA') {
-                        $settingsButton = @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle -IncludeElement |
-                            Where-Object { $_.Name -like 'Settings*' -and $_.Type -eq 'ControlType.Button' })
-                        if ($settingsButton.Count -ne 1) { throw 'Expected exactly one accessible Settings button.' }
-                        $settingsButton[0].Element.accDoDefaultAction($settingsButton[0].Child)
-                    }
-                    else {
-                        $settingsButton = Find-ReleaseUiaElement -Window $window -Name 'Settings*' `
-                            -ControlType ([System.Windows.Automation.ControlType]::Button)
-                        if ($null -eq $settingsButton) {
-                            throw 'Settings is absent from the packaged release UIA tree.'
-                        }
-                        $invoke = $settingsButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                        if ($null -eq $invoke) {
-                            throw 'Settings has no native UIA Invoke action.'
-                        }
-                        $invoke.Invoke()
-                    }
-                    $settingsCheck = $null
-                    $settingsNodes = @()
-                    do {
-                        if ($process.HasExited) { throw 'The packaged viewer exited while opening Settings.' }
-                        $settingsNodes = if ($backend -eq 'MSAA') {
-                            @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
-                        } else { @(Get-ReleaseUiaNode -Window $window) }
-                        $settingsCheck = Test-ReleaseUiaSettingsSnapshot -Nodes $settingsNodes
-                        if ($settingsCheck.Ok) { break }
-                        Start-Sleep -Milliseconds 200
-                    } while ([datetime]::UtcNow -lt $deadline)
-                    if (-not $settingsCheck.Ok) {
-                        $sample = ($settingsNodes | Select-Object -First 80 | ConvertTo-Json -Compress -Depth 3)
-                        throw "Settings was not accessible through $backend (app.so sha256: $appHash): $($settingsCheck.Findings -join ' ') Snapshot: $sample"
-                    }
-                    return [pscustomobject]@{
-                        Ok = $true
-                        AccessibilityBackend = $backend
-                        ViewerExe = $viewerExe
-                        ViewerSha256 = $viewerHash
-                        CliSha256 = $cliHash
-                        AppSha256 = $appHash
-                        ProcessId = $process.Id
-                        WindowName = $window.Current.Name
-                        NodeCount = $lastNodes.Count
-                        Checks = $lastCheck
-                        Nodes = $lastNodes
-                        SettingsChecks = $settingsCheck
-                        SettingsNodes = $settingsNodes
-                    }
-                }
-            }
-            Start-Sleep -Milliseconds 300
-        } while ([datetime]::UtcNow -lt $deadline)
-
-        $reason = if ($null -eq $lastCheck) { 'No window owned by the launched process appeared in UIA.' }
-        else { $lastCheck.Findings -join ' ' }
-        $sample = ($lastNodes | Select-Object -First 30 | ConvertTo-Json -Compress -Depth 3)
-        throw "Release UIA check timed out after $TimeoutSeconds s. Bundle: $bundleFull. app.so sha256: $appHash; viewer sha256: $viewerHash; CLI sha256: $cliHash. $reason Last snapshot had $($lastNodes.Count) nodes: $sample"
+    $first = & $AttemptFunction @attemptArgs
+    $attempt = $first
+    $retried = $false
+    if (-not $first.Ok -and $first.TimedOut -and (Test-ReleaseUiaBareFlutterViewSnapshot -Nodes $first.Nodes)) {
+        $retried = $true
+        $attempt = & $AttemptFunction @attemptArgs
     }
-    finally {
-        if (-not $process.HasExited) {
-            $process.Kill($true)
-            if (-not $process.WaitForExit(10000)) {
-                throw "The probe could not stop its own packaged viewer process $($process.Id)."
-            }
+
+    if ($attempt.Ok) {
+        return [pscustomobject]@{
+            Ok = $true
+            AccessibilityBackend = $attempt.Backend
+            ViewerExe = $viewerExe
+            ViewerSha256 = $viewerHash
+            CliSha256 = $cliHash
+            AppSha256 = $appHash
+            ProcessId = $attempt.ProcessId
+            WindowName = $attempt.WindowName
+            NodeCount = $attempt.NodeCount
+            Checks = $attempt.Checks
+            Nodes = $attempt.Nodes
+            SettingsChecks = $attempt.SettingsChecks
+            SettingsNodes = $attempt.SettingsNodes
+            Retried = $retried
+            FirstAttempt = if ($retried) {
+                [pscustomobject]@{
+                    Ok = $first.Ok; Reason = $first.Reason; NodeCount = $first.NodeCount
+                    ElapsedSeconds = $first.ElapsedSeconds; Backend = $first.Backend; Nodes = $first.Nodes
+                }
+            } else { $null }
         }
-        $process.Dispose()
     }
+
+    $sample = ($attempt.Nodes | Select-Object -First 30 | ConvertTo-Json -Compress -Depth 3)
+    $retryNote = if ($retried) {
+        $firstSample = ($first.Nodes | Select-Object -First 30 | ConvertTo-Json -Compress -Depth 3)
+        "Retried once after a bare FLUTTERVIEW snapshot (first attempt: $($first.Reason) elapsed $($first.ElapsedSeconds)s, $($first.NodeCount) nodes: $firstSample)."
+    }
+    else { 'Not retried: the failure was not a bare FLUTTERVIEW snapshot.' }
+    throw "$($attempt.Reason) Bundle: $bundleFull. app.so sha256: $appHash; viewer sha256: $viewerHash; CLI sha256: $cliHash. $retryNote Final snapshot had $($attempt.NodeCount) nodes: $sample"
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
