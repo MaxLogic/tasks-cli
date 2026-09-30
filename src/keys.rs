@@ -19,6 +19,7 @@
 //! rolled-back apply leaves the data root unchanged.
 
 use crate::error::AppError;
+use crate::fingerprint;
 use crate::model::render_keyed_task_id;
 use crate::registry;
 use crate::storage::validate_storage_root;
@@ -60,64 +61,6 @@ fn read_key_at(db_path: &Path) -> Result<Option<String>, AppError> {
     let conn = crate::store::open_for_reading(db_path, OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     Ok(read_key(&conn)?)
-}
-
-/// The database and its WAL and rollback journal, with their metadata when
-/// they count: the database always, a sidecar only when non-empty, because a
-/// reader may create an empty WAL without changing any data.
-fn fingerprint_files(db_path: &Path) -> Vec<(PathBuf, Option<fs::Metadata>)> {
-    ["", "-wal", "-journal"]
-        .into_iter()
-        .map(|suffix| {
-            let mut name = db_path.as_os_str().to_os_string();
-            name.push(suffix);
-            let path = PathBuf::from(name);
-            let meta = fs::metadata(&path)
-                .ok()
-                .filter(|meta| suffix.is_empty() || meta.len() > 0);
-            (path, meta)
-        })
-        .collect()
-}
-
-/// How long after its last modification a file's key may be cached. On a
-/// filesystem with coarse modification times (FAT/exFAT keep 2 seconds) a
-/// same-size change made within that window could keep the fingerprint; a
-/// read of a file modified this recently is used but not cached.
-const RACY_WINDOW: Duration = Duration::from_secs(2);
-
-/// True when every counted file was last modified at least [`RACY_WINDOW`]
-/// before `now`; an unknown modification time is never settled.
-fn settled(db_path: &Path, now: SystemTime) -> bool {
-    fingerprint_files(db_path)
-        .iter()
-        .all(|(_, meta)| match meta {
-            None => true,
-            Some(meta) => meta
-                .modified()
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age >= RACY_WINDOW),
-        })
-}
-
-/// Identity, size and modification time of the files [`fingerprint_files`]
-/// counts.
-fn fingerprint(db_path: &Path) -> String {
-    let mut parts = Vec::with_capacity(3);
-    for (path, meta) in fingerprint_files(db_path) {
-        let part = match meta {
-            Some(meta) => {
-                let identity = file_id::get_file_id(&path)
-                    .map(|id| format!("{id:?}"))
-                    .unwrap_or_else(|_| "unavailable".to_string());
-                format!("{identity}:{:?}:{}", meta.modified().ok(), meta.len())
-            }
-            None => "-".to_string(),
-        };
-        parts.push(part);
-    }
-    parts.join("|")
 }
 
 const CACHE_FILE: &str = "project-keys.json";
@@ -233,11 +176,11 @@ fn scan_with(data_root: &Path, strict: bool) -> Result<(Vec<KeyedProject>, Cache
         if !db_path.is_file() {
             continue;
         }
-        let fingerprint = fingerprint(&db_path);
+        let print = fingerprint::fingerprint(&db_path);
         let cached = cache
             .projects
             .get(&project_id.to_string())
-            .filter(|cached| cached.fingerprint == fingerprint)
+            .filter(|cached| cached.fingerprint == print)
             .map(|cached| cached.key.clone());
         let read = match cached {
             Some(key) => Ok((key, true)),
@@ -245,8 +188,8 @@ fn scan_with(data_root: &Path, strict: bool) -> Result<(Vec<KeyedProject>, Cache
             // a concurrent write can never pair an old key with a new
             // fingerprint, and were not modified too recently to tell apart.
             None => read_key_at(&db_path).map(|key| {
-                let stable = self::fingerprint(&db_path) == fingerprint;
-                (key, stable && settled(&db_path, now))
+                let stable = fingerprint::fingerprint(&db_path) == print;
+                (key, stable && fingerprint::settled(&db_path, now))
             }),
         };
         match read {
@@ -255,7 +198,7 @@ fn scan_with(data_root: &Path, strict: bool) -> Result<(Vec<KeyedProject>, Cache
                     fresh.projects.insert(
                         project_id.to_string(),
                         CachedKey {
-                            fingerprint,
+                            fingerprint: print,
                             key: key.clone(),
                         },
                     );
@@ -410,8 +353,11 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        assert!(settled(&info.db_path, SystemTime::now()));
-        assert!(!settled(&info.db_path, old + Duration::from_secs(1)));
+        assert!(fingerprint::settled(&info.db_path, SystemTime::now()));
+        assert!(!fingerprint::settled(
+            &info.db_path,
+            old + Duration::from_secs(1)
+        ));
         scan_cached(root.path()).unwrap();
         assert!(cached(), "a settled database is cached");
     }

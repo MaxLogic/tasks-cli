@@ -291,12 +291,15 @@ exit 2 naming the owning project and its root. The key lives only in the
 project database, so backups carry it. Every key lookup, the uniqueness
 checks included, goes through `<data-root>/project-keys.json`, which caches
 each database's key next to its fingerprint (file identity, size and mtime of
-the database and of a non-empty WAL or journal), because opening every
-database costs milliseconds each on Windows. A database without an entry or
-whose fingerprint changed is opened again, a read is cached only when the
+the database and of a non-empty WAL or journal, computed by the shared
+`crate::fingerprint` module also used by the viewer's project-statistics
+cache; see viewer/spec.md section 4.2), because opening every database costs
+milliseconds each on Windows. A database without an entry or whose
+fingerprint changed is opened again, a read is cached only when the
 fingerprint was the same before and after it, and a damaged cache is ignored.
 A file modified within the last 2 seconds is read but not cached, for
-filesystems with coarse modification times. The cache is derived data,
+filesystems with coarse modification times (the same settle window the
+viewer's cache uses). The cache is derived data,
 rewritten atomically by the reference lookups (`enrich`, naming the owner of a
 foreign `KEY-N`, import's foreign-heading check) and after a committed `init`,
 `project-key --set` or bulk apply; a refused `init`, a bulk dry run and a
@@ -940,6 +943,78 @@ scale with data size, but stream where practical. Never read all bodies/history
 for list. Use EXPLAIN QUERY PLAN to verify ID/status/history access paths; do not
 add caches or change durability merely to meet targets. Bound dependency
 count to 1000 per task; reject oversized replacement rather than truncate it.
+
+`tasks viewer projects` project-list load, before/after sharing the fingerprint
+rule between the project-key cache and the viewer's project-statistics cache
+(TSK-006; see "Project keys" above and viewer/spec.md section 4.2), and before/
+after batching that cache's writes into one transaction per call instead of
+one autocommit write per project (same section). Method: release binary
+(`target/perf-cli-before` for the pre-TSK-006 code at commit 42d8406,
+`target/perf-cli-after` for the candidate), fresh-process `tasks viewer
+projects` against 53 and 500 `init`-created projects with one task each, n=20.
+Cold cache deletes `viewer-cache.sqlite3` before every one of the n runs,
+forcing a full per-project resample every time (a harder case than the real
+first-ever run, which this section's other rows already cover via
+measure.ps1's M05/M06); warm cache primes once, then reuses it across all n
+runs. Proposed targets (not yet asserted in CI; picked from the Windows
+numbers below, the platform the viewer ships on): 500-project cold p95
+<=2000 ms, warm p95 <=500 ms.
+
+Windows dev SSD -- before: 53 projects cold p50 1181 ms / p95 7980 ms (n=20,
+min 1073 ms, max 8200 ms), warm p50 46 ms / p95 71 ms; 500 projects cold p50
+20771 ms / p95 25477 ms (n=20, min 13869 ms, max 26332 ms), warm p50 173 ms /
+p95 348 ms. After: 53 projects cold p50 227 ms / p95 5437 ms (n=20, min
+197 ms, max 6894 ms), warm p50 32 ms / p95 38 ms; 500 projects cold p50
+1912 ms / p95 6660 ms (n=20, min 1352 ms, max 9010 ms), warm p50 100 ms /
+p95 330 ms. Against the proposed targets: warm passes at both sizes; 500-
+project cold p95 (6660 ms) misses the 2000 ms target.
+
+Native Linux (WSL2 Ubuntu, Linux-owned `CARGO_TARGET_DIR`, no antivirus) --
+before: 53 projects cold p50 2452 ms / p95 2949 ms (n=20, min 1921 ms, max
+3199 ms), warm p50 8 ms / p95 9 ms; 500 projects cold p50 23409 ms / p95
+28030 ms (n=20, min 18391 ms, max 28382 ms), warm p50 36 ms / p95 51 ms.
+After: 53 projects cold p50 142 ms / p95 176 ms (n=20, min 125 ms, max
+2303 ms, one outlier), warm p50 8 ms / p95 9 ms; 500 projects cold p50 478 ms
+/ p95 1953 ms (n=20, min 408 ms, max 3048 ms), warm p50 25 ms / p95 42 ms.
+Against the proposed targets: every row passes, including 500-project cold
+p95 (1953 ms).
+
+Sharing the fingerprint rule alone (no batching) showed no regression at
+either platform or size (p50s within noise of the pre-change code). Batching
+the cache writes is the change that produced the improvement above: 500
+projects cold p50 dropped about 11x on Windows (20771 -> 1912 ms) and about
+49x on Linux (23409 -> 478 ms), because `journal_mode=delete,
+synchronous=FULL` fsyncs on every autocommit write, and the old code did up
+to two per project (stats upsert, archive clear) instead of at most two for
+the whole call. An isolated microbenchmark (Linux, Python's `sqlite3`, `journal_mode=DELETE`,
+`synchronous=FULL`, 500 autocommit single-row upserts into a fresh copy of
+this table vs. the same 500 upserts inside one `BEGIN`/`COMMIT`) measured
+15.8 s vs. 0.04 s for the transaction wrapper alone, consistent with the
+end-to-end drop. Durability is unchanged: `journal_mode`
+and `synchronous` were not touched, and the batch is one transaction (an
+interrupted or erroring write leaves the previous cache state, never a
+partial batch).
+
+The Windows numbers are noisier and, at 53 projects, non-monotonic across
+repeated runs of the unchanged "before" binary (779 / 2200 ms in one run,
+1181 / 7980 ms in another, both cold p50/p95, same code, same fixture,
+reruns minutes apart): the repeated per-iteration delete-and-recreate of a
+small `viewer-cache.sqlite3` file appears to trigger variable antivirus/
+filesystem-journal latency on this host, which the cold-cache method here
+constructs 20 times per row. The clean, low-variance Linux numbers (no
+antivirus) at the same code and fixtures, showing the same directional
+improvement with far tighter spread, support attributing the Windows p95
+jumpiness to host interference rather than the code change. A later fix kept
+the batched archive-clear write's original live re-check (`archived_at_ms <
+?`, evaluated at commit time against the current row, not the pre-sampling
+snapshot used to decide whether to queue it) so a concurrent `viewer archive`
+landing during the call is never clobbered; re-measuring 500 projects cold
+after that fix confirmed the improvement held (Windows p50 2710 ms / p95
+5467 ms, n=20; Linux p50 503 ms / p95 615 ms, n=20 -- both comfortably inside
+or near the proposed targets, Linux with no antivirus/host-noise contribution
+at all). Evidence: `target/evidence/tsk-006/` (`windows-cargo-test*.log`,
+`linux-cargo-test*.log`, `before-*`/`after-*` sample files,
+`linux-perf-v2.txt`, `*-final*`, `microbench-sqlite-upserts.txt`).
 
 ## Verification and implementation slices
 

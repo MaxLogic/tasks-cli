@@ -7,6 +7,7 @@
 //! touches a store.
 
 use crate::error::AppError;
+use crate::fingerprint;
 use crate::labels;
 use crate::model::{
     parse_ledger_task_id, parse_task_ref, render_keyed_task_id, DependencySummary, Priority,
@@ -689,13 +690,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn file_identity(path: &Path) -> String {
-    match file_id::get_file_id(path) {
-        Ok(identity) => format!("{identity:?}"),
-        Err(_) => "unavailable".to_string(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Snapshot tokens
 // ---------------------------------------------------------------------------
@@ -1057,6 +1051,41 @@ pub fn projects(data_root: &Path, request_file: &Path) -> Result<ViewerProjectsP
     })
 }
 
+/// One existing `project_cache` row, read once per [`enumerate_projects`]
+/// call instead of once per project, so deciding reuse never costs a
+/// per-project round trip.
+struct CachedProjectRow {
+    fingerprint: String,
+    stats_json: Option<String>,
+    sampled_at_ms: i64,
+    archived_at_ms: Option<i64>,
+}
+
+fn load_project_cache_rows(
+    cache: &Connection,
+) -> Result<HashMap<String, CachedProjectRow>, AppError> {
+    let mut statement = cache.prepare(
+        "SELECT project_id,fingerprint,stats_json,sampled_at_ms,archived_at_ms FROM project_cache",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            CachedProjectRow {
+                fingerprint: row.get(1)?,
+                stats_json: row.get(2)?,
+                sampled_at_ms: row.get(3)?,
+                archived_at_ms: row.get(4)?,
+            },
+        ))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (project_id, cached) = row?;
+        map.insert(project_id, cached);
+    }
+    Ok(map)
+}
+
 fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let registry = registry::list_bindings(&data_root)?;
@@ -1074,7 +1103,19 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             .push(binding.root.clone());
     }
     let cache = open_project_cache(&data_root)?;
+    let existing = load_project_cache_rows(&cache)?;
     let mut records = Vec::with_capacity(bound.len());
+    // Sampling opens and closes one project database at a time (unaffected
+    // below); cache writes are only ever queued here and applied in one
+    // transaction after every project has been sampled, instead of one
+    // autocommit write per project. On `journal_mode=delete,
+    // synchronous=FULL` (durability is not weakened) each autocommit write
+    // costs its own fsync, which dominates the cold-cache path at scale;
+    // batching keeps the same durability with one fsync per call instead of
+    // up to two per project.
+    let mut stats_updates: Vec<(String, String, Option<String>, i64)> = Vec::new();
+    let mut archive_clears: Vec<(String, i64)> = Vec::new();
+    let now = SystemTime::now();
     for (project_id, mut roots) in bound {
         roots.sort_by(|left, right| compare_ascii_text(left, right).then_with(|| left.cmp(right)));
         let name = roots
@@ -1085,26 +1126,27 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             .unwrap_or_else(|| project_id.clone());
         let db_path = data_root_project_path(&data_root, &project_id);
         let fingerprint = database_fingerprint(&db_path);
-        let cached: Option<(String, String, i64)> = cache.query_row(
-            "SELECT fingerprint,stats_json,sampled_at_ms FROM project_cache WHERE project_id=?1 AND stats_json IS NOT NULL",
-            [&project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).optional()?;
-        let reused = cached.and_then(|(stored, json, sampled)| {
-            (stored == fingerprint)
-                .then(|| {
-                    serde_json::from_str::<ProjectStats>(&json)
-                        .ok()
-                        .map(|stats| (stats, sampled))
-                })
-                .flatten()
+        let existing_row = existing.get(&project_id);
+        let reused = existing_row.and_then(|row| {
+            if row.fingerprint != fingerprint {
+                return None;
+            }
+            let json = row.stats_json.as_deref()?;
+            let stats = serde_json::from_str::<ProjectStats>(json).ok()?;
+            Some((stats, row.sampled_at_ms))
         });
         let (availability, error, stats, sampled_at_ms) = if let Some((stats, sampled)) = reused {
             (Availability::Available, None, Some(stats), sampled)
         } else {
             let sampled = now_ms();
             let (availability, error, stats) = sample_project(&db_path, &project_id);
-            // A concurrent writer makes this sample ineligible for reuse.
-            let stable = fingerprint == database_fingerprint(&db_path);
+            // A concurrent writer makes this sample ineligible for reuse; a
+            // file modified within the shared racy window (`crate::fingerprint`)
+            // is sampled but not cached, for filesystems with coarse
+            // modification times where a same-size change within the window
+            // could still leave the fingerprint unchanged.
+            let stable = fingerprint == database_fingerprint(&db_path)
+                && fingerprint::settled(&db_path, now);
             let json = if stable {
                 stats
                     .as_ref()
@@ -1114,18 +1156,20 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             } else {
                 None
             };
-            cache.execute("INSERT INTO project_cache(project_id,fingerprint,stats_json,sampled_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint,stats_json=excluded.stats_json,sampled_at_ms=excluded.sampled_at_ms",
-                rusqlite::params![project_id, fingerprint, json, sampled])?;
+            stats_updates.push((project_id.clone(), fingerprint, json, sampled));
             (availability, error, stats, sampled)
         };
+        let mut archived_at_ms = existing_row.and_then(|row| row.archived_at_ms);
         if let Some(last_write) = stats.as_ref().and_then(|stats| stats.last_write_ms) {
-            cache.execute("UPDATE project_cache SET archived_at_ms=NULL WHERE project_id=?1 AND archived_at_ms < ?2", rusqlite::params![project_id, last_write])?;
+            if archived_at_ms.is_some_and(|archived| archived < last_write) {
+                archived_at_ms = None;
+                // The batched write below re-checks `archived_at_ms < last_write`
+                // against the live column, not this snapshot, so a concurrent
+                // `viewer archive` landing between this snapshot and the
+                // batch commit is never clobbered.
+                archive_clears.push((project_id.clone(), last_write));
+            }
         }
-        let archived_at_ms = cache.query_row(
-            "SELECT archived_at_ms FROM project_cache WHERE project_id=?1",
-            [&project_id],
-            |row| row.get(0),
-        )?;
         records.push(ProjectRecord {
             project_id,
             name,
@@ -1136,6 +1180,31 @@ fn enumerate_projects(data_root: &Path) -> Result<Vec<ProjectRecord>, AppError> 
             archived_at_ms,
             stats,
         });
+    }
+    if !stats_updates.is_empty() || !archive_clears.is_empty() {
+        let tx = cache.unchecked_transaction()?;
+        {
+            let mut upsert = tx.prepare(
+                "INSERT INTO project_cache(project_id,fingerprint,stats_json,sampled_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(project_id) DO UPDATE SET fingerprint=excluded.fingerprint,stats_json=excluded.stats_json,sampled_at_ms=excluded.sampled_at_ms",
+            )?;
+            for (project_id, fingerprint, json, sampled) in &stats_updates {
+                upsert.execute(rusqlite::params![project_id, fingerprint, json, sampled])?;
+            }
+        }
+        {
+            // Re-checks the live `archived_at_ms` at write time (not the
+            // snapshot used to decide whether to queue this clear), matching
+            // the un-batched code's per-project conditional UPDATE: a
+            // concurrent `viewer archive` that lands between the snapshot
+            // read and this commit is never overwritten.
+            let mut clear = tx.prepare(
+                "UPDATE project_cache SET archived_at_ms=NULL WHERE project_id=?1 AND archived_at_ms < ?2",
+            )?;
+            for (project_id, last_write) in &archive_clears {
+                clear.execute(rusqlite::params![project_id, last_write])?;
+            }
+        }
+        tx.commit()?;
     }
     Ok(records)
 }
@@ -1640,7 +1709,7 @@ pub fn tasks(
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id);
     validate_storage_path(&db_path)?;
-    let identity_before = file_identity(&db_path);
+    let identity_before = fingerprint::file_identity(&db_path);
     let store = Store::open_readonly(&data_root, &project_id)?;
     let tx = store.conn.unchecked_transaction()?;
     let max_event_id: i64 =
@@ -1667,7 +1736,7 @@ pub fn tasks(
     };
     let items = select_task_page(&tx, &query, store.project_key.as_deref())?;
     tx.commit()?;
-    if file_identity(&db_path) != identity_before {
+    if fingerprint::file_identity(&db_path) != identity_before {
         return Err(stale_snapshot(
             "the project database was replaced while the page was being read",
         ));
@@ -1946,14 +2015,14 @@ pub fn show(data_root: &Path, project: &str, raw_id: &str) -> Result<ViewerShowP
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id);
     validate_storage_path(&db_path)?;
-    let identity_before = file_identity(&db_path);
+    let identity_before = fingerprint::file_identity(&db_path);
     let store = Store::open_readonly(&data_root, &project_id)?;
     let id = store.resolve_ref(raw_id)?;
     let key = store.project_key.as_deref();
     let tx = store.conn.unchecked_transaction()?;
     let (task, created_ms, updated_ms) = read_task_detail(&tx, &project_id, id, key)?;
     tx.commit()?;
-    if file_identity(&db_path) != identity_before {
+    if fingerprint::file_identity(&db_path) != identity_before {
         return Err(stale_snapshot(
             "the project database was replaced while the task was being read",
         ));
@@ -2185,25 +2254,16 @@ fn open_project_cache(data_root: &Path) -> Result<Connection, AppError> {
     Ok(conn)
 }
 
-// Include the WAL and rollback journal: uncheckpointed commits need not change
-// the main database. File identity detects replacements with equal timestamps.
+// Delegates to the shared fingerprint rule (`crate::fingerprint`), which
+// also covers the WAL and rollback journal: uncheckpointed commits need not
+// change the main database, and file identity detects replacements with
+// equal timestamps. The schema version is prefixed so a build that requires
+// a migration never reuses a cached row sampled under an older schema.
 fn database_fingerprint(path: &Path) -> String {
-    let mut parts = Vec::new();
-    for suffix in ["", "-wal", "-journal"] {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(suffix);
-        let file = std::path::PathBuf::from(name);
-        parts.push(match std::fs::metadata(&file) {
-            Ok(meta) => format!(
-                "{}:{:?}:{}",
-                file_identity(&file),
-                meta.modified(),
-                meta.len()
-            ),
-            Err(error) => format!("{:?}", error.kind()),
-        });
-    }
-    format!("{CURRENT_SCHEMA_VERSION}:{}", parts.join("|"))
+    format!(
+        "{CURRENT_SCHEMA_VERSION}:{}",
+        fingerprint::fingerprint(path)
+    )
 }
 
 #[derive(Debug, Serialize)]
