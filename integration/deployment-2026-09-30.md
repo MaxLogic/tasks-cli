@@ -174,3 +174,107 @@ Pester cases for a keyed row and a bracketed-name row.
   8 passed, 0 failed (includes the new keyed-row and bracketed-name cases).
 - Viewer relaunched visibly from the freshly packaged
   `target\viewer-release\tasks_viewer.exe` as PID `282344`; left running.
+
+## "Gate + install" authorization (this entry, 2026-09-30, later same session)
+
+User authorization: verify pid `197828` runs the packaged viewer, stop it,
+run `verify-windows.ps1` directly through G11 without changing the script or
+skip policy, install on a pass, relaunch the viewer visibly, and record this
+entry - all at commit `47ab4f5` (`47ab4f55875727136278f3fa504e189176132978`,
+`main`). The Rust final-gate tiers (Windows 274, Linux 278, real delegation)
+had already passed at this HEAD; evidence:
+`target/evidence/final-gate/2026-09-30-head-47ab4f5/`
+(`windows-cargo-fmt.log`, `windows-cargo-clippy.log`, `windows-cargo-test.log`,
+`linux-cargo-fmt.log`, `linux-cargo-clippy.log`, `linux-cargo-test.log`,
+`windows-verify-cli-build.log`, `linux-verify-cli-build.log`,
+`delegation-01`..`05` logs, `viewer-verify-windows*.log/.pid`). Only the
+viewer gate remained open, blocked earlier on G05's console-skip policy being
+misread by a certifier that launched `pwsh` through
+`Start-Process -WindowStyle Hidden` (a hidden console), unlike the passing
+direct-Bash runs where `decision-2026-09-29` accepts the skip as unproven.
+
+### Preconditions and viewer gate, attempt 1
+
+Confirmed pid `197828` ran `F:\projects\MaxLogic\tasks-cli\target\viewer-release\tasks_viewer.exe`
+(via `CommandLine`), then stopped it (`Stop-Process -Force`); confirmed gone.
+Nothing else was touched.
+
+`pwsh -NoProfile -File viewer/tool/verify-windows.ps1` run directly from the
+Bash tool (no `Start-Process`, no hidden console). Result: **FAILED - 1
+problem(s)**. G00-G10 passed, including G05 (584 passed, 2 skipped - the
+acknowledgement-loss case closed by G06, and the console-window
+`CREATE_NO_WINDOW` case correctly accepted as unproven, pending TSK-008,
+confirming the direct-invocation route avoids the earlier certifier defect).
+G11 (packaged release UI Automation) **failed** this time for a different
+reason: `verify-release-uia.ps1` timed out after 45s with only one UIA node
+(`FLUTTERVIEW`) in the last snapshot - no named Projects region, Search edit,
+Sort button or project row. `app.so` sha256
+`3b06a90a2ee1845804c79474f63b27f0359843176863e8af2ee8e4fde211613a`, viewer
+exe sha256 `b56b160878db840e5bff4926b3242cf3473440d16bd58237619438e6a91d190c`,
+CLI sha256 `24d5b096b2f9800f8b2b9324732df9b0d8dd902c48213f46ffdab2673fb5cc1b`.
+Evidence: `viewer/target/evidence/viewer/2026-09-30-224326-verify-windows/`.
+
+Per instruction, stopped short of install; relaunched the existing packaged
+viewer visibly as PID `279120` and reported the failure for direction.
+
+### Retry, attempt 2 (coordinator-directed)
+
+Coordinator noted no Flutter UI code changed since the last passing G11 run
+(`2026-09-30-193351`, 70 UIA nodes) - only `src/viewer.rs` (stats batching)
+and tests changed since - and that a tree holding only `FLUTTERVIEW` usually
+means the semantics tree never turned on, most consistent with a flaky
+startup/timing condition rather than a code regression. Directed: stop PID
+`279120` (after checking its path) and rerun the gate once.
+
+Confirmed PID `279120` ran the same packaged `tasks_viewer.exe` path, stopped
+it, confirmed gone. Checked machine state before rerun: single monitor
+(`DISPLAY6`, primary, 3440x1440, no secondary monitor), no interactive
+console session query tool available (`query` not present on this box) but
+no lock-screen indication.
+
+`pwsh -NoProfile -File viewer/tool/verify-windows.ps1` run again, unmodified.
+Result: **OK - 12 gates**, all passed including G11: 70 native UIA nodes,
+project region and Settings exposed, matching the earlier passing run's
+profile. Rebuilt artifact hashes: CLI `49026f096558b612853670ee544aac94c14bb73e1fa938f4cd76f7002900b967`
+(release-restore build after G06/G07's test-hooks round trip), viewer
+`b56b160878db840e5bff4926b3242cf3473440d16bd58237619438e6a91d190c` (unchanged
+- no Flutter source changed). Evidence:
+`viewer/target/evidence/viewer/2026-09-30-224840-verify-windows/`.
+
+Conclusion: the attempt-1 G11 failure was transient (a timing/startup race
+in the external UIA probe against the freshly launched packaged window, not
+a code regression - no Flutter or Rust semantics-affecting change occurred
+between the two runs, and the second run's node count and exposed controls
+match the known-good baseline exactly). No corrective code change was made
+or needed; console_window_proof remains `unproven: no interactive console in
+this run (decision 2026-09-29, pending TSK-008)` in both attempts' summaries.
+
+### Install (gate passed on retry)
+
+- Windows: `cargo build --release --locked` in the default target dir,
+  finished in 18.93s. `F:\CliTools\tasks.exe` symlink target unchanged
+  (`..\projects\MaxLogic\tasks-cli\target\release\tasks.exe`). Version
+  `tasks 0.1.0 (commit 47ab4f558757)`. SHA-256
+  `e29d81b03f876ee0b94e66375cfb0c1318b0b8e27f9a96fe368481c31f47cfc6`, identical
+  for the symlink target and the installed path. Read-only
+  `tasks list --limit 1` exits 0 (`has_more: false`).
+- Ubuntu/WSL: built via a script file (`~/.profile` and `~/.cargo/env`
+  sourced for `cargo` and `TASKS_WINDOWS_EXE` on PATH/env) with
+  `CARGO_TARGET_DIR=~/.local/share/tasks-cli/target cargo build --release --locked`
+  from `/mnt/f/projects/MaxLogic/tasks-cli`, finished in 13.37s.
+  `~/.local/bin/tasks` symlink target unchanged
+  (`/home/pawel/.local/share/tasks-cli/target/release/tasks`). Version
+  `tasks 0.1.0 (commit 47ab4f558757)`. SHA-256
+  `da0535f762c1ad7fbfc68bded5c09539c0b750c2de0cc6a35a0a1665792f036f`. Delegated
+  read-only `tasks list --limit 1` exits 0 (`has_more: false`), confirming
+  delegation to the Windows binary via `TASKS_WINDOWS_EXE=/mnt/f/CliTools/tasks.exe`.
+
+### Viewer status (this entry)
+
+Relaunched visibly (`Start-Process`, normal window, no console window) from
+the freshly packaged `target\viewer-release\tasks_viewer.exe`: PID `301440`,
+process name `tasks_viewer`, confirmed running from that path. Left running.
+
+### Outstanding (unchanged)
+
+- Console-window proof (`CREATE_NO_WINDOW`) remains unproven pending TSK-008.
