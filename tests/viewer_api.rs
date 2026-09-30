@@ -149,7 +149,10 @@ fn bind_root(data_root: &Path, name: &str, project: &Uuid) -> PathBuf {
 }
 
 fn add_project(data_root: &Path, name: &str) -> (Uuid, PathBuf) {
-    let project = Uuid::new_v4();
+    add_project_with_id(data_root, name, Uuid::new_v4())
+}
+
+fn add_project_with_id(data_root: &Path, name: &str, project: Uuid) -> (Uuid, PathBuf) {
     create_project_db(data_root, &project).unwrap();
     let root = bind_root(data_root, name, &project);
     (project, root)
@@ -157,8 +160,7 @@ fn add_project(data_root: &Path, name: &str) -> (Uuid, PathBuf) {
 
 /// Windows paths are case-insensitive, so two display names that differ only
 /// by ASCII case have to live in different parent directories.
-fn add_project_nested(data_root: &Path, group: &str, name: &str) -> Uuid {
-    let project = Uuid::new_v4();
+fn add_project_nested_with_id(data_root: &Path, group: &str, name: &str, project: Uuid) -> Uuid {
     create_project_db(data_root, &project).unwrap();
     let root = data_root.join("roots").join(group).join(name);
     fs::create_dir_all(&root).unwrap();
@@ -1237,14 +1239,53 @@ fn projects_state_filters_follow_the_documented_meaning() {
 #[test]
 fn projects_query_matches_literal_characters_and_case() {
     let data_root = tempfile::tempdir().unwrap();
-    let (percent, _) = add_project(data_root.path(), "100% Done");
-    let (plain, _) = add_project(data_root.path(), "100 Done");
-    let upper = add_project_nested(data_root.path(), "case-a", "Alpha");
-    let lower = add_project_nested(data_root.path(), "case-b", "alpha");
-    let (unicode, _) = add_project(data_root.path(), "Zażółć");
-    let (underscore, _) = add_project(data_root.path(), "a_b");
-    let (plain_b, _) = add_project(data_root.path(), "axb");
-    let (quote, _) = add_project(data_root.path(), "O'Brien");
+    // Fixed ids (not `Uuid::new_v4()`): the "100" query below must match only
+    // by project name. Every id here is built from hex letters a-f plus the
+    // digits 4/8 and never contains the digit sequence "1" or "0", so it can
+    // never accidentally contain "100" the way a random UUID occasionally
+    // does (seen: 51000c11…, 1006a555…).
+    let (percent, _) = add_project_with_id(
+        data_root.path(),
+        "100% Done",
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap(),
+    );
+    let (plain, _) = add_project_with_id(
+        data_root.path(),
+        "100 Done",
+        Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap(),
+    );
+    let upper = add_project_nested_with_id(
+        data_root.path(),
+        "case-a",
+        "Alpha",
+        Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").unwrap(),
+    );
+    let lower = add_project_nested_with_id(
+        data_root.path(),
+        "case-b",
+        "alpha",
+        Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd").unwrap(),
+    );
+    let (unicode, _) = add_project_with_id(
+        data_root.path(),
+        "Zażółć",
+        Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee").unwrap(),
+    );
+    let (underscore, _) = add_project_with_id(
+        data_root.path(),
+        "a_b",
+        Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap(),
+    );
+    let (plain_b, _) = add_project_with_id(
+        data_root.path(),
+        "axb",
+        Uuid::parse_str("deadbeef-dead-4bee-8fee-deadbeefdead").unwrap(),
+    );
+    let (quote, _) = add_project_with_id(
+        data_root.path(),
+        "O'Brien",
+        Uuid::parse_str("cafebabe-cafe-4bab-8bab-cafebabecafe").unwrap(),
+    );
 
     let matched = |query: &str| -> Vec<String> {
         sorted_project_ids(
