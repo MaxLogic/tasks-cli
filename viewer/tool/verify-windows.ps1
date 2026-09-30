@@ -1340,12 +1340,18 @@ function Invoke-VerifyWindows {
             -Seed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
             -CommandTimeoutSeconds $FixtureCommandTimeoutSeconds
         $fixtureManifest = Get-Content -LiteralPath $uiaFixture.ManifestPath -Raw | ConvertFrom-Json
+        $uiaAlphaProject = $fixtureManifest.projects[0]
+        # The Projects pane row renders ProjectItem.displayName ("name (KEY)"),
+        # per viewer/spec.md section 11 ("Project rows and the selected-project
+        # summary show the key next to the name"); match the same keyed label
+        # here rather than the bare name.
+        $uiaExpectedProjectName = "$($uiaAlphaProject.name) ($($uiaAlphaProject.project_key))"
         $uiaCommand = (Get-Command -Name 'pwsh' -ErrorAction Stop).Source
         $uiaArguments = @('-NoProfile', '-File', $UiaProbeToolPath,
             '-BundleRoot', $packageResult.OutputRoot,
             '-DataRoot', $uiaFixtureResolved,
             '-SettingsRoot', $uiaFixture.SettingsRoot,
-            '-ExpectedProjectName', [string]$fixtureManifest.projects[0].name,
+            '-ExpectedProjectName', $uiaExpectedProjectName,
             '-ExpectedOpenCount', [string]$uiaFixture.AlphaOpen,
             '-ExpectedTotalCount', [string]$uiaFixture.AlphaTotal,
             '-TimeoutSeconds', [string]$UiaTimeoutSeconds)

@@ -28,6 +28,32 @@ Describe 'packaged release UIA snapshot' {
         $result.MatchingRows | Should -Be 1
     }
 
+    It 'accepts a keyed project row (name (KEY))' {
+        $nodes = @(
+            [pscustomobject]@{ Name = 'Tasks Viewer'; Type = 'ControlType.Window' }
+            [pscustomobject]@{ Name = 'Projects'; Type = 'ControlType.Custom' }
+            [pscustomobject]@{ Name = 'Search projects (Ctrl+F)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = "Sort (Alt+O)`r`nName"; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'alpha (ALPHA). 27 open, 28 total, 0 blocked.'; Type = 'ControlType.ListItem' }
+        )
+        $result = Test-ReleaseUiaSnapshot -Nodes $nodes -ProjectName 'alpha (ALPHA)' -OpenCount 27 -TotalCount 28
+        $result.Ok | Should -BeTrue
+        $result.MatchingRows | Should -Be 1
+    }
+
+    It 'accepts a project row whose key contains wildcard bracket characters' {
+        $nodes = @(
+            [pscustomobject]@{ Name = 'Tasks Viewer'; Type = 'ControlType.Window' }
+            [pscustomobject]@{ Name = 'Projects'; Type = 'ControlType.Custom' }
+            [pscustomobject]@{ Name = 'Search projects (Ctrl+F)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = "Sort (Alt+O)`r`nName"; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'alpha[1] (A[1]). 27 open, 28 total, 0 blocked.'; Type = 'ControlType.ListItem' }
+        )
+        $result = Test-ReleaseUiaSnapshot -Nodes $nodes -ProjectName 'alpha[1] (A[1])' -OpenCount 27 -TotalCount 28
+        $result.Ok | Should -BeTrue
+        $result.MatchingRows | Should -Be 1
+    }
+
     It 'rejects a native window with no Flutter controls' {
         $nodes = @(
             [pscustomobject]@{ Name = 'Tasks Viewer'; Type = 'ControlType.Window' }

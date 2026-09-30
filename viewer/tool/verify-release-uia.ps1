@@ -194,7 +194,7 @@ function Test-ReleaseUiaSnapshot {
     $search = @($Nodes | Where-Object { $_.Name -eq 'Search projects (Ctrl+F)' -and $_.Type -eq 'ControlType.Edit' })
     $sort = @($Nodes | Where-Object { $_.Name -like 'Sort (Alt+O)*' -and $_.Type -eq 'ControlType.Button' })
     $row = @($Nodes | Where-Object {
-            $_.Name -like "$ProjectName.*" -and
+            $_.Name -like "$([System.Management.Automation.WildcardPattern]::Escape($ProjectName)).*" -and
             $_.Name -like "*$OpenCount open, $TotalCount total*"
         })
     $findings = [System.Collections.Generic.List[string]]::new()
