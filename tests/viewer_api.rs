@@ -6,6 +6,7 @@
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2671,6 +2672,17 @@ fn archived_projects_only_appear_in_the_explicit_archived_filter() {
 fn project_cache_reuses_unchanged_stats_and_archive_reopens_on_new_write() {
     let root = tempfile::tempdir().unwrap();
     let (id, _) = add_project(root.path(), "cached");
+    // The shared fingerprint rule (`crate::fingerprint`) samples but does not
+    // cache a database modified within the last 2 seconds, so back-date the
+    // freshly created database past that racy window before relying on
+    // cache reuse below.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(project_db(root.path(), &id))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let args = viewer_args(
         root.path(),
         None,
@@ -2706,6 +2718,129 @@ fn project_cache_reuses_unchanged_stats_and_archive_reopens_on_new_write() {
     assert!(page["items"][0]["archived_at_ms"].is_null());
 }
 
+/// The shared fingerprint rule's racy window (`crate::fingerprint`) applies
+/// to the viewer's project-statistics cache exactly as it does to the
+/// project-key cache: a database modified within the last 2 seconds is
+/// sampled but not cached, then becomes cacheable once it ages past the
+/// window.
+#[test]
+fn project_cache_honors_the_racy_settle_window_like_the_key_cache() {
+    let root = tempfile::tempdir().unwrap();
+    let (id, _) = add_project(root.path(), "racy");
+    let args = viewer_args(
+        root.path(),
+        None,
+        &["viewer", "projects", "--request-file", "-"],
+    );
+    let viewer_cache = || Connection::open(root.path().join("viewer-cache.sqlite3")).unwrap();
+    let cached_stats = |conn: &Connection| -> Option<String> {
+        conn.query_row(
+            "SELECT stats_json FROM project_cache WHERE project_id=?1",
+            [id.to_string()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+    };
+    // Set the database's mtime into the future so it is deterministically
+    // unsettled (`now.duration_since(modified)` fails whenever `modified` is
+    // after `now`), instead of relying on the real clock never crossing the
+    // 2-second racy window between project creation and this first call --
+    // which an antivirus scan or a loaded machine can cross, making the
+    // assertion below flaky.
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(project_db(root.path(), &id))
+        .unwrap()
+        .set_modified(future)
+        .unwrap();
+    spawn(&args, Some(b"{}")).data();
+    assert!(
+        cached_stats(&viewer_cache()).is_none(),
+        "an unsettled database (here: a future mtime) must not be cached"
+    );
+    // Back-date the database past the racy window: the next sample becomes
+    // cacheable.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(project_db(root.path(), &id))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    spawn(&args, Some(b"{}")).data();
+    assert!(
+        cached_stats(&viewer_cache()).is_some(),
+        "a settled database must be cached"
+    );
+}
+
+/// `enumerate_projects` queues every project's cache write in memory and
+/// applies them in one transaction after sampling, instead of one autocommit
+/// write per project. One call over many settled, never-before-seen
+/// projects must still leave every one of them cached, and a later call must
+/// be fully warm (no resampling).
+#[test]
+fn project_cache_batch_write_caches_every_project_from_one_call() {
+    let root = tempfile::tempdir().unwrap();
+    const COUNT: usize = 12;
+    let mut ids = Vec::with_capacity(COUNT);
+    for index in 0..COUNT {
+        let (id, _) = add_project(root.path(), &format!("batch-{index:02}"));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(project_db(root.path(), &id))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        ids.push(id);
+    }
+    let args = viewer_args(
+        root.path(),
+        None,
+        &["viewer", "projects", "--request-file", "-"],
+    );
+    let first = spawn(&args, Some(b"{}")).data();
+    assert_eq!(first["total_count"], COUNT as u64);
+
+    let cache = Connection::open(root.path().join("viewer-cache.sqlite3")).unwrap();
+    for id in &ids {
+        let stats_json: Option<String> = cache
+            .query_row(
+                "SELECT stats_json FROM project_cache WHERE project_id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            stats_json.is_some(),
+            "project {id} must be cached after the one batched call"
+        );
+    }
+    drop(cache);
+
+    let second = spawn(&args, Some(b"{}")).data();
+    let sampled_at = |data: &Value| -> HashMap<String, i64> {
+        data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["project_id"].as_str().unwrap().to_string(),
+                    item["sampled_at_ms"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        sampled_at(&first),
+        sampled_at(&second),
+        "a later call over an unchanged, fully-cached catalog must be warm for every project"
+    );
+}
+
 #[test]
 fn project_cache_detects_wal_commits_and_manual_unarchive() {
     let root = tempfile::tempdir().unwrap();
@@ -2713,6 +2848,17 @@ fn project_cache_detects_wal_commits_and_manual_unarchive() {
     let conn = Connection::open(project_db(root.path(), &id)).unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    // Back-date past the racy settle window (`crate::fingerprint`) so the
+    // first sample below is cacheable; otherwise every call resamples
+    // regardless of whether the WAL sidecar is part of the fingerprint,
+    // and this test would pass even with `-wal` removed from it.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(project_db(root.path(), &id))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let args = viewer_args(
         root.path(),
         None,

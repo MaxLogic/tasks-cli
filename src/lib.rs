@@ -2,6 +2,7 @@ pub mod backup;
 pub mod bulk;
 pub mod cli;
 pub mod error;
+pub mod fingerprint;
 pub mod interop;
 pub mod keys;
 pub mod markdown;
