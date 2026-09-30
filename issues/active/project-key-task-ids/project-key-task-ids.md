@@ -126,6 +126,14 @@ contract; these are the choices the issue left open.
   CP, X86). Project-key validation refuses the same keys, so no project can
   own a key that enrich ignores; none of the keys in `project-keys.csv`
   collides with the list.
+- Project-list statistics cache (user decision 2026-09-30, TSK-006): keep two
+  caches. Per-project statistics stay in the viewer's
+  `<data-root>/viewer-cache.sqlite3`; keys stay in `project-keys.json`; both
+  use one shared staleness/fingerprint rule. This supersedes the 2026-09-28
+  idea of storing statistics in the key cache. Measure the project list first
+  (53 and 500 projects, warm and cold cache) and fix only what the
+  measurements show is slow. Archive dates stay in the viewer's persistent
+  settings.
 
 ## Follow-ups from review
 
