@@ -91,6 +91,66 @@ before or after this session).
 - Console-window proof (`CREATE_NO_WINDOW`) remains unproven pending TSK-008,
   as recorded by G05 and carried into this run's summary
   (`console_window_proof: unproven ... pending TSK-008`).
-- G10 packaging (and downstream G11/G12) needs a rerun once
-  `target\viewer-release` is unlocked; identify and close the holding
-  process (or its owning session) rather than force-deleting the directory.
+- ~~G10 packaging (and downstream G11/G12) needs a rerun once
+  `target\viewer-release` is unlocked~~ - resolved below (2026-09-30 retry):
+  the lock cleared on its own once the holding terminal session was closed.
+
+## Retry: viewer gate rerun, lock cleared (2026-09-30, later same day)
+
+The user reported closing the terminal that had likely held the directory
+handle ("I think I closed the terminal holding the handle. try again.").
+
+**Lock check**: `Rename-Item` round-trip on `target\viewer-release` (rename to
+a temp name, then back) succeeded immediately - the directory was no longer
+locked.
+
+**`pwsh -NoProfile -File viewer/tool/verify-windows.ps1`** was run once more
+(no `-IncludeWindowedIntegration`, so G12 is out of scope by design). Result:
+**FAILED - 1 problem(s)**, this time only at the external UI Automation gate,
+after every gate through packaging passed:
+
+| Gate | Result |
+| --- | --- |
+| G00 toolchains | passed |
+| G01 release CLI build | passed |
+| G02 throwaway fixture seed | passed |
+| G03 dart format | passed |
+| G04 flutter analyze | passed |
+| G05 flutter test (full suite) | passed |
+| G06 test-hooks CLI closes the skip | passed |
+| G07 shipped CLI restored | passed |
+| G08 viewer end-to-end (headless, real store) | passed |
+| G09 Windows release build | passed |
+| G10 portable release bundle (packaging) | **passed** - lock gone, bundle written to `target\viewer-release`; launch cases `startup-opt-out`, `argument-error`, `cli-version`, `cli-viewer-info` all `ok` from a path with spaces and non-ASCII characters |
+| G11 packaged release UI Automation | **failed** - `verify-release-uia.ps1` timed out after 45s: no project row exposed "alpha" with the expected open/total counts in its UIA name; last snapshot had 62 nodes, none matching. `app.so` sha256 `3b06a90a2ee1845804c79474f63b27f0359843176863e8af2ee8e4fde211613a`, viewer exe sha256 `b56b160878db840e5bff4926b3242cf3473440d16bd58237619438e6a91d190c`, CLI sha256 `3051b0247d602c41ceccb763f7a7228c14228675fab9e1d547afb23da0f381f8` |
+
+G12 (windowed integration, opt-in) did not run, as expected without
+`-IncludeWindowedIntegration`. V01-V13 rows were written to the summary as
+usual (most carrying their standing "unavailable"/manual-only status; see the
+script's own documentation for what each covers). Evidence root:
+`viewer/target/evidence/viewer/2026-09-30-192405-verify-windows/`
+(`verify-summary.md`, `verify-summary.json`, per-gate logs `00`-`12`,
+including `12-release-uia.txt` with the full failure detail above).
+
+### Viewer status (this retry)
+
+Packaging succeeded, so `target\viewer-release\tasks_viewer.exe` is a fresh
+bundle. It was launched visibly (`Start-Process`, normal window, no console
+window) per instruction, even though G11 failed:
+
+- PID `23596`, process name `tasks_viewer`, main window title "Tasks Viewer",
+  confirmed rendered (non-empty title, valid window handle) about 5s after
+  launch.
+- Left running for the user to inspect; not stopped by this session.
+
+### Outstanding (updated)
+
+- G11 (packaged release UI Automation) still needs a rerun/fix: the probe's
+  45s timeout does not find the expected "alpha" project row with its
+  open/total counts in the UIA name. This looks like either a UIA timing
+  issue (window not settled within 45s) or a real regression in how the
+  project row exposes its accessible name; needs investigation with a longer
+  timeout or a UIA tree dump comparison against a known-good build before
+  concluding which.
+- Console-window proof (`CREATE_NO_WINDOW`) remains unproven pending TSK-008,
+  unchanged from the previous entry.
