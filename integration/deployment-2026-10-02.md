@@ -130,3 +130,13 @@ returned 70 nodes without retry. The intervening failed G06 run did not execute
 G11. The ordinary viewer does not continuously log its native provider tree,
 so this finding covers saved verification evidence, not every interactive use.
 TSK-017 remains blocked pending a captured recurrence; no speculative fix was made.
+
+## TSK-017 retirement, subsequent user review
+
+After the user asked whether TSK-017 could close because the issue might already
+be fixed, the bounded investigation was retired as `cancelled` / not reproduced.
+This does not assert a confirmed cause or fix. The original failure and all later
+probe evidence remain available, and the narrow retry remains a mitigation.
+Reopen the same task on another bare-FLUTTERVIEW timeout or recorded retry,
+retaining the failing live process and first-attempt provider/timing evidence.
+No implementation change or additional test run accompanies this retirement.
