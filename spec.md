@@ -1106,10 +1106,54 @@ Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
 
 ## Rust server and automatic attribution
 
-Status: Ready for implementation, 2026-10-02. Verification below is planned.
+Status: Blocked on remote access route and client authentication selection,
+2026-10-02. Attribution slices 1-2 remain specified and can proceed independently.
+Verification below is planned.
 The user selected a Rust server in Docker on a QNAP NAS, online-only remote
 operation, HTTPS and authentication. The viewer continues to access tasks
 through the CLI. Routine implementation choices below were selected locally.
+The subsequent infrastructure review supersedes direct TLS termination in the
+Rust service: the NAS reverse proxy handles external HTTPS. Client key pairs
+were proposed by the user; mTLS is recommended for direct LAN/VPN access, but
+the access route and authentication replacement require a decision before slices 3-7.
+
+### Verified NAS context and open decision
+
+Read `F:\projects\MaxLogic\qnap-nas-maintenance\` and `F:\projects\LAN\` for
+operational guidance. NAS notes identify a TS-473A at `10.77.77.13` with local
+name `qnap.home.arpa`. Read-only WSL SSH on 2026-10-02 confirmed hostname
+`QNAP-NAS`, `x86_64`, platform `TS-X73A`, QTS `5.2.10` and Container Station
+`3.1.2.1742`. Build the server image for `linux/amd64`.
+Docker is at `/share/CACHEDEV1_DATA/.qpkg/container-station/bin/docker`.
+The existing `cloudflared-audiobookshelf` connector is running; no standalone
+Caddy, nginx or Traefik container appeared in the running-container inventory.
+This inventory does not establish whether QTS-native reverse-proxy rules exist.
+
+Recommended direct-access route: CLI HTTPS to a NAS-hosted Caddy reverse proxy,
+then HTTP to the Rust service over a dedicated Docker backend network. The Rust
+container has no published host port. Only the proxy joins the client-facing
+and backend networks; existing Audiobookshelf/metadata networks stay separate.
+The backend database mount is NAS-local, for example `/share/Container/tasks-cli`.
+Keep certificate management and external TLS in the proxy, and actor/machine
+authorization and audit in Rust.
+
+For key-pair authentication, recommend mTLS: a private key and client certificate
+per installation, with certificate identity mapped to actor/machine. Validate
+the client certificate at the TLS endpoint, overwrite any client-supplied identity
+headers, and authenticate the proxy-to-application identity assertion. Rust still
+checks registration/revocation before granting task access. Private keys remain
+client-local; never reuse the NAS administrator's SSH identity as an application
+credential. Certificate issuance, renewal and revocation need focused proof.
+This recommendation is not yet an accepted replacement for the token baseline below.
+
+Decision owner: user. Question: will clients connect directly over LAN/VPN or
+through a public Cloudflare hostname, and should per-client certificates replace
+API tokens? Direct mTLS terminates at the NAS proxy. Cloudflare-proxied HTTPS
+terminates at Cloudflare and requires a separately configured client-authentication
+policy there; a normal tunnel does not deliver the original client TLS handshake
+to the local proxy. Keep slices 3-7 blocked until this boundary is selected.
+References: [Caddy client authentication](https://caddyserver.com/docs/caddyfile/directives/tls)
+and [Cloudflare mTLS](https://developers.cloudflare.com/api-shield/security/mtls/).
 
 ### Goals and boundaries
 
@@ -1133,7 +1177,7 @@ through the CLI. Routine implementation choices below were selected locally.
 
 Keep one Cargo package and the existing library. Add `tasks-server` behind a
 `server` Cargo feature, plus shared application dispatch, remote transport and
-attribution modules. Use Axum/Tokio for HTTP, rustls for TLS, a synchronous HTTP
+attribution modules. Use Axum/Tokio for internal HTTP and a synchronous HTTPS
 client with certificate validation for the CLI, and existing rusqlite storage.
 Verify and lock exact compatible dependency versions during implementation.
 Do not wrap CLI subprocesses inside the server or duplicate task validation.
@@ -1159,14 +1203,17 @@ project name, never requires `F:\...` paths to exist on another machine.
 
 ### HTTPS and authentication
 
-- The Rust server terminates TLS itself, listening at container port 8443.
-  Load a PEM certificate chain and private key from read-only secret mounts.
-  Serve TLS 1.2 or newer. Refuse startup if TLS or auth configuration is missing
-  or invalid. Do not expose an unauthenticated HTTP application listener.
+- The NAS reverse proxy terminates client-facing TLS 1.2 or newer. The Rust
+  service listens on HTTP port 8080 only on its private Docker backend network,
+  with no host port publication. Certificate/key mounts belong to the proxy.
+  Missing or invalid proxy TLS/auth configuration prevents deployment readiness.
+  Require application authentication even on this internal HTTP listener.
 - The CLI requires an `https://` URL, checks certificate validity and hostname,
   and permits an explicitly configured private CA file. No insecure bypass.
   Reject cross-origin redirects and never forward credentials to another origin.
-- Use opaque bearer credentials generated from 32 random bytes. Issue one
+- Pending authentication decision: the following token rules are the previous
+  baseline, not acceptance of token authentication over the user's key proposal.
+  Use opaque bearer credentials generated from 32 random bytes. Issue one
   credential per registered client installation. A credential identifies an
   actor ID/name and registered machine ID/name; the server derives authoritative
   actor and machine IDs from it, ignoring client attempts to replace them.
@@ -1375,13 +1422,13 @@ name while retaining distinct installation IDs and credentials.
 
 Provide a multistage Dockerfile, a Compose example and a QNAP Container Station
 runbook. Run as a configured non-root UID/GID, with a read-only root filesystem,
-writable `/data` and a bounded temporary directory. Mount certificate/key and
-credential provisioning inputs read-only. Image contains no secrets or task data.
+writable `/data` and a bounded temporary directory. Mount certificate/key inputs
+read-only into the proxy, and credential provisioning inputs into their owning
+component. Image contains no secrets or task data.
 No privileged mode or Docker socket mount. Set restart policy and graceful-stop
 timeout explicitly. Retain the existing Windows x64 and native Linux x64 builds;
-build the server image for the NAS's actual architecture and execute its smoke
-proof there. NAS model/CPU and installed Container Station version are deployment
-prerequisites, not guessed architecture facts.
+build the server image for the verified `linux/amd64` NAS and execute its smoke
+proof there. Recheck the recorded NAS and Container Station versions at deployment.
 
 Migration rehearsals preserve project UUIDs/keys, task IDs, counters, versions,
 descriptions, dependencies, imports and existing event IDs/snapshots. Use SQLite
@@ -1402,7 +1449,8 @@ only with explicit selection of the authoritative data.
 
 | Item | Required condition / check | Owner | Dependent slices |
 |---|---|---|---|
-| QNAP architecture/runtime | Record NAS CPU architecture and Container Station version; run the matching image on NAS-local volume. | Operator | 7 |
+| Access route and authentication | Select LAN/VPN versus Cloudflare endpoint and accept token or client-certificate authentication. | User; open design decision | 3-7 |
+| QNAP architecture/runtime | Recheck verified x86_64 platform/QTS/Container Station; run linux/amd64 image on NAS-local volume. | Operator | 7 |
 | TLS identity | Supply DNS name/address, matching certificate/key and trusted CA; verify client hostname checks. | Operator | 7 and real deployment |
 | Client registration | Create actor/client credentials once with private storage and revocation proof. | Operator | 5 and real deployment |
 | Installed hook support | Verify Codex/Claude Code versions and silent context collection for supported shells; missing fields remain null. | Implementer | 2 |
@@ -1464,12 +1512,14 @@ tests and local store behavior must remain compatible.
   model switch. Compare resulting history with hook payloads, ensure no metadata
   arguments or hook additionalContext entered the conversation.
 
-#### Slice 3: Establish HTTPS and authenticated server ownership
+#### Slice 3: Establish proxy HTTPS and authenticated server ownership
 
 - Deps: slice 1. Touches: proposed server transport/auth modules, Cargo feature
-  and binary, server auth migrations, proposed tests/server_transport.rs.
+  and binary, server auth migrations, proxy fixture/config and proposed
+  tests/server_transport.rs.
   Reviewer lens: authorization, secret handling and resource ownership.
-- Outcome: configured HTTPS listener and authenticated info route, credential
+- Outcome: configured proxy HTTPS route to private Rust HTTP and authenticated
+  info, credential
   provisioning/revocation with admin audit, capacity bounds and exclusive data-root
   ownership satisfy the security and operational contracts.
 - Proof: `cargo test --locked --features server --test server_transport`. Expect
@@ -1522,7 +1572,7 @@ tests and local store behavior must remain compatible.
   synthetic migration/container proof helper. Reviewer lens: operational recovery.
 - Outcome: non-root container retains all data across restart; TLS/auth secrets
   remain outside image; backup/restore rehearsal preserves exact project history;
-  NAS architecture/runtime and TLS provisioning checks are explicit.
+  NAS architecture/runtime and proxy TLS provisioning checks are explicit.
 - Proof: proposed `python integration/verify_server_container.py --fixture-root
   <new-empty-absolute-directory>` drives the built candidate with two client
   profiles, synthetic TLS/auth and a NAS-local container volume. Expect nonzero
@@ -1542,9 +1592,11 @@ execution identity cannot be matched. Server transport/auth and application
 transactions are separate slices with distinct focused proof. No independent
 review or implementation proof is claimed.
 
-Canonical artifact: spec.md, this section. Readiness: Ready for implementation;
-NAS architecture, TLS provisioning and client registration are named execution
-prerequisites. Exact crate versions remain implementation selections. Begin with
+Canonical artifact: spec.md, this section. Readiness: Blocked for slices 3-7
+pending the user's access-route/authentication decision. Attribution slices 1-2
+are unaffected. NAS architecture is verified; proxy TLS provisioning and client
+registration remain execution prerequisites. Exact crate versions remain
+implementation selections. Begin with
 the [implementation slices](#implementation-slices), using rust-engineering,
 rust-testing and resolve-task when slices have durable task records. Offline
 writes, remote bulk import and richer access policies remain excluded. Deployment
