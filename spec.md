@@ -1106,8 +1106,8 @@ Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
 
 ## Rust server and automatic attribution
 
-Status: Blocked on client authentication selection,
-2026-10-02. Attribution slices 1-2 remain specified and can proceed independently.
+Status: Ready for implementation, 2026-10-02. Deployment prerequisites below
+remain pending.
 Verification below is planned.
 The user selected a Rust server in Docker on a QNAP NAS, online-only remote
 operation, HTTPS and authentication. The viewer continues to access tasks
@@ -1115,9 +1115,10 @@ through the CLI. Routine implementation choices below were selected locally.
 The user also selected both Cloudflare Tunnel and direct LAN access. The live
 infrastructure review supersedes the proposed Caddy addition: reuse the existing
 QTS reverse proxy for LAN HTTPS and the existing tunnel for public HTTPS.
-Client key pairs were proposed by the user. Application-level request signing
-is now recommended so the same credentials work through both routes; its
-replacement of the token baseline requires a decision before slices 3-7.
+The user accepted per-installation keys with automatic application-level request
+signing, verified by Rust on both routes. This supersedes the token baseline
+and earlier mTLS proposal. No attribution or authentication arguments are
+required in ordinary CLI calls.
 
 ### Verified NAS context and access routes
 
@@ -1128,9 +1129,13 @@ name `qnap.home.arpa`. Read-only WSL SSH on 2026-10-02 confirmed hostname
 `3.1.2.1742`. Build the server image for `linux/amd64`.
 Docker is at `/share/CACHEDEV1_DATA/.qpkg/container-station/bin/docker`.
 Docker reports `27.1.2-qnap8`. The `cloudflared-audiobookshelf` connector is
-running on the `abs-meta` Docker network. The user confirms the existing public
-route `audiobooks.maxlogic.app` serves Audiobookshelf; its dashboard routing was
-not inspected. No standalone Caddy, nginx or Traefik container is running.
+running on the `abs-meta` Docker network, shared with `audiobookshelf-1`.
+The public `https://audiobooks.maxlogic.app/` and LAN
+`http://10.77.77.13:32768/` both returned HTTP 200 from the workstation on
+2026-10-02. Dashboard routing was not inspected. No standalone Caddy, nginx or
+Traefik container is running. The NAS's App Center catalog, refreshed that day,
+offers installed Container Station `3.1.2.1742` for this platform; `3.1.3.1854`
+is restricted to QAI-X700/QAI-X90. No supported Docker 28 upgrade is established.
 
 The QTS-native Apache reverse proxy is running with
 `/etc/reverseproxy/reverseproxy.conf`. Its persisted rules are in
@@ -1165,20 +1170,14 @@ Require host firewall protection and proof from a separate LAN machine that
 direct backend HTTP is unreachable; loopback binding alone is not isolation proof.
 The database mount is NAS-local, for example `/share/Container/tasks-cli`.
 
-Recommend per-installation Ed25519 keys with automatic HTTP request signing
-verified by Rust, using RFC 9421 rather than an invented signing protocol.
+Use per-installation Ed25519 keys with automatic HTTP request signing
+verified by Rust, using the RFC 9421 profile below.
 Private keys remain client-local; the server stores registered public keys and
 maps them to actor/machine identities. Both routes use the same application
 authentication and revocation checks. The CLI supplies signatures automatically,
 without extra AI arguments. Never reuse the NAS administrator's SSH key.
-This proposal is not yet an accepted replacement for the token baseline below.
-Before implementation, specify signed components, body integrity, request/server
-binding, freshness/replay limits and proxy header preservation in this section.
-Do not carry the earlier direct-only mTLS recommendation forward as a requirement.
-
-Decision owner: user. Question: accept per-installation signed requests, or retain
-protected API tokens? Both LAN and Cloudflare access are settled requirements.
-Keep slices 3-7 blocked on authentication selection.
+Client authentication is an accepted design decision. TLS certificates protect
+the transport; application keys identify the actor and client installation.
 References: [QNAP reverse proxy](https://www.qnap.com/en/how-to/tutorial/article/how-to-use-reverse-proxy-to-improve-secure-remote-connections),
 [Cloudflare published applications](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/),
 [Docker port publishing](https://docs.docker.com/engine/network/port-publishing/)
@@ -1243,22 +1242,23 @@ project name, never requires `F:\...` paths to exist on another machine.
 - The CLI requires an `https://` URL, checks certificate validity and hostname,
   and permits an explicitly configured private CA file. No insecure bypass.
   Reject cross-origin redirects and never forward credentials to another origin.
-- Pending authentication decision: the following token rules are the previous
-  baseline, not acceptance of token authentication over the user's key proposal.
-  Use opaque bearer credentials generated from 32 random bytes. Issue one
-  credential per registered client installation. A credential identifies an
-  actor ID/name and registered machine ID/name; the server derives authoritative
-  actor and machine IDs from it, ignoring client attempts to replace them.
-- Keep only a SHA-256 token digest on the server. Store the plaintext token in
-  a client-owned file, not arguments, repository files or logs. Require mode
+- Generate a new Ed25519 key pair from the OS cryptographic random source during
+  explicit client setup. Store the private key as PKCS#8 PEM in a client-owned
+  file, not arguments, repository files or logs. Require mode
   0600 on Unix and access restricted to the owning user plus system/admin on
-  Windows. A missing or insecure token file prevents remote operation.
+  Windows. A missing or insecure key file prevents remote operation. Enrollment
+  exports only the public key, installation UUID and observed machine name.
+  Register one public key per installation, with a server-generated credential
+  UUID, actor ID/name and installation ID/name. The server derives authoritative
+  actor/machine IDs from that registration, ignoring client replacements.
+  Never transmit or persist the client's private key on the server.
 - Provision/revoke credentials through `tasks-server admin` commands executed
   on the server, not through an HTTP admin endpoint. Admin writes use the same
   server process ownership lock; stop the service first. Record the OS actor
-  and affected credential identity in append-only admin audit events. Never
-  store the token itself in that audit. A revoked credential receives 401 on
-  subsequent requests; replacing a token does not erase its history identity.
+  and affected credential identity in append-only admin audit events. A revoked
+  credential receives 401 on subsequent requests through either route. Register
+  replacement keys under new credential UUIDs, retaining the actor/installation
+  history identity. Revocation applies before idempotency receipt lookup.
 - Credentials grant read/write access to the owner's server backlogs in this
   initial single-owner service. Separate project permissions are deferred.
 - Authenticate before revealing project existence or reading request content
@@ -1266,8 +1266,53 @@ project name, never requires `F:\...` paths to exist on another machine.
   Disable browser CORS access by default. Limit application request bodies to
   8 MiB, matching the existing viewer request ceiling.
 - Log request ID, actor ID, project UUID, operation, duration and outcome.
-  Exclude authorization headers, token values, task bodies, prompts, full
+  Exclude authorization/signature headers, private keys, task bodies, prompts, full
   environment dumps, session titles and executable command lines from logs.
+
+#### Signed request profile
+
+- Use RFC 9421 `Signature-Input` and `Signature` header fields with the single
+  label `tasks`, algorithm `ed25519` and `keyid` equal to the registered credential
+  UUID. Reject additional signatures, duplicate security headers, unknown keys,
+  other algorithms and component lists that differ from the specified list.
+- Every request signs `@method`, `@path`, `@query`, `content-type`,
+  `content-digest` and `x-tasks-server-id`, in that order. Mutation requests also
+  sign `idempotency-key`. Require `Content-Type: application/json` on requests,
+  including empty GET requests. Use RFC 9530 `Content-Digest` with only `sha-256`,
+  calculated over exact transmitted body bytes, including the empty body.
+  Request compression and content transformations are unsupported. Reject a
+  digest mismatch before any project lookup or mutation.
+- Persist a server UUID at server initialization. The operator supplies it to
+  client setup from server administration output. Include it in the signed
+  `X-Tasks-Server-Id` header and authenticated `/v1/info` response. Reject requests
+  addressed to another server UUID. Store the UUID with pending receipts and
+  verify it before reconciling after an endpoint change or server restore.
+  Backups retain the UUID; fresh server initialization creates a different one.
+- Require signed `created`, `expires` and `nonce` parameters. Use Unix UTC seconds,
+  with `expires = created + 120`, and a nonce generated from 32 random bytes,
+  encoded as unpadded base64url. Accept only when `created <= now + 30` and
+  `expires >= now - 30`. Client and server clocks must be synchronized. Report
+  actionable clock errors without relaxing verification automatically.
+- After verifying the signature and current registration, atomically consume
+  `(credential UUID, nonce)` in `/data/server.sqlite` before application dispatch.
+  Retain it until `expires + 30 < now`; the replay record survives server restart.
+  A repeated nonce receives 401. Allow at most 4096 unexpired nonces per
+  credential and 65536 globally; return 503 at capacity and never evict unexpired
+  entries to admit another request. Invalid signatures cannot consume capacity.
+- Verify signed metadata before reading body content beyond protocol limits.
+  Read at most the existing 8 MiB ceiling, check the digest, then dispatch. A
+  consumed nonce remains consumed after body failure or application refusal.
+  Reconciliation signs a new HTTP request with a fresh nonce/timestamps but
+  reuses the exact canonical mutation and idempotency key. Signature headers,
+  nonces and freshness timestamps are excluded from mutation receipt identity.
+- QTS and Cloudflare routing must preserve the signed path/query, content bytes
+  and application security headers. Do not sign proxy-rewritten scheme/host,
+  `Forwarded` or `X-Forwarded-*` fields. HTTPS endpoint validation and the signed
+  server UUID provide destination binding. Do not rewrite API paths at a proxy.
+  Prove this profile through both actual routes before deployment readiness.
+
+References: [HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html)
+and [Digest Fields](https://www.rfc-editor.org/rfc/rfc9530.html).
 
 ### API and transport contract
 
@@ -1277,7 +1322,7 @@ operational tracing but do not create history or change stored attribution.
 
 | Route | Operations |
 |---|---|
-| `GET /v1/info` | Authenticated protocol capabilities and server readiness |
+| `GET /v1/info` | Authenticated server UUID, protocol capabilities and readiness |
 | `GET /v1/projects` | Bounded project catalog and existing viewer statistics |
 | `POST /v1/projects` | Explicit project creation, UUID, name and optional user-selected key |
 | `POST /v1/projects/{uuid}/query` | Typed list, show-many, search, unlocks, history, rules, project-key and viewer read requests |
@@ -1486,18 +1531,19 @@ only with explicit selection of the authoritative data.
 
 | Item | Required condition / check | Owner | Dependent slices |
 |---|---|---|---|
-| Authentication | Accept application-level signed requests or retain protected API tokens; both LAN and Cloudflare routes are required. | User; open design decision | 3-7 |
+| Signing profile through proxies | Verify the specified signed components, body digest, persistent replay protection and key revocation through both routes. | Implementer/operator | 3 and deployment proof in 7 |
 | QNAP architecture/runtime | Recheck verified x86_64 platform/QTS/Container Station; run linux/amd64 image on NAS-local volume. | Operator | 7 |
 | TLS identity and routing | Supply LAN/public DNS names, matching trusted LAN certificate and Cloudflare route; verify both paths with strict client hostname checks. Existing QNAP certificate is insufficient. | Operator | 7 and real deployment |
 | Backend isolation | Select unused NAS loopback port, configure firewall protection and prove backend HTTP unreachable from another LAN machine on the installed Docker version. | Operator | 7 and real deployment |
 | Client registration | Create actor/client credentials once with private storage and revocation proof. | Operator | 5 and real deployment |
+| Clock synchronization | Keep client/NAS UTC synchronized within the specified signature window; verify clock errors and recovery. | Operator | 7 and real deployment |
 | Installed hook support | Verify Codex/Claude Code versions and silent context collection for supported shells; missing fields remain null. | Implementer | 2 |
 | Live migration | Explicitly selected projects, backups and a quiesced cutover. | User/operator | Real deployment only |
 
 ### Validation strategy
 
 All commands here describe planned proof. Every test supplies a unique temporary
-data root and synthetic credentials/certificates. No production store, token,
+data root and synthetic keys/certificates. No production store, private key,
 harness settings or installed global binary is modified for tests. Build release
 candidates into `target/server-candidate`, not the installed release target.
 
@@ -1562,8 +1608,10 @@ tests and local store behavior must remain compatible.
   ownership satisfy the security and operational contracts.
 - Proof: `cargo test --locked --features server --test server_transport`. Expect
   nonzero cases covering valid/private-CA TLS, wrong-host/expired/untrusted TLS,
-  missing/revoked tokens, secret-file permissions, actor spoofing, capacity and
-  second-server exclusion, all pass.
+  missing/revoked keys, tampered signed fields/body, wrong server UUID,
+  expired/future signatures, duplicate nonces including after restart,
+  replay capacity, fresh-signature reconciliation, key-file permissions, actor
+  spoofing, operation capacity and second-server exclusion, all pass.
 
 #### Slice 4: Serve shared task operations and recover duplicate requests
 
@@ -1633,9 +1681,9 @@ execution identity cannot be matched. Server transport/auth and application
 transactions are separate slices with distinct focused proof. No independent
 review or implementation proof is claimed.
 
-Canonical artifact: spec.md, this section. Readiness: Blocked for slices 3-7
-pending the user's authentication decision. Attribution slices 1-2
-are unaffected. NAS architecture and existing reverse proxy are verified;
+Canonical artifact: spec.md, this section. Readiness: Ready for implementation.
+The user accepted application-level key authentication on both access routes.
+NAS architecture and existing reverse proxy are verified;
 dual-route DNS/TLS provisioning, backend isolation and client registration remain
 execution prerequisites. Exact crate versions remain
 implementation selections. Begin with
