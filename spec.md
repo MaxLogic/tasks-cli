@@ -1106,18 +1106,20 @@ Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
 
 ## Rust server and automatic attribution
 
-Status: Blocked on remote access route and client authentication selection,
+Status: Blocked on client authentication selection,
 2026-10-02. Attribution slices 1-2 remain specified and can proceed independently.
 Verification below is planned.
 The user selected a Rust server in Docker on a QNAP NAS, online-only remote
 operation, HTTPS and authentication. The viewer continues to access tasks
 through the CLI. Routine implementation choices below were selected locally.
-The subsequent infrastructure review supersedes direct TLS termination in the
-Rust service: the NAS reverse proxy handles external HTTPS. Client key pairs
-were proposed by the user; mTLS is recommended for direct LAN/VPN access, but
-the access route and authentication replacement require a decision before slices 3-7.
+The user also selected both Cloudflare Tunnel and direct LAN access. The live
+infrastructure review supersedes the proposed Caddy addition: reuse the existing
+QTS reverse proxy for LAN HTTPS and the existing tunnel for public HTTPS.
+Client key pairs were proposed by the user. Application-level request signing
+is now recommended so the same credentials work through both routes; its
+replacement of the token baseline requires a decision before slices 3-7.
 
-### Verified NAS context and open decision
+### Verified NAS context and access routes
 
 Read `F:\projects\MaxLogic\qnap-nas-maintenance\` and `F:\projects\LAN\` for
 operational guidance. NAS notes identify a TS-473A at `10.77.77.13` with local
@@ -1125,35 +1127,62 @@ name `qnap.home.arpa`. Read-only WSL SSH on 2026-10-02 confirmed hostname
 `QNAP-NAS`, `x86_64`, platform `TS-X73A`, QTS `5.2.10` and Container Station
 `3.1.2.1742`. Build the server image for `linux/amd64`.
 Docker is at `/share/CACHEDEV1_DATA/.qpkg/container-station/bin/docker`.
-The existing `cloudflared-audiobookshelf` connector is running; no standalone
-Caddy, nginx or Traefik container appeared in the running-container inventory.
-This inventory does not establish whether QTS-native reverse-proxy rules exist.
+Docker reports `27.1.2-qnap8`. The `cloudflared-audiobookshelf` connector is
+running on the `abs-meta` Docker network. The user confirms the existing public
+route `audiobooks.maxlogic.app` serves Audiobookshelf; its dashboard routing was
+not inspected. No standalone Caddy, nginx or Traefik container is running.
 
-Recommended direct-access route: CLI HTTPS to a NAS-hosted Caddy reverse proxy,
-then HTTP to the Rust service over a dedicated Docker backend network. The Rust
-container has no published host port. Only the proxy joins the client-facing
-and backend networks; existing Audiobookshelf/metadata networks stay separate.
-The backend database mount is NAS-local, for example `/share/Container/tasks-cli`.
-Keep certificate management and external TLS in the proxy, and actor/machine
-authorization and audit in Rust.
+The QTS-native Apache reverse proxy is running with
+`/etc/reverseproxy/reverseproxy.conf`. Its persisted rules are in
+`/etc/config/reverseproxy/reverseproxy.json`, with generated virtual hosts in
+`/etc/reverseproxy/extra/`. Read-only inspection found:
 
-For key-pair authentication, recommend mTLS: a private key and client certificate
-per installation, with certificate identity mapped to actor/machine. Validate
-the client certificate at the TLS endpoint, overwrite any client-supplied identity
-headers, and authenticate the proxy-to-application identity assertion. Rust still
-checks registration/revocation before granting task access. Private keys remain
-client-local; never reuse the NAS administrator's SSH identity as an application
-credential. Certificate issuance, renewal and revocation need focused proof.
-This recommendation is not yet an accepted replacement for the token baseline below.
+| Existing HTTPS source | Destination | Observation |
+|---|---|---|
+| `maxlogic.myqnapcloud.com:443` | `https://localhost:2443/` | NAS administration rule; both listeners are active. |
+| `maxlogic.myqnapcloud.com:2001` | `http://localhost:49156/` | Old Audiobookshelf rule; destination connection failed. Current container responds with HTTP 200 on host port 32768. |
 
-Decision owner: user. Question: will clients connect directly over LAN/VPN or
-through a public Cloudflare hostname, and should per-client certificates replace
-API tokens? Direct mTLS terminates at the NAS proxy. Cloudflare-proxied HTTPS
-terminates at Cloudflare and requires a separately configured client-authentication
-policy there; a normal tunnel does not deliver the original client TLS handshake
-to the local proxy. Keep slices 3-7 blocked until this boundary is selected.
-References: [Caddy client authentication](https://caddyserver.com/docs/caddyfile/directives/tls)
-and [Cloudflare mTLS](https://developers.cloudflare.com/api-shield/security/mtls/).
+The certificate served on port 443 for `maxlogic.myqnapcloud.com` is the
+self-signed QNAP certificate, subject CN `QNAP NAS`, with no subject alternative
+names. It is valid by date through 2032 but does not meet the CLI's trusted,
+matching-hostname requirements. Provision a matching trusted LAN certificate
+before deployment readiness. Preserve existing routes when changing certificates;
+do not edit QTS-generated Apache files directly.
+
+Required task-service routes:
+
+| Route | TLS endpoint | Origin path |
+|---|---|---|
+| Direct LAN | Existing QTS reverse proxy, with matching trusted certificate | NAS loopback-only published port to the Rust container's HTTP port 8080. |
+| Public hostname | Cloudflare HTTPS edge through the existing tunnel | Connector reaches `tasks-server:8080` by Docker DNS on a dedicated tasks network. |
+
+Add a task-service hostname/rule to the existing tunnel and attach its connector
+to the dedicated tasks network. The Rust service joins only that network, not
+`abs-meta`. Keep existing Audiobookshelf routes and networks intact. Bind the
+NAS-side backend port only to `127.0.0.1`; choose an unused port during deployment.
+Docker before 28 has a documented same-L2 localhost-publication exposure risk.
+Require host firewall protection and proof from a separate LAN machine that
+direct backend HTTP is unreachable; loopback binding alone is not isolation proof.
+The database mount is NAS-local, for example `/share/Container/tasks-cli`.
+
+Recommend per-installation Ed25519 keys with automatic HTTP request signing
+verified by Rust, using RFC 9421 rather than an invented signing protocol.
+Private keys remain client-local; the server stores registered public keys and
+maps them to actor/machine identities. Both routes use the same application
+authentication and revocation checks. The CLI supplies signatures automatically,
+without extra AI arguments. Never reuse the NAS administrator's SSH key.
+This proposal is not yet an accepted replacement for the token baseline below.
+Before implementation, specify signed components, body integrity, request/server
+binding, freshness/replay limits and proxy header preservation in this section.
+Do not carry the earlier direct-only mTLS recommendation forward as a requirement.
+
+Decision owner: user. Question: accept per-installation signed requests, or retain
+protected API tokens? Both LAN and Cloudflare access are settled requirements.
+Keep slices 3-7 blocked on authentication selection.
+References: [QNAP reverse proxy](https://www.qnap.com/en/how-to/tutorial/article/how-to-use-reverse-proxy-to-improve-secure-remote-connections),
+[Cloudflare published applications](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/),
+[Docker port publishing](https://docs.docker.com/engine/network/port-publishing/)
+and [HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421.html).
 
 ### Goals and boundaries
 
@@ -1203,11 +1232,14 @@ project name, never requires `F:\...` paths to exist on another machine.
 
 ### HTTPS and authentication
 
-- The NAS reverse proxy terminates client-facing TLS 1.2 or newer. The Rust
-  service listens on HTTP port 8080 only on its private Docker backend network,
-  with no host port publication. Certificate/key mounts belong to the proxy.
-  Missing or invalid proxy TLS/auth configuration prevents deployment readiness.
-  Require application authentication even on this internal HTTP listener.
+- QTS terminates LAN-facing TLS and Cloudflare terminates public-facing TLS,
+  using TLS 1.2 or newer. The Rust service listens on HTTP port 8080 on its
+  dedicated Docker network, with a NAS loopback-only publication for QTS.
+  NAS firewall/isolation proof is required as specified above. QTS manages its
+  own certificate inputs; Cloudflare manages the public endpoint certificate.
+  Missing or invalid TLS/auth configuration prevents deployment readiness.
+  Require the same application authentication on both routes and on the
+  internal HTTP listener. Ignore unverified proxy identity headers.
 - The CLI requires an `https://` URL, checks certificate validity and hostname,
   and permits an explicitly configured private CA file. No insecure bypass.
   Reject cross-origin redirects and never forward credentials to another origin.
@@ -1307,7 +1339,11 @@ receipt is recovery evidence, not an offline write queue.
 
 Add explicit one-time `tasks remote configure` setup. Store the active backend,
 server URL, credential-file path, optional private-CA path and timeout settings
-in `<data-root>/client.toml`. Token content stays in its separate protected file.
+in `<data-root>/client.toml`. Credential secrets stay in a separate protected file.
+Each installation selects its LAN or public HTTPS endpoint once. Both reach the
+same server and project authority. Automatic endpoint failover is outside this
+version; changing the configured endpoint must preserve pending receipt identity
+and verify the same server identity before reconciliation.
 Default is local when that file is absent. An invalid remote configuration fails
 closed. A synthetic `--data-root` without configuration remains local even if
 the real user profile is remote. Do not introduce implicit global environment
@@ -1422,9 +1458,10 @@ name while retaining distinct installation IDs and credentials.
 
 Provide a multistage Dockerfile, a Compose example and a QNAP Container Station
 runbook. Run as a configured non-root UID/GID, with a read-only root filesystem,
-writable `/data` and a bounded temporary directory. Mount certificate/key inputs
-read-only into the proxy, and credential provisioning inputs into their owning
-component. Image contains no secrets or task data.
+writable `/data` and a bounded temporary directory. Keep QTS TLS certificate
+inputs under QTS management and tunnel credentials in the existing connector.
+Provide credential provisioning inputs only to their owning component. Image
+contains no secrets or task data.
 No privileged mode or Docker socket mount. Set restart policy and graceful-stop
 timeout explicitly. Retain the existing Windows x64 and native Linux x64 builds;
 build the server image for the verified `linux/amd64` NAS and execute its smoke
@@ -1449,9 +1486,10 @@ only with explicit selection of the authoritative data.
 
 | Item | Required condition / check | Owner | Dependent slices |
 |---|---|---|---|
-| Access route and authentication | Select LAN/VPN versus Cloudflare endpoint and accept token or client-certificate authentication. | User; open design decision | 3-7 |
+| Authentication | Accept application-level signed requests or retain protected API tokens; both LAN and Cloudflare routes are required. | User; open design decision | 3-7 |
 | QNAP architecture/runtime | Recheck verified x86_64 platform/QTS/Container Station; run linux/amd64 image on NAS-local volume. | Operator | 7 |
-| TLS identity | Supply DNS name/address, matching certificate/key and trusted CA; verify client hostname checks. | Operator | 7 and real deployment |
+| TLS identity and routing | Supply LAN/public DNS names, matching trusted LAN certificate and Cloudflare route; verify both paths with strict client hostname checks. Existing QNAP certificate is insufficient. | Operator | 7 and real deployment |
+| Backend isolation | Select unused NAS loopback port, configure firewall protection and prove backend HTTP unreachable from another LAN machine on the installed Docker version. | Operator | 7 and real deployment |
 | Client registration | Create actor/client credentials once with private storage and revocation proof. | Operator | 5 and real deployment |
 | Installed hook support | Verify Codex/Claude Code versions and silent context collection for supported shells; missing fields remain null. | Implementer | 2 |
 | Live migration | Explicitly selected projects, backups and a quiesced cutover. | User/operator | Real deployment only |
@@ -1572,11 +1610,14 @@ tests and local store behavior must remain compatible.
   synthetic migration/container proof helper. Reviewer lens: operational recovery.
 - Outcome: non-root container retains all data across restart; TLS/auth secrets
   remain outside image; backup/restore rehearsal preserves exact project history;
-  NAS architecture/runtime and proxy TLS provisioning checks are explicit.
+  NAS architecture/runtime, both HTTPS routes, proxy TLS provisioning and LAN
+  backend isolation checks are explicit. Public and LAN clients reach the same
+  server identity and enforce the same credential revocation.
 - Proof: proposed `python integration/verify_server_container.py --fixture-root
   <new-empty-absolute-directory>` drives the built candidate with two client
   profiles, synthetic TLS/auth and a NAS-local container volume. Expect nonzero
-  named cases, all pass: concurrent edits, revoke, restart, response-loss recovery,
+  named cases, all pass: LAN/public endpoint authentication, direct backend
+  isolation, concurrent edits, revoke on both routes, restart, response-loss recovery,
   backup/restore and exact UUID/task/version/event comparisons. Repeat the
   container smoke procedure on the actual NAS before claiming QNAP support.
 
@@ -1593,9 +1634,10 @@ transactions are separate slices with distinct focused proof. No independent
 review or implementation proof is claimed.
 
 Canonical artifact: spec.md, this section. Readiness: Blocked for slices 3-7
-pending the user's access-route/authentication decision. Attribution slices 1-2
-are unaffected. NAS architecture is verified; proxy TLS provisioning and client
-registration remain execution prerequisites. Exact crate versions remain
+pending the user's authentication decision. Attribution slices 1-2
+are unaffected. NAS architecture and existing reverse proxy are verified;
+dual-route DNS/TLS provisioning, backend isolation and client registration remain
+execution prerequisites. Exact crate versions remain
 implementation selections. Begin with
 the [implementation slices](#implementation-slices), using rust-engineering,
 rust-testing and resolve-task when slices have durable task records. Offline
