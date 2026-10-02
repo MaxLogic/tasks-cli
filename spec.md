@@ -4,6 +4,11 @@ Status: implementation contract and verification basis, updated 2026-09-15.
 The behavioral requirements below remain normative; implementation and
 performance results are recorded separately in verification-report.md.
 
+The [Rust server and automatic attribution extension](#rust-server-and-automatic-attribution)
+was specified on 2026-10-02 from the user's accepted direction. Its behavior is
+planned, not installed or verified. It supersedes the local-only restrictions
+for explicitly configured remote profiles; existing local behavior remains normative.
+
 ## Context and goals
 
 Large TASKS.md files encourage unnecessary context loading and contend during
@@ -18,7 +23,7 @@ updates, and retains recoverable history. A project has one backlog across all
 branches and explicitly registered worktrees. Preserve Markdown descriptions,
 acceptance criteria, proof notes and external references without interpretation.
 
-Non-goals: network service, multi-machine sync, GUI, LLM calls, embeddings, arbitrary
+Non-goals: offline synchronization, LLM calls, embeddings, arbitrary
 SQL commands, agents with enforced filesystem isolation, Git branch task versions,
 automatic code execution from task content, and automatic live-project migration.
 The executable does not need an interpreter or separately installed SQLite at
@@ -35,8 +40,10 @@ This is a maintenance choice, not a claim that Rust queries outperform Go/Delphi
 Use `clap` derive for arguments, `rusqlite` with bundled SQLite and backup support,
 `serde`/`serde_json` for contracts, a small typed error enum, and `tempfile` for
 tests/owned temporary artifacts. UUID generation and SHA-256 for project/import
-identity may use focused crates. Do not add an ORM, Tokio, SQLx, DI container or
-workspace crates. Verify current versions/features/MSRV before selecting them;
+identity may use focused crates. Do not add an ORM, SQLx, DI container or workspace
+crates. Keep Tokio out of the local CLI and SQLite layer. The server extension permits its named HTTP/TLS
+dependencies and Tokio for the server transport; synchronous database work and
+the local CLI do not gain an async runtime. Verify versions/features/MSRV before selecting them;
 pin the verified stable toolchain and commit Cargo.lock during implementation.
 
 Primary API references, checked for this design:
@@ -1079,7 +1086,8 @@ explicit binding; mixed Windows/WSL database access excluded; historical Markdow
 ambiguity blocks import; rules are returned with tasks; backup uses SQLite API;
 concurrent updates require versions. No live migration is included in this work.
 
-Deferred: additional Linux distributions/architectures, network sync, claims/leases for agent task
+Deferred: additional Linux distributions/architectures outside the server's QNAP
+deployment target, offline sync, claims/leases for agent task
 ownership, Unicode search folding, automatic backup retention, hard deletion and
 import into a nonempty backlog. Version checks prevent lost updates but do not
 prevent two agents doing duplicate engineering work; task claiming is a later
@@ -1095,3 +1103,456 @@ Canonical artifact: `spec.md`. Implementation and verification state belongs in
 verification-report.md, not in this behavioral contract. Build:
 `cargo build --release --locked`; tests: `cargo test --locked`.
 Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
+
+## Rust server and automatic attribution
+
+Status: Ready for implementation, 2026-10-02. Verification below is planned.
+The user selected a Rust server in Docker on a QNAP NAS, online-only remote
+operation, HTTPS and authentication. The viewer continues to access tasks
+through the CLI. Routine implementation choices below were selected locally.
+
+### Goals and boundaries
+
+- Multiple machines use one authoritative backlog per project UUID through
+  an HTTPS JSON API. All SQLite access for those backlogs occurs on the server.
+- Every persisted mutation records actor, machine, harness and available
+  session context atomically. Normal CLI calls require no attribution arguments.
+- Keep current task semantics, keyed IDs, pagination, version conflicts,
+  completion guards, complete descriptions and CLI/viewer output contracts.
+- Remote reads and writes require a live connection. No offline queue, cached
+  task reads or fallback to a local project database is provided.
+- Existing local mode remains available as an explicitly selected backend for
+  current installations and synthetic verification. It is never an outage fallback.
+- No live backlog migration, NAS deployment, credential installation or harness
+  configuration change is authorized by this design document alone. Migration
+  preparation and acceptance use copies until the user selects the real cutover.
+- Remote filesystem maintenance, remote bulk Markdown migration, OAuth/SSO,
+  web UI, task leases and automatic certificate issuance are outside this version.
+
+### Components and ownership
+
+Keep one Cargo package and the existing library. Add `tasks-server` behind a
+`server` Cargo feature, plus shared application dispatch, remote transport and
+attribution modules. Use Axum/Tokio for HTTP, rustls for TLS, a synchronous HTTP
+client with certificate validation for the CLI, and existing rusqlite storage.
+Verify and lock exact compatible dependency versions during implementation.
+Do not wrap CLI subprocesses inside the server or duplicate task validation.
+
+SQLite operations remain synchronous on bounded blocking workers. Allow eight
+in-flight application operations by default; requests wait at most one second
+for a permit and receive an actionable 503 if capacity is unavailable. Keep the
+five-second SQLite busy timeout, `synchronous=FULL`, one connection per operation
+and existing transaction boundaries. Reject new writes during graceful shutdown;
+allow admitted writes to finish before exit, with a 30-second shutdown deadline.
+After forced termination, SQLite recovery determines whether a write committed.
+
+Run one server instance for a data root. Hold an exclusive process lock for its
+lifetime, reject a second instance, and make server administration respect that
+ownership. Store project databases on NAS-local disk mounted into the container
+at `/data`, never on SMB/NFS mounts or in the image layer. The QNAP disk is local
+to the server even though client machines cannot access its databases directly.
+Keep server identity/auth state separately at `/data/server.sqlite` with migrations.
+
+Portable `.tasks.json` remains exactly the project UUID. Client workspace paths
+stay client-local; the server catalog contains UUID, project key and readable
+project name, never requires `F:\...` paths to exist on another machine.
+
+### HTTPS and authentication
+
+- The Rust server terminates TLS itself, listening at container port 8443.
+  Load a PEM certificate chain and private key from read-only secret mounts.
+  Serve TLS 1.2 or newer. Refuse startup if TLS or auth configuration is missing
+  or invalid. Do not expose an unauthenticated HTTP application listener.
+- The CLI requires an `https://` URL, checks certificate validity and hostname,
+  and permits an explicitly configured private CA file. No insecure bypass.
+  Reject cross-origin redirects and never forward credentials to another origin.
+- Use opaque bearer credentials generated from 32 random bytes. Issue one
+  credential per registered client installation. A credential identifies an
+  actor ID/name and registered machine ID/name; the server derives authoritative
+  actor and machine IDs from it, ignoring client attempts to replace them.
+- Keep only a SHA-256 token digest on the server. Store the plaintext token in
+  a client-owned file, not arguments, repository files or logs. Require mode
+  0600 on Unix and access restricted to the owning user plus system/admin on
+  Windows. A missing or insecure token file prevents remote operation.
+- Provision/revoke credentials through `tasks-server admin` commands executed
+  on the server, not through an HTTP admin endpoint. Admin writes use the same
+  server process ownership lock; stop the service first. Record the OS actor
+  and affected credential identity in append-only admin audit events. Never
+  store the token itself in that audit. A revoked credential receives 401 on
+  subsequent requests; replacing a token does not erase its history identity.
+- Credentials grant read/write access to the owner's server backlogs in this
+  initial single-owner service. Separate project permissions are deferred.
+- Authenticate before revealing project existence or reading request content
+  beyond bounded protocol parsing. Return structured 401 errors without secrets.
+  Disable browser CORS access by default. Limit application request bodies to
+  8 MiB, matching the existing viewer request ceiling.
+- Log request ID, actor ID, project UUID, operation, duration and outcome.
+  Exclude authorization headers, token values, task bodies, prompts, full
+  environment dumps, session titles and executable command lines from logs.
+
+### API and transport contract
+
+Use `/v1` JSON routes and typed shared request/result structures. Requests carry
+an attribution object with client-reported context. Reads may carry it for
+operational tracing but do not create history or change stored attribution.
+
+| Route | Operations |
+|---|---|
+| `GET /v1/info` | Authenticated protocol capabilities and server readiness |
+| `GET /v1/projects` | Bounded project catalog and existing viewer statistics |
+| `POST /v1/projects` | Explicit project creation, UUID, name and optional user-selected key |
+| `POST /v1/projects/{uuid}/query` | Typed list, show-many, search, unlocks, history, rules, project-key and viewer read requests |
+| `POST /v1/projects/{uuid}/tasks` | Create task |
+| `PATCH /v1/projects/{uuid}/tasks/{id}` | Update task with `expect_version` |
+| `PUT /v1/projects/{uuid}/rules` | Change rules with `expect_version` |
+| `PUT /v1/projects/{uuid}/key` | User-selected key change, preserving existing collision checks |
+| `GET /v1/projects/{uuid}/export` | Existing Markdown export generated on the server and written locally by the client |
+
+The query body is a tagged enum of supported reads, not arbitrary SQL or command
+execution. Viewer `info`, catalog and typed read/write requests map to these
+routes and retain current stdout JSON and error payloads. Clipboard enrichment
+and file output remain client-local; task/key lookups use the chosen backend.
+`bind` writes only client workspace routing and does not create server history.
+Remote `import`, `bulk-import`, `backup`, `migrate` and `doctor` return an explicit
+unsupported-remote-operation error before touching local databases. Corresponding
+maintenance runs under server administration on copied/server-local data.
+
+Keep existing list/search/history limits and cursor semantics. Require a valid
+UUID and allow-listed read operation. Unknown projects/tasks return 404, malformed
+or invalid operations 400, oversized requests 413, version conflicts 409, and
+capacity/lock exhaustion 503. Errors preserve existing application codes and
+expected/current versions; CLI maps them to existing exit conventions, with
+transport/auth failures using storage/service exit 5 and distinct JSON codes.
+Use UUID plus numeric task ID for routing; keyed input is resolved against that
+project's current key through existing validation.
+
+Remote task and rules updates still require `--expect-version`. Never retry a
+conflict automatically. Before any write, the client generates a request UUID
+and includes it in `Idempotency-Key`. Persist its result in the affected project
+database in the same transaction as the mutation and history. Same authenticated
+actor/machine, route and key with the same canonical request returns the original
+result; a different request under that key returns 409 without a mutation. Exclude
+volatile request timestamps from the canonical payload. Check deduplication
+before checking the entity's now-incremented version. Retain write receipts for
+the lifetime of the database in this version.
+Terminal application refusals, including validation/version conflicts, also
+retain their original result without a task/rules mutation event. Replaying a
+refused request must not apply it later after prerequisites change. Auth failures
+and transient capacity/lock exhaustion are not persisted as mutation receipts.
+
+Project creation cannot atomically span the server catalog and a new database.
+Create the project under the existing registry ownership lock, with its creation
+receipt in the project database. Publish the validated catalog binding last.
+A retry reconciles the same UUID/receipt and repairs only that incomplete binding;
+it never creates a second project. Conflicting identities/keys fail explicitly.
+
+The CLI uses a three-second connection timeout and a 15-second request timeout,
+both configurable once per profile. It makes no automatic write retries. Persist
+a pending write's key and canonical request before sending, with owner-only
+permissions; confirmed responses remove it. If the response is lost, report an
+unknown write outcome and the receipt ID, without claiming failure or success.
+`tasks remote reconcile <request-id>` resends that exact stored request/key,
+returning the committed result or safely executing it once. A definitively refused
+write remains refused; reconciliation never rebases its expected version. This
+receipt is recovery evidence, not an offline write queue.
+
+### Client configuration and viewer compatibility
+
+Add explicit one-time `tasks remote configure` setup. Store the active backend,
+server URL, credential-file path, optional private-CA path and timeout settings
+in `<data-root>/client.toml`. Token content stays in its separate protected file.
+Default is local when that file is absent. An invalid remote configuration fails
+closed. A synthetic `--data-root` without configuration remains local even if
+the real user profile is remote. Do not introduce implicit global environment
+routing that can turn local test fixtures into server traffic.
+
+Ordinary commands then remain `tasks list`, `tasks show TSK-012` and
+`tasks update TSK-012 --expect-version N --status done`. No server or attribution
+flags are required per call. Local identity discovery selects the UUID; the
+remote server decides whether that project exists. Selecting remote mode must
+not open a leftover local `TASKS.sqlite` for reads, writes or readiness checks.
+Existing remote setup is not inferred from database files or Git remotes.
+
+For WSL, an explicitly configured remote profile selects native HTTPS access
+before Windows-store delegation. A local profile retains current delegation
+rules. If a local delegated mutation is attributed, collect its context in the
+originating Linux process and carry it through a versioned, hidden delegation
+envelope. Windows validates that envelope and preserves its origin; it must not
+misidentify the Windows tasks.exe child as the original harness or session.
+
+The viewer keeps CLI subprocess access. Its data root selects the same profile;
+`viewer info` probes server capability and its catalog reads server projects.
+Preserve the viewer JSON protocol, refusal payloads, superseded-read cancellation
+and acknowledgement-loss reconciliation. A viewer write whose CLI response is
+lost is reconciled with the pending request receipt before another write is
+allowed; reading a matching task version alone does not establish who committed
+it. The CLI owns remote receipts, with only the minimal viewer wiring needed to
+pass their identity through existing reconciliation. Viewer recovery drafts may
+remain local, but remote task state is never presented as current during an outage.
+
+### Automatic mutation attribution
+
+Store a versioned attribution JSON value on each existing history event. Legacy
+events have null attribution; migration must not invent their authors. New task,
+rules, key, import and project-creation mutations carry context through the shared
+application layer into the same database transaction. Add append-only metadata
+events where existing project/key changes lack task history; do not manufacture
+extra task update events or change task versions solely to add attribution.
+No-op operations and refused writes create no task/rules mutation event.
+
+| Field | Collection and authority |
+|---|---|
+| `actor_id`, `actor_name` | Remote: server credential identity. Local: observed OS account identity/name, explicitly labeled local/unverified. |
+| `machine_id` | Remote: registered credential's persistent client installation UUID. Local: installation UUID created during explicit setup. |
+| `machine_name` | OS hostname observed at invocation, client-reported; retain the registered name separately when it differs. |
+| `harness` | `codex`, `claude-code`, `viewer`, `manual` or `unknown`, with detection source. |
+| `harness_version` | Available allow-listed environment/hook value; optional. |
+| `session_id`, `session_name` | Exact harness-reported session identifier and optional name; never inferred from the OS login session. |
+| `model`, `agent_id` | Optional active model/subagent identity from a matching hook context. |
+| `caller_executable`, `harness_executable` | Immediate parent's executable basename and recognized ancestor basename; optional, client-reported. |
+| `request_id`, `created_ms` | Invocation UUID and existing server/database UTC event timestamp. |
+| `context_source` | Per-field source: OS, environment, hook or unavailable. |
+
+Snapshot names on the event, so later renames do not relabel old changes. History
+text/JSON and viewer details expose attribution; compact list/mutation output
+does not repeat it. SQLite backups retain attribution JSON and JSON history
+includes it; Markdown exports remain descriptions, not full audit recovery artifacts.
+Harness/session/model reports are attribution clues, not authenticated proof that
+a particular model performed a change.
+
+Detection rules:
+
+1. Recognize a direct viewer invocation first; an inherited Codex environment
+   from whoever launched the GUI must not attribute later manual GUI changes to
+   that old session. Use `viewer`, with null AI session/model.
+2. Prefer a hook context matching the current harness/session. In this session,
+   `CODEX_THREAD_ID`, `CODEX_SESSION_ID` and `CODEX_VERSION` are present. Use
+   nonempty `CODEX_THREAD_ID` as the Codex conversation ID, falling back to
+   `CODEX_SESSION_ID`; do not assume other installations export both. Capture
+   both separately when they differ. Environment presence identifies reported
+   origin, not a trusted author. Never read API-key environment variables.
+3. For Claude Code, ship an optional SessionStart integration that reads hook
+   stdin and persists session ID, optional `model` and `session_title`. Publish
+   a context-file pointer through `CLAUDE_ENV_FILE` where supported. Supplement
+   with silent PreToolUse refreshes for tools that can mutate tasks, so model
+   changes do not leave stale attribution. Document and verify Bash and native
+   PowerShell behavior on installed versions; no claim of universal inheritance.
+4. For Codex, ship an optional silent hook adapter using common hook `session_id`
+   and `model` fields. Do not assume an undocumented environment-publication
+   feature. Write a context file indexed by harness/session, allowing tasks to
+   find it using the already exported session ID. Hook subagents can report a
+   parent session ID; retain supplied agent ID separately and never invent one.
+   Do not publish subagent model context over a parent session's model record.
+5. Context files are per session under a private client configuration directory,
+   written atomically. No shared "current session" file. Validate schema, size
+   (at most 16 KiB) and matching session before reading. Concurrent sessions
+   cannot overwrite each other's context. A hook can publish a private pointer
+   via `TASKS_CONTEXT_FILE`; this is setup/inherited environment, not per-call AI
+   arguments. Return no additionalContext or routine stdout to the model.
+   Store agent/execution contexts separately when the harness exposes a matching
+   identity or an inherited pointer. If an invocation cannot distinguish a
+   parent session from concurrent agents, leave its model/agent fields null;
+   the latest session-wide hook file is not evidence of that invocation's model.
+6. Inspect at most eight process ancestors through native Rust platform support,
+   bounded to 100 ms in total. Use OS process IDs/start times to detect exited
+   or reused parents. Shell wrappers mean the direct parent may be pwsh/bash;
+   walk upward for codex/claude/viewer. A generic node/python ancestor is not
+   enough to identify a harness. Permissions/timeouts yield unavailable fields
+   and never block a valid mutation. No WMI subprocess, full process inventory,
+   executable arguments, environment dump or transcript scan per call.
+7. If metadata cannot be obtained, retain null values and `unknown` harness
+   when origin is inconclusive. `manual` requires a direct known terminal/GUI
+   context, not merely absent session variables. Do not use a global configured
+   model as evidence of the current invocation's model. Session names remain
+   optional; do not derive names by reading prompt content.
+
+Hook configuration is an explicit one-time integration step. Ship examples and
+a previewable setup helper; do not rewrite user harness settings automatically.
+Windows/WSL installations may be registered under the same physical machine
+name while retaining distinct installation IDs and credentials.
+
+### Docker, migration and recovery
+
+Provide a multistage Dockerfile, a Compose example and a QNAP Container Station
+runbook. Run as a configured non-root UID/GID, with a read-only root filesystem,
+writable `/data` and a bounded temporary directory. Mount certificate/key and
+credential provisioning inputs read-only. Image contains no secrets or task data.
+No privileged mode or Docker socket mount. Set restart policy and graceful-stop
+timeout explicitly. Retain the existing Windows x64 and native Linux x64 builds;
+build the server image for the NAS's actual architecture and execute its smoke
+proof there. NAS model/CPU and installed Container Station version are deployment
+prerequisites, not guessed architecture facts.
+
+Migration rehearsals preserve project UUIDs/keys, task IDs, counters, versions,
+descriptions, dependencies, imports and existing event IDs/snapshots. Use SQLite
+online backup or quiesced verified copies, never copy only a live main DB file.
+Back up the server catalog/auth database as well as project databases. Keep
+machine-local bindings separate. Export evidence of counts, hashes, integrity,
+foreign-key checks and selected exact task/history comparisons on copies.
+
+At real cutover, explicitly stop local writers, take final verified backups,
+install the server copy and configure clients for remote access. Retain local
+snapshots read-only for rollback; do not continue two writable authorities for
+one project UUID. Before server writes, rollback can restore the old profile.
+After server writes, first quiesce the server and take its verified current
+backup; reverting to an older local snapshot would lose those writes. Restore
+only with explicit selection of the authoritative data.
+
+### Risks and execution prerequisites
+
+| Item | Required condition / check | Owner | Dependent slices |
+|---|---|---|---|
+| QNAP architecture/runtime | Record NAS CPU architecture and Container Station version; run the matching image on NAS-local volume. | Operator | 7 |
+| TLS identity | Supply DNS name/address, matching certificate/key and trusted CA; verify client hostname checks. | Operator | 7 and real deployment |
+| Client registration | Create actor/client credentials once with private storage and revocation proof. | Operator | 5 and real deployment |
+| Installed hook support | Verify Codex/Claude Code versions and silent context collection for supported shells; missing fields remain null. | Implementer | 2 |
+| Live migration | Explicitly selected projects, backups and a quiesced cutover. | User/operator | Real deployment only |
+
+### Validation strategy
+
+All commands here describe planned proof. Every test supplies a unique temporary
+data root and synthetic credentials/certificates. No production store, token,
+harness settings or installed global binary is modified for tests. Build release
+candidates into `target/server-candidate`, not the installed release target.
+
+Run focused slice proofs first. After slices 1-5 stabilize, perform one local
+correctness/security review, then one batch of Windows and native Linux fmt,
+clippy and test checks with `--features server`. After slices 6-7, perform one
+final batch on the frozen complete candidate with those same checks, release
+builds and Docker/two-client proof. Total broad checkpoints: two, project-wide
+cost; QNAP runtime proof is a separate deployment prerequisite. Retain logs and
+candidate hashes under ignored `target/evidence/`. A passing Windows build or
+ARM cross-build is not native Linux/NAS runtime proof.
+
+Final Rust commands: `cargo fmt --check`,
+`cargo clippy --locked --all-targets --features server`,
+`cargo test --locked --features server`,
+`cargo build --release --locked --features server --target-dir target/server-candidate`.
+Linux uses its own Linux-owned Cargo target directory and temporary databases.
+Schedule the existing viewer broad gate once for the final viewer candidate if
+its production sources or bundled CLI change. Do not repeat broad gates per task.
+
+### Implementation slices
+
+The following test targets and modules are proposed additions. The existing
+tests and local store behavior must remain compatible.
+
+#### Slice 1: Persist attribution with every mutation
+
+- Touches: src/model.rs, src/store.rs, migrations/, history/output, proposed
+  tests/attribution.rs. Reviewer lens: transaction and migration integrity.
+- Outcome: versioned nullable legacy attribution, new context on every mutation
+  path, metadata events for project/key changes, unchanged no-op/conflict behavior,
+  history rendering and complete audit backup recovery.
+- Proof: from repo root, `cargo test --locked --test attribution` with an explicit
+  unique fixture root supplied by that test harness. Expect nonzero selected
+  cases covering migration, task/rules/key/import and rollback, all pass; a
+  refused write leaves task, version and event count unchanged.
+
+#### Slice 2: Collect context automatically and integrate hooks
+
+- Deps: slice 1. Touches: proposed attribution module, interop context envelope,
+  integration hook examples/setup preview, proposed tests/attribution_detection.rs.
+  Reviewer lens: attribution accuracy, privacy and invocation cost.
+- Outcome: OS machine/account, bounded caller ancestry, Codex environment and
+  concurrent per-session hook context feed writes without per-call arguments;
+  viewer/manual, WSL origin and missing/model-changed contexts remain accurate.
+- Proof: `cargo test --locked --test attribution_detection`. Expect nonzero
+  selected cases including two simultaneous sessions and stale/wrong context,
+  all pass. Manual: start isolated Codex and Claude Code sessions with previewed
+  adapters and temporary profile roots; issue ordinary task writes, including a
+  model switch. Compare resulting history with hook payloads, ensure no metadata
+  arguments or hook additionalContext entered the conversation.
+
+#### Slice 3: Establish HTTPS and authenticated server ownership
+
+- Deps: slice 1. Touches: proposed server transport/auth modules, Cargo feature
+  and binary, server auth migrations, proposed tests/server_transport.rs.
+  Reviewer lens: authorization, secret handling and resource ownership.
+- Outcome: configured HTTPS listener and authenticated info route, credential
+  provisioning/revocation with admin audit, capacity bounds and exclusive data-root
+  ownership satisfy the security and operational contracts.
+- Proof: `cargo test --locked --features server --test server_transport`. Expect
+  nonzero cases covering valid/private-CA TLS, wrong-host/expired/untrusted TLS,
+  missing/revoked tokens, secret-file permissions, actor spoofing, capacity and
+  second-server exclusion, all pass.
+
+#### Slice 4: Serve shared task operations and recover duplicate requests
+
+- Deps: slices 1 and 3. Touches: proposed application/HTTP modules,
+  project receipts/catalog recovery and proposed tests/server_api.rs.
+  Reviewer lens: concurrent transaction behavior and crash recovery.
+- Outcome: specified API reuses local rules and authenticated identity;
+  concurrent version checks and atomic idempotency receipts prevent duplicate
+  mutations, explicit creation and crash recovery preserve catalog ownership.
+- Proof: `cargo test --locked --features server --test server_api`. Expect nonzero
+  cases covering task/rules/key operations, malformed/oversized queries, stale
+  writes, conflicting receipt payloads, response loss/replay, competing creates
+  and interrupted catalog publication, all pass.
+
+#### Slice 5: Route the CLI through the remote profile
+
+- Deps: slices 2 and 4. Touches: src/cli.rs, src/main.rs, registry/interop, proposed
+  remote transport/config module and tests/remote_cli.rs. Reviewer lens: compatibility.
+- Outcome: ordinary CLI commands and errors work remotely, explicit setup stores
+  private credentials, local and WSL profiles obey routing rules, reconciliation
+  recovers unknown write outcomes, outage never opens a local database.
+- Proof: `cargo test --locked --features server --test remote_cli`. Expect real
+  subprocess cases with two client roots and a temporary TLS server all pass;
+  outage leaves a poisoned leftover local database byte-identical; recovered
+  response loss creates exactly one task/version increment/event.
+
+#### Slice 6: Preserve viewer flows through the remote CLI
+
+- Deps: slice 5. Touches: src/viewer.rs and owning viewer data/reconciliation
+  surfaces only where required; proposed tests/remote_viewer.rs and
+  viewer/test/remote/remote_cli_flow_test.dart. Reviewer lens: accessible recovery.
+- Outcome: remote catalog, selection, history and writes retain current CLI JSON;
+  blocked completion, attribution display, outage feedback and pending-write
+  reconciliation work without a direct viewer HTTP client.
+- Proof: `cargo test --locked --features server --test remote_viewer` and, from
+  viewer/, `flutter test test/remote/remote_cli_flow_test.dart`. Expect nonzero
+  selected cases all pass, including response loss and clear outage feedback.
+  Manual: isolated packaged viewer/NVDA fixture verifies spoken service failure,
+  stable focus and successful retry/reconciliation after server restoration.
+
+#### Slice 7: Package for QNAP and rehearse data cutover
+
+- Deps: slices 3-6. Touches: proposed Dockerfile, compose.yaml, server runbook and
+  synthetic migration/container proof helper. Reviewer lens: operational recovery.
+- Outcome: non-root container retains all data across restart; TLS/auth secrets
+  remain outside image; backup/restore rehearsal preserves exact project history;
+  NAS architecture/runtime and TLS provisioning checks are explicit.
+- Proof: proposed `python integration/verify_server_container.py --fixture-root
+  <new-empty-absolute-directory>` drives the built candidate with two client
+  profiles, synthetic TLS/auth and a NAS-local container volume. Expect nonzero
+  named cases, all pass: concurrent edits, revoke, restart, response-loss recovery,
+  backup/restore and exact UUID/task/version/event comparisons. Repeat the
+  container smoke procedure on the actual NAS before claiming QNAP support.
+
+### Review disposition and handoff
+
+A local architecture/operator challenge pass found and incorporated these defects:
+viewer-inherited harness variables could misattribute manual changes; a lost
+write acknowledgement could duplicate work; two machines could keep separate
+writable copies after cutover; project creation spans catalog and project storage;
+and a shared current-session/model file would mix concurrent sessions or agents.
+The contracts above address each, including nullable model attribution when the
+execution identity cannot be matched. Server transport/auth and application
+transactions are separate slices with distinct focused proof. No independent
+review or implementation proof is claimed.
+
+Canonical artifact: spec.md, this section. Readiness: Ready for implementation;
+NAS architecture, TLS provisioning and client registration are named execution
+prerequisites. Exact crate versions remain implementation selections. Begin with
+the [implementation slices](#implementation-slices), using rust-engineering,
+rust-testing and resolve-task when slices have durable task records. Offline
+writes, remote bulk import and richer access policies remain excluded. Deployment
+and live-project migration require their own concrete rollout authorization.
+
+Primary references checked 2026-10-02: [Axum](https://docs.rs/axum/latest/axum/),
+[rustls](https://docs.rs/rustls/latest/rustls/),
+[Docker volumes](https://docs.docker.com/engine/storage/volumes/),
+[QNAP Container Station](https://www.qnap.com/en/software/container-station),
+[Codex hooks](https://developers.openai.com/codex/hooks),
+[Claude Code hooks](https://code.claude.com/docs/en/hooks).
