@@ -1,6 +1,6 @@
 //! Read-only commands must not leave empty `-wal`/`-shm` files next to a
 //! project database that has no pending WAL: later opens pay for them
-//! (issues/active/project-key-task-ids, follow-up i). A database with a
+//! (issues/closed/project-key-task-ids, follow-up i). A database with a
 //! pending WAL must keep its bytes and its WAL untouched by the same commands.
 //! Every test uses its own temporary data root and real subprocesses.
 

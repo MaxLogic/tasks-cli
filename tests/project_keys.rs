@@ -843,7 +843,7 @@ body
 #[test]
 fn the_reviewed_project_key_list_is_valid_and_unique() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("issues/active/project-key-task-ids/project-keys.csv");
+        .join("issues/closed/project-key-task-ids/project-keys.csv");
     let temp = tempfile::tempdir().unwrap();
     let copy = temp.path().join("project-keys.csv");
     fs::copy(&source, &copy).unwrap();
