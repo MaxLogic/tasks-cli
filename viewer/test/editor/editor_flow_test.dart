@@ -320,8 +320,24 @@ void main() {
           'T-001 was not marked done. Finish or cancel T-009 (To verify) '
           'first.';
 
-      /// Focuses the header's Mark done button and activates it by keyboard.
-      Future<void> activateMarkDone(WidgetTester tester) async {
+      /// Exercises each initiator across the in-flight disabled-button frame.
+      Future<void> activateMarkDone(WidgetTester tester, String route) async {
+        if (route == 'list shortcut' || route == 'context menu') {
+          await pressKey(tester, LogicalKeyboardKey.f2);
+          if (route == 'context menu') {
+            await pressKey(tester, LogicalKeyboardKey.contextMenu);
+            await pressKey(tester, LogicalKeyboardKey.keyD);
+          } else {
+            await pressControl(tester, LogicalKeyboardKey.keyD);
+          }
+          return;
+        }
+        if (route == 'header pointer') {
+          await pressKey(tester, LogicalKeyboardKey.f2);
+          await tester.tap(find.text('Mark done'));
+          await tester.pump();
+          return;
+        }
         final button = tester.widget<ButtonStyleButton>(
           find.ancestor(
             of: find.text('Mark done'),
@@ -330,31 +346,52 @@ void main() {
         );
         button.focusNode!.requestFocus();
         await tester.pumpAndSettle();
-        await pressKey(tester, LogicalKeyboardKey.enter);
+        if (route == 'header shortcut') {
+          await pressControl(tester, LogicalKeyboardKey.keyD);
+        } else {
+          await pressKey(tester, LogicalKeyboardKey.enter);
+        }
       }
 
-      testWidgets('Mark done speaks viewer text and keeps focus', (
-        WidgetTester tester,
-      ) async {
-        final reads = fakeWorkspaceReads();
-        final writer = FakeTaskWriter()..failure = refusal;
-        final harness = await openFirstTask(
-          tester,
-          reads: reads,
-          update: writer,
-        );
+      for (final route in <String>[
+        'header keyboard',
+        'header pointer',
+        'header shortcut',
+        'list shortcut',
+        'context menu',
+      ]) {
+        testWidgets('$route speaks viewer text and keeps focus', (
+          WidgetTester tester,
+        ) async {
+          final reads = fakeWorkspaceReads();
+          final writer = FakeTaskWriter()
+            ..failure = refusal
+            ..latency = const Duration(milliseconds: 150);
+          final harness = await openFirstTask(
+            tester,
+            reads: reads,
+            update: writer,
+          );
 
-        await activateMarkDone(tester);
+          await activateMarkDone(tester, route);
+          await tester.pump(const Duration(milliseconds: 200));
+          await tester.pumpAndSettle();
 
-        expect(writer.requests, hasLength(1));
-        expect(writer.lastRequest.changes.status, 'done');
-        expect(harness.statusText, expected);
-        expect(harness.statusText, isNot(contains('project')));
-        expect(harness.statusText, isNot(contains('to-verify')));
-        expect(harness.model.detail!.detail!.version, 1);
-        expect(harness.model.detail!.detail!.status, 'todo');
-        expect(harness.focusedDebugLabel, 'details mark done');
-      });
+          expect(writer.requests, hasLength(1));
+          expect(writer.lastRequest.changes.status, 'done');
+          expect(harness.statusText, expected);
+          expect(harness.statusText, isNot(contains('project')));
+          expect(harness.statusText, isNot(contains('to-verify')));
+          expect(harness.model.detail!.detail!.version, 1);
+          expect(harness.model.detail!.detail!.status, 'todo');
+          expect(
+            harness.focusedDebugLabel,
+            route == 'list shortcut' || route == 'context menu'
+                ? 'list-row-0'
+                : 'details mark done',
+          );
+        });
+      }
 
       testWidgets(
         'Save and mark done keeps the draft, editor and field focus',

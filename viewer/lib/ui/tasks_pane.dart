@@ -1359,7 +1359,7 @@ class _TaskActionMenuItemState
 }
 
 /// A menu item's text, with an optional [hint] shown under it and spoken as
-/// the item's description (the Mark done prerequisites hint).
+/// part of its accessible name (the Mark done prerequisites hint).
 class _TaskActionLabel extends StatelessWidget {
   const _TaskActionLabel({required this.label, this.hint});
 
@@ -1373,7 +1373,9 @@ class _TaskActionLabel extends StatelessWidget {
       return Text(label);
     }
     return Semantics(
-      hint: hint,
+      // Flutter's Windows bridge transfers labels, but omits semantics hints.
+      label: '$label. $hint',
+      excludeSemantics: true,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
