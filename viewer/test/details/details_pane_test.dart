@@ -858,8 +858,8 @@ void main() {
         );
         expect(find.text(hint), findsOneWidget);
         final button = markDoneButton(tester);
-        expect(button.label, 'Mark done');
-        expect(button.hint, hint);
+        expect(button.label, 'Mark done. $hint');
+        expect(button.hint, isEmpty);
         expect(
           button.flagsCollection.isEnabled,
           Tristate.isTrue,
@@ -874,8 +874,8 @@ void main() {
         final item = tester
             .getSemantics(find.text('Mark done (D)'))
             .getSemanticsData();
-        expect(item.label, 'Mark done (D)');
-        expect(item.hint, hint);
+        expect(item.label, 'Mark done (D). $hint');
+        expect(item.hint, isEmpty);
         await pressKey(tester, LogicalKeyboardKey.escape);
       } finally {
         semantics.dispose();
@@ -898,7 +898,11 @@ void main() {
           ]),
         );
         expect(find.text('Needs DAK-009 done first'), findsOneWidget);
-        expect(markDoneButton(tester).hint, 'Needs DAK-009 done first');
+        expect(
+          markDoneButton(tester).label,
+          'Mark done. Needs DAK-009 done first',
+        );
+        expect(markDoneButton(tester).hint, isEmpty);
       } finally {
         semantics.dispose();
       }

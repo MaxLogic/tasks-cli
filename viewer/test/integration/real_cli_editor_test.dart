@@ -16,7 +16,7 @@
 ///    (expected/current included) and the store keeps the second writer value.
 /// 3. `a lost save acknowledgement` makes the real CLI hold before its commit
 ///    (`TASKS_PRECOMMIT_READY_FILE` and `TASKS_HOLD_PRECOMMIT_MS`, see
-///    `src/store.rs`) while the client runs with a 500 ms read timeout, so the
+///    `src/store.rs`) while the update runs with a 500 ms response timeout, so the
 ///    viewer gives up on the answer while the write still lands; the editor then
 ///    reconciles the unknown outcome against the committed record.
 ///
@@ -25,7 +25,7 @@
 /// `viewer show`): the task must carry exactly one `update` event with the final
 /// field values, because no path may send a second write on its own.
 ///
-/// Two documented client seams make this possible without touching
+/// Three documented client seams make this possible without touching
 /// `viewer/lib`:
 ///
 /// * [ProcessLauncher] is the injection point of `ViewerCliClient`. Neither the
@@ -42,6 +42,10 @@
 ///   pre-commit snapshot, so the launcher also waits for that in-flight write to
 ///   finish before it starts the client's next read; the reconciliation then
 ///   observes the committed record, as spec section 7 requires.
+/// * A test-only client scopes the short deadline to `updateTask`. Setup and
+///   reconciliation keep the production read budget, with deliberately slower
+///   read responses proving that separation. Closing the update's stdin waits
+///   for the pre-commit marker before the client starts its response timer.
 ///
 /// When the release binary (or, for case 3, its `test-hooks` build) is missing,
 /// each test skips with a reason that names the missing artefact, so the file
@@ -257,8 +261,8 @@ void main() {
     }
 
     final harness = await _Slice5Harness.start(
-      readTimeout: _lostAckReadTimeout,
       precommitHold: _lostAckHold,
+      readResponseDelay: const Duration(milliseconds: 800),
     );
     await harness.client.probe();
 
@@ -446,12 +450,19 @@ final class _CliCall {
 /// The launcher the viewer's client uses: a real process, plus the two seams
 /// described at the top of this file.
 final class _RecordingLauncher implements ProcessLauncher {
-  _RecordingLauncher({this.precommitHold, this.readyMarkerPath});
+  _RecordingLauncher({
+    this.precommitHold,
+    this.readyMarkerPath,
+    this.readResponseDelay = Duration.zero,
+  });
 
   /// When set, every CLI process the client starts carries the documented
   /// pre-commit hold. Only writes are affected: reads never call the hook.
   final Duration? precommitHold;
   final String? readyMarkerPath;
+
+  /// Injected slow reads must not inherit the lost-write response deadline.
+  final Duration readResponseDelay;
 
   final List<_CliCall> invocations = <_CliCall>[];
   Completer<void>? _writerExit;
@@ -554,7 +565,25 @@ final class _RealCliHandle implements ViewerProcessHandle {
   }
 
   @override
-  Future<void> closeStdin() => _process.stdin.close();
+  Future<void> closeStdin() async {
+    await _process.stdin.close();
+    final markerPath = _launcher.readyMarkerPath;
+    if (!_call.isViewerUpdate || markerPath == null) {
+      return;
+    }
+    final marker = File(markerPath);
+    final elapsed = Stopwatch()..start();
+    while (!marker.existsSync() &&
+        _call.exitCode == null &&
+        elapsed.elapsed < viewerReadTimeout) {
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+    if (!marker.existsSync()) {
+      _process.kill();
+      throw StateError('The test writer did not reach its pre-commit hold.');
+    }
+    print('$_logTag pre-commit marker ready; starting the response deadline');
+  }
 
   @override
   Stream<List<int>> get stdout => _process.stdout.map((chunk) {
@@ -573,6 +602,9 @@ final class _RealCliHandle implements ViewerProcessHandle {
     final code = await _process.exitCode;
     _call.exitCode ??= code;
     _call.completedAt ??= DateTime.now();
+    if (!_call.isViewerUpdate && _launcher.readResponseDelay > Duration.zero) {
+      await Future<void>.delayed(_launcher.readResponseDelay);
+    }
     return code;
   }
 
@@ -588,6 +620,34 @@ final class _RealCliHandle implements ViewerProcessHandle {
       return;
     }
     _process.kill();
+  }
+}
+
+/// Runs the same client path with a short deadline only for the lost response.
+/// Other commands retain the production budget; no production API is changed.
+final class _AcknowledgementLossClient extends ViewerCliClient {
+  _AcknowledgementLossClient({
+    required super.environment,
+    required super.launcher,
+  });
+
+  bool _updating = false;
+
+  @override
+  Duration get readTimeout =>
+      _updating ? _lostAckReadTimeout : super.readTimeout;
+
+  @override
+  Future<ViewerUpdateResult> updateTask(
+    String projectId,
+    ViewerUpdateRequest request,
+  ) async {
+    _updating = true;
+    try {
+      return await super.updateTask(projectId, request);
+    } finally {
+      _updating = false;
+    }
   }
 }
 
@@ -614,8 +674,8 @@ final class _Slice5Harness {
   /// Creates a synthetic project in a fresh temp data root and hands back the
   /// client and editor the viewer application would use.
   static Future<_Slice5Harness> start({
-    Duration readTimeout = viewerReadTimeout,
     Duration? precommitHold,
+    Duration readResponseDelay = Duration.zero,
   }) async {
     final executable = _releaseExecutablePath();
     final stamp = DateTime.now().millisecondsSinceEpoch;
@@ -641,6 +701,7 @@ final class _Slice5Harness {
 
     final launcher = _RecordingLauncher(
       precommitHold: precommitHold,
+      readResponseDelay: readResponseDelay,
       readyMarkerPath: precommitHold == null
           ? null
           : _join(root.path, 'precommit-ready.txt'),
@@ -656,11 +717,12 @@ final class _Slice5Harness {
       dataRoot: store,
       tasksExe: executable,
     );
-    final client = ViewerCliClient(
-      environment: environment,
-      launcher: launcher,
-      readTimeout: readTimeout,
-    );
+    final client = precommitHold == null
+        ? ViewerCliClient(environment: environment, launcher: launcher)
+        : _AcknowledgementLossClient(
+            environment: environment,
+            launcher: launcher,
+          );
     final controller = ViewerEditorController(
       writer: client,
       detailReader: client,

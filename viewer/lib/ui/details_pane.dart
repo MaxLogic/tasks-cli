@@ -333,7 +333,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   ///
   /// A clean selected task needs no confirmation; a dirty editor asks first and
   /// keeps the draft until the store confirms (spec.md section 7).
-  Future<EditorSaveResult?> _markDone() async {
+  Future<EditorSaveResult?> _markDone({bool fromHeader = false}) async {
     final editor = _editor;
     final base = editor.base;
     if (base == null) {
@@ -376,7 +376,27 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           return null;
       }
     }
-    return _runWrite(() => editor.markDone(), clipId: 'task_done');
+    final restoreHeaderFocus = fromHeader || _markDoneActionFocus.hasFocus;
+    final projectId = widget.model.selectedProjectId;
+    final result = await _runWrite(
+      () => editor.markDone(),
+      clipId: 'task_done',
+    );
+    if (restoreHeaderFocus && result.outcome == EditorSaveOutcome.failed) {
+      // The in-flight disabled button loses focus before the CLI answers.
+      // Restore its initiator once the enabled button has been rebuilt.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            widget.model.selectedProjectId == projectId &&
+            _editor.base?.id == base.id &&
+            !_editor.isEditing &&
+            _markDoneEnabled &&
+            _markDoneActionFocus.canRequestFocus) {
+          _markDoneActionFocus.requestFocus();
+        }
+      });
+    }
+    return result;
   }
 
   /// Save / Ctrl+S from the form and the shell's fallback action.
@@ -1099,13 +1119,17 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                       TextButton(
                         focusNode: _markDoneActionFocus,
                         onPressed: _markDoneEnabled
-                            ? () => unawaited(markDone())
+                            ? () => unawaited(_markDone(fromHeader: true))
                             : null,
                         // The button stays enabled: the CLI is the authority
                         // and explains a refusal if the loaded list is stale.
-                        // Merged into the button node as its description.
+                        // Windows' bridge omits Semantics.hint, so put the
+                        // prerequisite text in the native accessible name.
                         child: Semantics(
-                          hint: markDoneHint,
+                          label: markDoneHint == null
+                              ? 'Mark done'
+                              : 'Mark done. $markDoneHint',
+                          excludeSemantics: true,
                           child: const Text('Mark done'),
                         ),
                       ),
