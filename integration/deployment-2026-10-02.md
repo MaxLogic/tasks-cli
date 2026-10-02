@@ -110,3 +110,23 @@ screenshot and window responsiveness. Compare a fresh MSAA retrieval with
 raw `WM_GETOBJECT` and capture bridge activation/update timing. The current
 timeout snapshot cannot distinguish an unpopulated bridge, a stalled UI
 thread or a cached fallback, and the probe normally kills the process.
+
+## User acceptance and archival, 2026-10-02
+
+The user confirmed: "NVDA is playing fin. you can close those tickets."
+TSK-018, TSK-019 and TSK-007 were closed on that confirmation, with the
+previous automated and native evidence retained. This does not claim another
+agent-observed Speech Viewer or keyboard walkthrough. TSK-009 was then closed:
+both complete issue directories moved to `issues/closed/`, review follow-ups
+were annotated, and source references in repository files and tasks were updated.
+The archived CSV has the same Git blob as before the move. No implementation
+tests were rerun for this archival. Evidence is under
+`target/evidence/closure-server-design-20261002/`.
+
+The subsequent TSK-017 log review found no recorded recurrence after the
+2026-09-30 bare-FLUTTERVIEW failure. Both later completed G11 checks returned
+70 nodes with `Retried: false`; the seven October 1 investigation probes also
+returned 70 nodes without retry. The intervening failed G06 run did not execute
+G11. The ordinary viewer does not continuously log its native provider tree,
+so this finding covers saved verification evidence, not every interactive use.
+TSK-017 remains blocked pending a captured recurrence; no speculative fix was made.

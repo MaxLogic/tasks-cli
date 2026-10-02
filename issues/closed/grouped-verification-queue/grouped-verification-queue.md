@@ -1,6 +1,6 @@
 # Batch verification: a `to-verify` status
 
-Status: approved for implementation, 2026-09-27. Minimal version; replaces the
+Status: completed and archived, 2026-10-02. Minimal version; replaces the
 earlier verification-tracking proposal.
 
 ## Problem
@@ -82,11 +82,16 @@ Recorded during the implementation review, 2026-09-27; not part of this change.
 
 - Mark done could show a hint such as "Needs T-009 done first", computed from
   the loaded dependencies, before the user tries it (UX, P3).
+  Resolved by TSK-002; native hint and focus corrections are TSK-019 and TSK-018.
 - Existing mismatch: `RUNNABLE_PREDICATE` treats a cancelled prerequisite as
   unsatisfied, while the viewer's dependency row says it "does not withhold
   readiness".
+  Resolved by TSK-001.
 - Existing scaling issue: `unlocks` scans every open dependency edge, about
   2.4 s at 100k tasks and 150k edges. Add a dense-edge profile to the perf
   fixture and a separate `unlocks` budget.
+  Resolved by TSK-005.
 - After install, check the spoken refusal of Mark done with NVDA through
   `viewer/tool/verify-windows.ps1`.
+  Resolved by TSK-007, accepted by the user on 2026-10-02. TSK-008 completed
+  the related console-window proof. Evidence: integration/deployment-2026-10-02.md.

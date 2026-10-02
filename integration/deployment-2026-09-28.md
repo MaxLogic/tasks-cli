@@ -69,7 +69,7 @@ project is outside the CSV, so none is left without a key.
 
 ### Checks before migration
 
-`issues/active/project-key-task-ids/project-keys.csv` has 53 rows. Every key is
+`issues/closed/project-key-task-ids/project-keys.csv` has 53 rows. Every key is
 2-6 characters, `[A-Z][A-Z0-9]*`, not `T` plus digits, and unique. Every
 `project_id` is unique, bound in `registry.json` at the CSV path, and has
 `projects/<UUID>/TASKS.sqlite`. The registry and data root hold the same 53

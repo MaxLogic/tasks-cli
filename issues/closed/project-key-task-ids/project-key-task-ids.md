@@ -1,7 +1,7 @@
 # Project keys in task IDs (`DAK-123`)
 
-Status: approved for implementation, 2026-09-27. Do after `to-verify`
-(`issues/active/grouped-verification-queue`).
+Status: completed and archived, 2026-10-02. Implemented after `to-verify`
+(`issues/closed/grouped-verification-queue`).
 
 ## Problem
 
@@ -155,9 +155,16 @@ Recorded during the implementation review, 2026-09-28; not part of this change.
   Linux show and list unchanged within about 0.3 ms (interleaved A/B, 4.0-4.5
   ms). No sidecars remain after reads; the first read of a database with an
   older binary's empty leftovers removes them.
+  No follow-up task is needed: this was resolved on 2026-09-28 with the retained
+  cache-wal evidence and tests/wal_sidecars.rs regression coverage.
 - The enrich key-shaped regex matches UTF-8, SHA-256 and similar words, which
   triggers a scan on ordinary prose (cheap with the cache).
+  Resolved by TSK-004.
 - The editor keeps the old key until the task is reloaded after a key change.
+  Resolved by TSK-003.
 - The default `flutter test` real-CLI cases and the verify-windows.ps1
   ALPHA-001 fixtures need the installed build.
+  Informational, no separate task needed. The installed bundle and real-CLI
+  fixtures were verified in integration/deployment-2026-10-02.md.
 - Viewer project list: cache per-project stats so the list renders without recomputing them (user direction 2026-09-28; not yet designed).
+  Resolved by TSK-006.
