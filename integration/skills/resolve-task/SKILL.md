@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.3.1"
+  version: "6.3.2"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
@@ -74,9 +74,10 @@ See [verification](references/verification.md).
    where used, literal commands, exit codes, test counts and proof references.
    Run the task tier on those inputs. Zero selected tests do not prove behavior.
 6. Coordinator checks acceptance and review, then transitions to `to-verify`
-   when a batch gate is scheduled for the task's group, `done` otherwise, with
-   the last observed version. The write output is the committed result; no
-   read-back `show`. A stale version (exit 4) is re-read and reconciled, never
+   while a required batch or delivery-dependent gate remains, `done` after
+   applicable task proof otherwise, with the last observed version. The write
+   output is the committed result; do not issue a read-back `show`. A stale
+   version (exit 4) is re-read and reconciled, never
    overwritten with an automatic retry. Keep concise proof pointers in Notes.
 7. Inspect the exact owned patch, clean owned temporary artifacts safely, and
    continue only with dependency-ready work. Archive only when requested.
@@ -108,11 +109,16 @@ explicit request or a scheduled requirement; continue independent work.
 
 ## Delivery
 
-After each completed, verified slice, use `git-operations` to stage exact owned
-paths, inspect the staged patch and create a local commit without asking for
-approval. A slice with a pending required batch gate is not yet verified for a
-commit. Respect an explicit user prohibition on commits and preserve unrelated
-work. Do not stage junction-linked skills or unrelated generated content.
+After each reviewed slice with all applicable pre-commit proof passing, use
+`git-operations` to stage exact owned paths, inspect the staged patch and create
+a local commit without asking for approval. Required task and batch gates
+normally precede that commit. Only when a gate intrinsically requires a
+committed or pushed candidate may a reviewed, locally proven slice be committed
+before that gate. Keep affected tasks `to-verify` and run the post-delivery gate
+before marking them `done`. A failed pre-commit gate, missing tool or environment
+gap does not qualify for this exception. Respect an explicit user prohibition
+on commits and preserve unrelated work. Do not stage junction-linked skills or
+unrelated generated content.
 This commit rule grants no push or deployment authority; follow the repository's
 separate rules for those actions.
 
