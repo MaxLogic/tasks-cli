@@ -231,7 +231,7 @@ pub fn create_project_db_with_key(
     project_id: &Uuid,
     key: Option<&str>,
 ) -> Result<StoreInfo, AppError> {
-    create_project_db_with_context(data_root, project_id, key, &Attribution::default())
+    create_project_db_with_context(data_root, project_id, key, &crate::attribution::current())
 }
 
 pub fn create_project_db_with_context(
@@ -1497,7 +1497,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
-            attribution_json: Attribution::default().validated_json()?,
+            attribution_json: crate::attribution::current().validated_json()?,
         })
     }
 
@@ -1514,7 +1514,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
-            attribution_json: Attribution::default().validated_json()?,
+            attribution_json: crate::attribution::current().validated_json()?,
         })
     }
 
@@ -1546,7 +1546,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
-            attribution_json: Attribution::default().validated_json()?,
+            attribution_json: crate::attribution::current().validated_json()?,
         })
     }
 
@@ -1587,7 +1587,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: Some(migration_lock),
-            attribution_json: Attribution::default().validated_json()?,
+            attribution_json: crate::attribution::current().validated_json()?,
         })
     }
 

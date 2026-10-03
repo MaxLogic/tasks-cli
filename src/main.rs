@@ -180,6 +180,50 @@ fn execute_viewer(cli: &Cli, command: &ViewerCommand) -> Result<(), AppError> {
 }
 
 fn execute(cli: Cli) -> Result<(), AppError> {
+    if let Command::ContextHook {
+        harness,
+        client_dir,
+    } = &cli.command
+    {
+        let root = client_dir
+            .clone()
+            .or_else(tasks_cli::attribution::client_dir);
+        let mut input = Vec::new();
+        if std::io::stdin()
+            .take(16_385)
+            .read_to_end(&mut input)
+            .is_ok()
+        {
+            if let Some(root) = root {
+                // Metadata is optional: malformed input or unavailable profile
+                // storage must not block the harness's actual tool call.
+                if let Ok(path) = tasks_cli::attribution::write_hook(&root, harness, &input) {
+                    if harness == "claude-code" {
+                        let _ = tasks_cli::attribution::publish_claude_environment(&input, &path);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    if let Command::ContextSetup { harness } = &cli.command {
+        println!("{}", tasks_cli::attribution::setup_preview(harness));
+        return Ok(());
+    }
+    let mutation = matches!(
+        &cli.command,
+        Command::Init { .. }
+            | Command::Create { .. }
+            | Command::Update { .. }
+            | Command::ProjectKey { set: Some(_) }
+            | Command::Rules(RulesCommand::Set { .. })
+            | Command::Import { apply: true, .. }
+            | Command::BulkImport { apply: true, .. }
+            | Command::Viewer(ViewerCommand::Update { .. })
+    );
+    if mutation {
+        tasks_cli::attribution::initialize(matches!(&cli.command, Command::Viewer(_)));
+    }
     if matches!(cli.command, Command::Viewer(_)) && cli.format != OutputFormat::Json {
         return Err(AppError::Usage(
             "viewer commands are JSON-only; add --format json to the command line".to_string(),
@@ -487,6 +531,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 cli.format,
             );
         }
+        Command::ContextSetup { .. } | Command::ContextHook { .. } => {}
         Command::ProjectHistory { after, limit } => {
             let project_id = resolved_project(&cli, &data_root)?;
             let store = Store::open_readonly(&data_root, &project_id)?;
@@ -878,6 +923,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 | Command::Show { .. }
                 | Command::History { .. }
                 | Command::ProjectHistory { .. }
+                | Command::ContextSetup { .. }
+                | Command::ContextHook { .. }
                 | Command::Init { .. }
                 | Command::ProjectKey { .. }
                 | Command::Bind { .. }
