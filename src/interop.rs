@@ -189,8 +189,18 @@ pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
             child_args.insert(0, "--route-root".to_string());
         }
     }
-    let status = ProcessCommand::new(&exe)
-        .args(child_args)
+    let mut command = ProcessCommand::new(&exe);
+    command.args(child_args);
+    let context = crate::attribution::current().validated_json()?;
+    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    if !wslenv.is_empty() {
+        wslenv.push(':');
+    }
+    wslenv.push_str("TASKS_ORIGIN_CONTEXT:TASKS_DELEGATED");
+    let status = command
+        .env("TASKS_ORIGIN_CONTEXT", context)
+        .env("TASKS_DELEGATED", "1")
+        .env("WSLENV", wslenv)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

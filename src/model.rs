@@ -373,11 +373,14 @@ pub struct Attribution {
     pub harness: String,
     pub harness_version: Option<String>,
     pub session_id: Option<String>,
+    /// Separate harness execution identifier when different from the conversation.
+    pub harness_session_id: Option<String>,
     pub session_name: Option<String>,
     pub model: Option<String>,
     pub agent_id: Option<String>,
     pub caller_executable: Option<String>,
     pub harness_executable: Option<String>,
+    pub origin_platform: Option<String>,
     pub context_source: std::collections::BTreeMap<String, AttributionSource>,
 }
 
@@ -406,11 +409,13 @@ impl Default for Attribution {
             harness: "unknown".into(),
             harness_version: None,
             session_id: None,
+            harness_session_id: None,
             session_name: None,
             model: None,
             agent_id: None,
             caller_executable: None,
             harness_executable: None,
+            origin_platform: None,
             context_source: [
                 "actor_id",
                 "actor_name",
@@ -420,11 +425,13 @@ impl Default for Attribution {
                 "harness",
                 "harness_version",
                 "session_id",
+                "harness_session_id",
                 "session_name",
                 "model",
                 "agent_id",
                 "caller_executable",
                 "harness_executable",
+                "origin_platform",
             ]
             .into_iter()
             .map(|field| (field.into(), AttributionSource::Unavailable))

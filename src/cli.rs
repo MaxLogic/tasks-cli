@@ -39,6 +39,21 @@ pub enum OutputFormat {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Preview silent context hook configuration; never edits harness settings.
+    ContextSetup {
+        /// Harness to configure: codex or claude-code.
+        #[arg(long, value_parser = ["codex", "claude-code"])]
+        harness: String,
+    },
+    /// Record allow-listed hook metadata from stdin without conversation output.
+    #[command(hide = true)]
+    ContextHook {
+        #[arg(long, value_parser = ["codex", "claude-code"])]
+        harness: String,
+        /// Private client configuration directory; defaults to the user profile.
+        #[arg(long)]
+        client_dir: Option<PathBuf>,
+    },
     /// Create a project database and bind a root directory to it.
     Init {
         /// Directory to bind; receives a .tasks.json identity file.

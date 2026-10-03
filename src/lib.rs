@@ -1,3 +1,4 @@
+pub mod attribution;
 pub mod backup;
 pub mod bulk;
 pub mod cli;
@@ -10,6 +11,8 @@ pub mod model;
 pub mod output;
 pub mod problems;
 pub mod registry;
+#[cfg(feature = "server")]
+pub mod server;
 pub mod storage;
 pub mod store;
 
