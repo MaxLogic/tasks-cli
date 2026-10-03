@@ -487,6 +487,21 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 cli.format,
             );
         }
+        Command::ProjectHistory { after, limit } => {
+            let project_id = resolved_project(&cli, &data_root)?;
+            let store = Store::open_readonly(&data_root, &project_id)?;
+            let page = store.metadata_history(*after, limit.unwrap_or(20))?;
+            keyed_envelope(
+                Some(project_id),
+                store.project_key.as_deref(),
+                CommandPayload::ProjectHistory {
+                    items: page.items,
+                    has_more: page.has_more,
+                    next_after: page.next_after,
+                },
+                cli.format,
+            );
+        }
         Command::Migrate => {
             let project_id = resolved_project(&cli, &data_root)?;
             let mut store = Store::open_for_migration(&data_root, &project_id)?;
@@ -862,6 +877,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 | Command::Search { .. }
                 | Command::Show { .. }
                 | Command::History { .. }
+                | Command::ProjectHistory { .. }
                 | Command::Init { .. }
                 | Command::ProjectKey { .. }
                 | Command::Bind { .. }

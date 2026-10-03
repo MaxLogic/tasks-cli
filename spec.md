@@ -191,6 +191,7 @@ one-line `--help` description.
 | `create --title TEXT --body-file PATH` | Optional `--status`, default draft; `--priority P0..P3`, default P2; allocate next ID atomically |
 | `update ID --expect-version N ...` | At least one of title, body-file, status, priority, labels (replace, clear, add or remove) or full dependency replacement |
 | `history ID [--after N] [--limit N]` | Metadata and changed field names by default; `--event N` returns complete selected event |
+| `project-history [--after N] [--limit N]` | Bounded project creation, key and import audit events with mutation context |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
 | `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME] [--key-map FILE]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
@@ -461,6 +462,11 @@ Minimum tables:
 - `events`: monotonic event_id, optional task_id, entity type task/rules,
   operation, resulting entity version, timestamp, complete resulting snapshot JSON.
   Each create/update/rules change has exactly one event in its transaction.
+  Schema 7 adds nullable versioned attribution JSON; legacy authors remain null.
+- `metadata_events` (schema 7): independent monotonic event ID, operation,
+  timestamp, snapshot and non-null attribution JSON. Project creation, key
+  changes and import provenance append within the corresponding transaction.
+  Database triggers reject UPDATE and DELETE of this metadata history.
 - `imports`: input SHA-256 unique, source name, original source bytes, report JSON,
   import timestamp. Preserve the original source for recovery/provenance.
 
@@ -1106,15 +1112,17 @@ Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
 
 ## Rust server and automatic attribution
 
-Status: Ready for implementation, 2026-10-02. Deployment prerequisites below
+Status: Ready for implementation, 2026-10-03. Deployment prerequisites below
 remain pending.
 Verification below is planned.
 The user selected a Rust server in Docker on a QNAP NAS, online-only remote
 operation, HTTPS and authentication. The viewer continues to access tasks
 through the CLI. Routine implementation choices below were selected locally.
 The user also selected both Cloudflare Tunnel and direct LAN access. The live
-infrastructure review supersedes the proposed Caddy addition: reuse the existing
-QTS reverse proxy for LAN HTTPS and the existing tunnel for public HTTPS.
+infrastructure review confirmed the existing QTS reverse proxy. On 2026-10-03,
+the user assigned LAN HTTPS to another thread, which is preparing a separate
+Caddy gateway for Docker services. Reuse that gateway and the existing tunnel
+for public HTTPS; QTS continues to serve NAS administration.
 The user accepted per-installation keys with automatic application-level request
 signing, verified by Rust on both routes. This supersedes the token baseline
 and earlier mTLS proposal. No attribution or authentication arguments are
@@ -1136,6 +1144,7 @@ The public `https://audiobooks.maxlogic.app/` and LAN
 Traefik container is running. The NAS's App Center catalog, refreshed that day,
 offers installed Container Station `3.1.2.1742` for this platform; `3.1.3.1854`
 is restricted to QAI-X700/QAI-X90. No supported Docker 28 upgrade is established.
+On 2026-10-03 the user decided to retain the current Docker version.
 
 The QTS-native Apache reverse proxy is running with
 `/etc/reverseproxy/reverseproxy.conf`. Its persisted rules are in
@@ -1145,7 +1154,10 @@ The QTS-native Apache reverse proxy is running with
 | Existing HTTPS source | Destination | Observation |
 |---|---|---|
 | `maxlogic.myqnapcloud.com:443` | `https://localhost:2443/` | NAS administration rule; both listeners are active. |
-| `maxlogic.myqnapcloud.com:2001` | `http://localhost:49156/` | Old Audiobookshelf rule; destination connection failed. Current container responds with HTTP 200 on host port 32768. |
+
+The user deleted the stale Audiobookshelf rule on port 2001. Read-only SSH on
+2026-10-03 confirmed only the `main` administration rule remains, with no port
+2001 listener or generated virtual host.
 
 The certificate served on port 443 for `maxlogic.myqnapcloud.com` is the
 self-signed QNAP certificate, subject CN `QNAP NAS`, with no subject alternative
@@ -1158,16 +1170,19 @@ Required task-service routes:
 
 | Route | TLS endpoint | Origin path |
 |---|---|---|
-| Direct LAN | Existing QTS reverse proxy, with matching trusted certificate | NAS loopback-only published port to the Rust container's HTTP port 8080. |
+| Direct LAN | Existing Caddy gateway under preparation in the other thread, with matching trusted certificate | Gateway reaches `tasks-server:8080` on its private Docker network. No task backend host port is published. |
 | Public hostname | Cloudflare HTTPS edge through the existing tunnel | Connector reaches `tasks-server:8080` by Docker DNS on a dedicated tasks network. |
 
 Add a task-service hostname/rule to the existing tunnel and attach its connector
 to the dedicated tasks network. The Rust service joins only that network, not
 `abs-meta`. Keep existing Audiobookshelf routes and networks intact. Bind the
-NAS-side backend port only to `127.0.0.1`; choose an unused port during deployment.
+task backend only inside Docker; publish no backend port on the NAS.
+The gateway network and configuration are documented in
+`F:\projects\MaxLogic\qnap-nas-maintenance\docs\docker-https-playbook.md`.
 Docker before 28 has a documented same-L2 localhost-publication exposure risk.
 Require host firewall protection and proof from a separate LAN machine that
-direct backend HTTP is unreachable; loopback binding alone is not isolation proof.
+direct backend HTTP is unreachable; absence of a port mapping alone is not
+isolation proof. Recheck the final network arrangement, not just the gateway spike.
 The database mount is NAS-local, for example `/share/Container/tasks-cli`.
 
 Use per-installation Ed25519 keys with automatic HTTP request signing
@@ -1231,11 +1246,12 @@ project name, never requires `F:\...` paths to exist on another machine.
 
 ### HTTPS and authentication
 
-- QTS terminates LAN-facing TLS and Cloudflare terminates public-facing TLS,
+- The Caddy gateway terminates LAN-facing TLS and Cloudflare terminates public-facing TLS,
   using TLS 1.2 or newer. The Rust service listens on HTTP port 8080 on its
-  dedicated Docker network, with a NAS loopback-only publication for QTS.
-  NAS firewall/isolation proof is required as specified above. QTS manages its
-  own certificate inputs; Cloudflare manages the public endpoint certificate.
+  private Docker network, without a published backend port. The gateway and
+  tunnel connector must reach it on that network. NAS firewall/isolation proof
+  is required as specified above. The gateway manages its LAN certificate inputs;
+  Cloudflare manages the public endpoint certificate.
   Missing or invalid TLS/auth configuration prevents deployment readiness.
   Require the same application authentication on both routes and on the
   internal HTTP listener. Ignore unverified proxy identity headers.
@@ -1305,7 +1321,7 @@ project name, never requires `F:\...` paths to exist on another machine.
   Reconciliation signs a new HTTP request with a fresh nonce/timestamps but
   reuses the exact canonical mutation and idempotency key. Signature headers,
   nonces and freshness timestamps are excluded from mutation receipt identity.
-- QTS and Cloudflare routing must preserve the signed path/query, content bytes
+- Caddy and Cloudflare routing must preserve the signed path/query, content bytes
   and application security headers. Do not sign proxy-rewritten scheme/host,
   `Forwarded` or `X-Forwarded-*` fields. HTTPS endpoint validation and the signed
   server UUID provide destination binding. Do not rewrite API paths at a proxy.
@@ -1503,8 +1519,8 @@ name while retaining distinct installation IDs and credentials.
 
 Provide a multistage Dockerfile, a Compose example and a QNAP Container Station
 runbook. Run as a configured non-root UID/GID, with a read-only root filesystem,
-writable `/data` and a bounded temporary directory. Keep QTS TLS certificate
-inputs under QTS management and tunnel credentials in the existing connector.
+writable `/data` and a bounded temporary directory. Keep LAN TLS certificate
+inputs under gateway management and tunnel credentials in the existing connector.
 Provide credential provisioning inputs only to their owning component. Image
 contains no secrets or task data.
 No privileged mode or Docker socket mount. Set restart policy and graceful-stop
@@ -1534,7 +1550,7 @@ only with explicit selection of the authoritative data.
 | Signing profile through proxies | Verify the specified signed components, body digest, persistent replay protection and key revocation through both routes. | Implementer/operator | 3 and deployment proof in 7 |
 | QNAP architecture/runtime | Recheck verified x86_64 platform/QTS/Container Station; run linux/amd64 image on NAS-local volume. | Operator | 7 |
 | TLS identity and routing | Supply LAN/public DNS names, matching trusted LAN certificate and Cloudflare route; verify both paths with strict client hostname checks. Existing QNAP certificate is insufficient. | Operator | 7 and real deployment |
-| Backend isolation | Select unused NAS loopback port, configure firewall protection and prove backend HTTP unreachable from another LAN machine on the installed Docker version. | Operator | 7 and real deployment |
+| Backend isolation | Publish no backend port; configure private gateway/tunnel network access and prove backend HTTP unreachable from another LAN machine on the installed Docker version. | Operator | 7 and real deployment |
 | Client registration | Create actor/client credentials once with private storage and revocation proof. | Operator | 5 and real deployment |
 | Clock synchronization | Keep client/NAS UTC synchronized within the specified signature window; verify clock errors and recovery. | Operator | 7 and real deployment |
 | Installed hook support | Verify Codex/Claude Code versions and silent context collection for supported shells; missing fields remain null. | Implementer | 2 |

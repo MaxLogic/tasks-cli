@@ -1,10 +1,10 @@
 use crate::error::AppError;
 use crate::markdown::{ParsedImport, ParsedTask};
 use crate::model::{
-    parse_task_ref, render_keyed_task_id, DependencySummary, HistoryEvent, ImportProblem,
-    ImportReport, ListCursor, Pagination, Priority, RuleRecord, SelectionPage, ShowTask,
-    TaskDetail, TaskStatus, TaskSummary, TaskUpdate, UnlockSummary, BODY_MAX_BYTES,
-    MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
+    parse_task_ref, render_keyed_task_id, Attribution, DependencySummary, HistoryEvent,
+    ImportProblem, ImportReport, ListCursor, MetadataEvent, Pagination, Priority, RuleRecord,
+    SelectionPage, ShowTask, TaskDetail, TaskStatus, TaskSummary, TaskUpdate, UnlockSummary,
+    BODY_MAX_BYTES, MAX_DEPENDENCIES, RULES_MAX_BYTES, TITLE_MAX_CHARS,
 };
 use crate::storage::{
     acquire_exclusive_lock, validate_storage_path, validate_storage_root, ExclusiveLock,
@@ -20,7 +20,43 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 6;
+pub const CURRENT_SCHEMA_VERSION: i32 = 7;
+
+fn create_attribution_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "ALTER TABLE events ADD COLUMN attribution_json TEXT
+             CHECK(attribution_json IS NULL OR (length(CAST(attribution_json AS BLOB)) <= 16384 AND json_valid(attribution_json)));
+         CREATE TABLE metadata_events(
+             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+             operation TEXT NOT NULL,
+             created_ms INTEGER NOT NULL,
+             snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),
+             attribution_json TEXT NOT NULL CHECK(length(CAST(attribution_json AS BLOB)) <= 16384 AND json_valid(attribution_json))
+         );
+         CREATE TRIGGER metadata_events_no_update BEFORE UPDATE ON metadata_events
+             BEGIN SELECT RAISE(ABORT, 'metadata history is append-only'); END;
+         CREATE TRIGGER metadata_events_no_delete BEFORE DELETE ON metadata_events
+             BEGIN SELECT RAISE(ABORT, 'metadata history is append-only'); END;",
+    )?;
+    Ok(())
+}
+
+fn read_json_column<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<Option<T>> {
+    row.get::<_, Option<String>>(column)?
+        .map(|text| {
+            serde_json::from_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    column,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
 
 /// Column definition of the optional project key (schema 6). The CHECK mirrors
 /// `model::parse_project_key`: 2-6 uppercase ASCII letters/digits starting
@@ -126,6 +162,8 @@ pub struct Store {
     /// Validated data root this store was opened from.
     pub data_root: PathBuf,
     migration_lock: Option<ExclusiveLock>,
+    /// Validated and serialized before entering any mutation transaction.
+    attribution_json: String,
 }
 
 pub struct StoreInfo {
@@ -193,6 +231,16 @@ pub fn create_project_db_with_key(
     project_id: &Uuid,
     key: Option<&str>,
 ) -> Result<StoreInfo, AppError> {
+    create_project_db_with_context(data_root, project_id, key, &Attribution::default())
+}
+
+pub fn create_project_db_with_context(
+    data_root: &Path,
+    project_id: &Uuid,
+    key: Option<&str>,
+    attribution: &Attribution,
+) -> Result<StoreInfo, AppError> {
+    let attribution_json = attribution.validated_json()?;
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
     // Check the actual database target before creating any descendant.  The
@@ -209,7 +257,7 @@ pub fn create_project_db_with_key(
         let version = schema_version(&conn)?;
         if version == 0 && !table_exists(&conn, "project")? && !table_exists(&conn, "tasks")? {
             configure_writer(&conn)?;
-            initialize_new_database(&mut conn, project_id, key)?;
+            initialize_new_database(&mut conn, project_id, key, &attribution_json)?;
         } else {
             let info = verify_existing_project(&db_path, project_id)?;
             return Ok(info);
@@ -222,7 +270,7 @@ pub fn create_project_db_with_key(
             .map_err(|error| AppError::io_path("create the project database", &db_path, error))?;
         let mut conn = Connection::open(&db_path)?;
         configure_writer(&conn)?;
-        initialize_new_database(&mut conn, project_id, key)?;
+        initialize_new_database(&mut conn, project_id, key, &attribution_json)?;
     }
     let info = verify_existing_project(&db_path, project_id)?;
     Ok(info)
@@ -267,7 +315,8 @@ const HISTORY_FIELDS: [&str; 6] = ["title", "body", "status", "priority", "label
 const HISTORY_OK_COLUMN: usize = 6;
 
 /// Column of the raw snapshot text when `history_sql` selects it.
-const HISTORY_SNAPSHOT_COLUMN: usize = HISTORY_OK_COLUMN + 1 + HISTORY_FIELDS.len();
+const HISTORY_ATTRIBUTION_COLUMN: usize = HISTORY_OK_COLUMN + 1 + HISTORY_FIELDS.len();
+const HISTORY_SNAPSHOT_COLUMN: usize = HISTORY_ATTRIBUTION_COLUMN + 1;
 
 /// Builds the history query from fixed fragments (never user input). The page
 /// is materialized first so each event's predecessor snapshot is looked up
@@ -293,7 +342,7 @@ fn history_sql(filter: &str, limit: &str, with_snapshot: bool) -> String {
     format!(
         "WITH page AS MATERIALIZED (
             SELECT e.event_id, e.task_id, e.entity_type, e.operation, e.resulting_version,
-                   e.created_ms, e.snapshot_json AS s,
+                   e.created_ms, e.snapshot_json AS s, e.attribution_json,
                    (SELECT p.snapshot_json FROM events p
                      WHERE p.task_id = e.task_id AND p.entity_type = 'task'
                        AND p.event_id < e.event_id
@@ -307,7 +356,7 @@ fn history_sql(filter: &str, limit: &str, with_snapshot: bool) -> String {
             FROM page
         )
         SELECT event_id, task_id, entity_type, operation, resulting_version, created_ms, ok,
-               {flags}{snapshot}
+               {flags}, attribution_json{snapshot}
         FROM checked ORDER BY event_id ASC"
     )
 }
@@ -331,6 +380,7 @@ fn history_event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEven
         operation: r.get::<_, String>(3)?,
         resulting_version: r.get::<_, i64>(4)?,
         created_ms: r.get::<_, i64>(5)?,
+        attribution: read_json_column(r, HISTORY_ATTRIBUTION_COLUMN)?,
         changed_fields,
         snapshot_json: None,
     })
@@ -406,14 +456,20 @@ fn initialize_new_database(
     conn: &mut Connection,
     project_id: &Uuid,
     key: Option<&str>,
+    attribution_json: &str,
 ) -> Result<(), AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     create_schema_objects(&tx)?;
     crate::labels::create_schema(&tx)?;
     create_selection_schema(&tx)?;
+    create_attribution_schema(&tx)?;
     tx.execute(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number, project_key) VALUES (?1, '', 1, 1, ?2)",
         params![project_id.to_string(), key],
+    )?;
+    tx.execute(
+        "INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES ('create',?1,?2,?3)",
+        params![sqlite_now_ms(), json!({"project_id": project_id, "project_key": key}).to_string(), attribution_json],
     )?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     tx.commit()?;
@@ -446,6 +502,7 @@ fn validate_current_schema(
         "imports",
         "task_labels",
         "tasks_fts",
+        "metadata_events",
     ] {
         if !table_exists(conn, table)? {
             return Err(missing(&format!("the {table} table")));
@@ -490,6 +547,7 @@ fn validate_current_schema(
                 "resulting_version",
                 "created_ms",
                 "snapshot_json",
+                "attribution_json",
             ]
             .as_slice(),
         ),
@@ -504,6 +562,17 @@ fn validate_current_schema(
             ]
             .as_slice(),
         ),
+        (
+            "metadata_events",
+            [
+                "event_id",
+                "operation",
+                "created_ms",
+                "snapshot_json",
+                "attribution_json",
+            ]
+            .as_slice(),
+        ),
     ] {
         for column in columns {
             if !column_exists(conn, table, column)? {
@@ -511,7 +580,13 @@ fn validate_current_schema(
             }
         }
     }
-    for trigger in ["tasks_fts_insert", "tasks_fts_update", "tasks_fts_delete"] {
+    for trigger in [
+        "tasks_fts_insert",
+        "tasks_fts_update",
+        "tasks_fts_delete",
+        "metadata_events_no_update",
+        "metadata_events_no_delete",
+    ] {
         let count: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
             [trigger],
@@ -1339,6 +1414,62 @@ fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid, Pa
 }
 
 impl Store {
+    pub fn set_attribution(&mut self, context: &Attribution) -> Result<(), AppError> {
+        self.attribution_json = context.validated_json()?;
+        Ok(())
+    }
+
+    /// Bounded project/key audit history; these events never alter task versions.
+    pub fn metadata_history(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Pagination<MetadataEvent>, AppError> {
+        let limit = validate_limit(limit)?;
+        let after = i64::try_from(after.unwrap_or(0)).map_err(|_| {
+            AppError::Validation("metadata cursor exceeds the supported event range".into())
+        })?;
+        let mut statement = self.conn.prepare(
+            "SELECT event_id,operation,created_ms,snapshot_json,attribution_json FROM metadata_events
+             WHERE event_id > ?1 ORDER BY event_id LIMIT ?2",
+        )?;
+        let mut items = statement
+            .query_map(params![after, limit + 1], |row| {
+                Ok(MetadataEvent {
+                    event_id: row.get::<_, i64>(0)? as u64,
+                    operation: row.get(1)?,
+                    created_ms: row.get(2)?,
+                    snapshot: read_json_column(row, 3)?.ok_or(
+                        rusqlite::Error::InvalidColumnType(
+                            3,
+                            "snapshot_json".into(),
+                            rusqlite::types::Type::Null,
+                        ),
+                    )?,
+                    attribution: read_json_column(row, 4)?.ok_or(
+                        rusqlite::Error::InvalidColumnType(
+                            4,
+                            "attribution_json".into(),
+                            rusqlite::types::Type::Null,
+                        ),
+                    )?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_after = if has_more {
+            items.last().map(|event| event.event_id)
+        } else {
+            None
+        };
+        Ok(Pagination {
+            items,
+            has_more,
+            next_after,
+        })
+    }
+
     pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
         let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn = open_for_reading(&db_path, rusqlite::OpenFlags::empty())?;
@@ -1366,6 +1497,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
+            attribution_json: Attribution::default().validated_json()?,
         })
     }
 
@@ -1382,6 +1514,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
+            attribution_json: Attribution::default().validated_json()?,
         })
     }
 
@@ -1413,6 +1546,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: None,
+            attribution_json: Attribution::default().validated_json()?,
         })
     }
 
@@ -1453,6 +1587,7 @@ impl Store {
             project_key,
             data_root,
             migration_lock: Some(migration_lock),
+            attribution_json: Attribution::default().validated_json()?,
         })
     }
 
@@ -1504,6 +1639,10 @@ impl Store {
                     self.project_id
                 )));
             }
+            tx.execute(
+                "INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES ('set-key',?1,?2,?3)",
+                params![sqlite_now_ms(), json!({"previous_key": previous, "project_key": key}).to_string(), self.attribution_json],
+            )?;
             tx.commit()?;
         }
         self.project_key = Some(key.to_string());
@@ -2281,6 +2420,11 @@ impl Store {
                 current: current_version as u64,
             });
         }
+        let current_body: String =
+            tx.query_row("SELECT rules_markdown FROM project", [], |row| row.get(0))?;
+        if current_body == body {
+            return Ok(current_version as u64);
+        }
         tx.execute(
             "UPDATE project SET rules_markdown=?1, rules_version=rules_version+1 WHERE project_id=?2",
             params![body, self.project_id.to_string()],
@@ -2295,9 +2439,9 @@ impl Store {
             "rules": body,
         });
         tx.execute(
-            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-             VALUES(NULL,'rules','set',?1,?2,?3)",
-            params![new_version, sqlite_now_ms(), snapshot.to_string()],
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
+             VALUES(NULL,'rules','set',?1,?2,?3,?4)",
+            params![new_version, sqlite_now_ms(), snapshot.to_string(), self.attribution_json],
         )?;
         maybe_precommit_fail("rules")?;
         tx.commit()?;
@@ -2503,9 +2647,9 @@ impl Store {
             "priority": priority,
         });
         tx.execute(
-            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-             VALUES (?1,'task','create',1,?2,?3)",
-            params![id as i64, now, snapshot.to_string()],
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
+             VALUES (?1,'task','create',1,?2,?3,?4)",
+            params![id as i64, now, snapshot.to_string(), self.attribution_json],
         )?;
         let event_id: i64 = tx.query_row(
             "SELECT event_id FROM events WHERE task_id=?1 AND operation='create' ORDER BY event_id DESC LIMIT 1",
@@ -2733,9 +2877,9 @@ impl Store {
             "priority": next_priority,
         });
         tx.execute(
-            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-             VALUES (?1,'task','update',?2,?3,?4)",
-            params![id as i64, new_version, sqlite_now_ms(), snapshot.to_string()],
+            "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
+             VALUES (?1,'task','update',?2,?3,?4,?5)",
+            params![id as i64, new_version, sqlite_now_ms(), snapshot.to_string(), self.attribution_json],
         )?;
         let event_id: i64 = tx.query_row(
             "SELECT event_id FROM events WHERE task_id=?1 AND operation='update' ORDER BY event_id DESC LIMIT 1",
@@ -3025,8 +3169,8 @@ impl Store {
         for item in &parsed {
             for task in &item.tasks {
                 tx.execute(
-                    "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-                     VALUES (?1,'task','create',1,?2,?3)",
+                    "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
+                     VALUES (?1,'task','create',1,?2,?3,?4)",
                     params![
                         task.id as i64,
                         sqlite_now_ms(),
@@ -3040,7 +3184,7 @@ impl Store {
                             "priority": task.priority,
                             "deps": task.deps
                         })
-                        .to_string()
+                        .to_string(), self.attribution_json
                     ],
                 )?;
             }
@@ -3063,6 +3207,10 @@ impl Store {
                     sqlite_now_ms()
                 ],
             )?;
+            tx.execute(
+                "INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES ('import',?1,?2,?3)",
+                params![sqlite_now_ms(), json!({"input_sha256": hashes[index], "source_name": item.source_name}).to_string(), self.attribution_json],
+            )?;
         }
         if !combined_rules.is_empty() {
             tx.execute(
@@ -3070,9 +3218,9 @@ impl Store {
                 params![combined_rules, self.project_id.to_string()],
             )?;
             tx.execute(
-                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json)
-                 VALUES (NULL,'rules','update',1,?1,?2)",
-                params![sqlite_now_ms(), json!({"rules": combined_rules}).to_string()],
+                "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
+                 VALUES (NULL,'rules','update',1,?1,?2,?3)",
+                params![sqlite_now_ms(), json!({"rules": combined_rules}).to_string(), self.attribution_json],
             )?;
         }
         maybe_precommit_fail("import")?;
@@ -3258,6 +3406,9 @@ impl Store {
             }
             if current < 6 {
                 migrate_v5_to_v6(&tx)?;
+            }
+            if current < 7 {
+                create_attribution_schema(&tx)?;
             }
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;
