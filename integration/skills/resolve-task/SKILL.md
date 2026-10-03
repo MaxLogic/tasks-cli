@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.3.0"
+  version: "6.3.1"
   adapted-from: "D:/Pawel/Prompts/skills/resolve-task (5.2.0)"
 ---
 
@@ -108,12 +108,13 @@ explicit request or a scheduled requirement; continue independent work.
 
 ## Delivery
 
-Settle local commit authority from existing user/repository instructions. If no
-authority exists, start without commits and ask once after the first proven
-batch; explain the proven work still only in the working tree. Never infer push
-or deployment permission. With authority, stage exact owned paths, inspect the
-staged patch and commit verified batches. Respect repository commit cadence.
-Do not stage junction-linked skills or unrelated generated content.
+After each completed, verified slice, use `git-operations` to stage exact owned
+paths, inspect the staged patch and create a local commit without asking for
+approval. A slice with a pending required batch gate is not yet verified for a
+commit. Respect an explicit user prohibition on commits and preserve unrelated
+work. Do not stage junction-linked skills or unrelated generated content.
+This commit rule grants no push or deployment authority; follow the repository's
+separate rules for those actions.
 
 Before final proof, reconcile every selected task and ledger transition, stop
 or account for active workers, and materialize one exact delivery candidate.
