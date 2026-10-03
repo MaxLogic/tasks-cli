@@ -209,6 +209,15 @@ pub enum Command {
         #[arg(long = "event")]
         event: Option<u64>,
     },
+    /// Read the bounded project creation, key and import audit history.
+    ProjectHistory {
+        /// Resume after this metadata event ID.
+        #[arg(long)]
+        after: Option<u64>,
+        /// Page size, 1-100 (default 20).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Read or replace the shared project rules.
     #[command(subcommand)]
     Rules(RulesCommand),

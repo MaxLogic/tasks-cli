@@ -358,6 +358,103 @@ pub struct RuleRecord {
     pub body: String,
 }
 
+/// The observed context of one mutation. Credential identity is populated only
+/// after server authentication; local observations are explicitly unverified.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Attribution {
+    pub schema_version: u32,
+    pub request_id: uuid::Uuid,
+    pub actor_id: Option<String>,
+    pub actor_name: Option<String>,
+    pub actor_authority: AttributionSource,
+    pub machine_id: Option<uuid::Uuid>,
+    pub machine_name: Option<String>,
+    pub registered_machine_name: Option<String>,
+    pub harness: String,
+    pub harness_version: Option<String>,
+    pub session_id: Option<String>,
+    pub session_name: Option<String>,
+    pub model: Option<String>,
+    pub agent_id: Option<String>,
+    pub caller_executable: Option<String>,
+    pub harness_executable: Option<String>,
+    pub context_source: std::collections::BTreeMap<String, AttributionSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttributionSource {
+    Unavailable,
+    Os,
+    Environment,
+    Hook,
+    LocalUnverified,
+    Credential,
+}
+
+impl Default for Attribution {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            request_id: uuid::Uuid::new_v4(),
+            actor_id: None,
+            actor_name: None,
+            actor_authority: AttributionSource::Unavailable,
+            machine_id: None,
+            machine_name: None,
+            registered_machine_name: None,
+            harness: "unknown".into(),
+            harness_version: None,
+            session_id: None,
+            session_name: None,
+            model: None,
+            agent_id: None,
+            caller_executable: None,
+            harness_executable: None,
+            context_source: [
+                "actor_id",
+                "actor_name",
+                "machine_id",
+                "machine_name",
+                "registered_machine_name",
+                "harness",
+                "harness_version",
+                "session_id",
+                "session_name",
+                "model",
+                "agent_id",
+                "caller_executable",
+                "harness_executable",
+            ]
+            .into_iter()
+            .map(|field| (field.into(), AttributionSource::Unavailable))
+            .collect(),
+        }
+    }
+}
+
+impl Attribution {
+    /// Serialize before acquiring a write transaction. Keep audit inputs bounded.
+    pub fn validated_json(&self) -> Result<String, crate::AppError> {
+        let json = serde_json::to_string(self)?;
+        if self.schema_version != 1 || self.request_id.is_nil() || json.len() > 16_384 {
+            return Err(crate::AppError::Validation(
+                "mutation attribution must have schema_version 1, a non-nil request UUID and at most 16384 UTF-8 bytes".into(),
+            ));
+        }
+        Ok(json)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MetadataEvent {
+    pub event_id: u64,
+    pub operation: String,
+    pub created_ms: i64,
+    pub snapshot: serde_json::Value,
+    pub attribution: Attribution,
+}
+
 /// One task history event. `task_id` and `entity_type` stay available to
 /// library callers but are not serialized: the history payload names the task
 /// once at top level and only task events are listed.
@@ -371,6 +468,8 @@ pub struct HistoryEvent {
     pub operation: String,
     pub resulting_version: i64,
     pub created_ms: i64,
+    /// Null for legacy events, never inferred from later mutations.
+    pub attribution: Option<Attribution>,
     /// Snapshot fields that differ from the previous task event; absent when
     /// the event has no comparable predecessor (create, migrated, legacy text).
     #[serde(skip_serializing_if = "Option::is_none")]

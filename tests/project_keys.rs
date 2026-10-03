@@ -562,7 +562,7 @@ fn schema_five(data: &Path) -> String {
     drop(store);
     let conn =
         rusqlite::Connection::open(data_root_project_path(data, &project.to_string())).unwrap();
-    conn.execute_batch("ALTER TABLE project DROP COLUMN project_key; PRAGMA user_version = 5;")
+    conn.execute_batch("ALTER TABLE project DROP COLUMN project_key; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json; PRAGMA user_version = 5;")
         .unwrap();
     drop(conn);
     project.to_string()
@@ -581,7 +581,7 @@ fn migration_adds_an_unset_key_and_the_project_keeps_working_with_t_ids() {
     );
     let migrated = env.json(&["--project", &project, "migrate"]);
     assert_eq!(migrated["from_version"], 5);
-    assert_eq!(migrated["to_version"], 6);
+    assert_eq!(migrated["to_version"], 7);
     assert!(migrated["backup_path"].as_str().is_some());
     assert_eq!(
         env.json(&["--project", &project, "project-key"])["project_key"],

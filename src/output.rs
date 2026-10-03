@@ -102,6 +102,11 @@ pub enum CommandPayload {
         has_more: bool,
         next_after: Option<u64>,
     },
+    ProjectHistory {
+        items: Vec<crate::model::MetadataEvent>,
+        has_more: bool,
+        next_after: Option<u64>,
+    },
     RulesShow(RuleRecord),
     RulesSet {
         version: u64,
@@ -458,6 +463,12 @@ impl Envelope {
                         out.push_str(&format!("\tchanged={}", fields.join(",")));
                     }
                     out.push('\n');
+                    if let Some(attribution) = &e.attribution {
+                        out.push_str("attribution: ");
+                        // The value is composed solely of serializable data.
+                        out.push_str(&serde_json::json!(attribution).to_string());
+                        out.push('\n');
+                    }
                     if let Some(snapshot) = &e.snapshot_json {
                         out.push_str("snapshot: ");
                         out.push_str(snapshot);
@@ -468,6 +479,16 @@ impl Envelope {
                 if let Some(next) = next_after {
                     out.push_str(&format!("next_after: {next}\n"));
                 }
+                out
+            }
+            CommandPayload::ProjectHistory { items, has_more, next_after } => {
+                let mut out = String::new();
+                for event in items {
+                    out.push_str(&format!("{}\t{}\t{}\n", event.event_id, event.operation, event.created_ms));
+                    out.push_str(&format!("snapshot: {}\nattribution: {}\n", event.snapshot, serde_json::json!(event.attribution)));
+                }
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_after { out.push_str(&format!("next_after: {next}\n")); }
                 out
             }
             CommandPayload::RulesShow(rules) => {
