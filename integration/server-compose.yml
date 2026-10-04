@@ -1,0 +1,34 @@
+services:
+  tasks-server:
+    image: ${TASKS_SERVER_IMAGE:?select the verified image tag or digest}
+    platform: linux/amd64
+    user: "${TASKS_UID:-10001}:${TASKS_GID:-10001}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 35s
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ${TASKS_DATA_DIRECTORY:?select a NAS-local initialized directory}
+        target: /data
+        bind:
+          create_host_path: false
+    networks:
+      tasks-private:
+        aliases: [tasks-server]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  tasks-private:
+    external: true
+    name: ${TASKS_GATEWAY_NETWORK:?select the private gateway network}

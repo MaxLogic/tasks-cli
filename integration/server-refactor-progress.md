@@ -424,3 +424,44 @@ Logs/source: viewer-provider-{baseline,candidate}.log and measure-viewer-provide
 No installed CLI/viewer or user harness setting was changed. No live project was
 migrated and no NAS service was changed. Real packaged viewer/NVDA spoken-outage/focus/retry proof remains
 pending until the workstation is available. TSK-026 remains to-verify.
+
+## Container and recovery milestone, 2026-10-04 (TSK-027)
+
+Server administration now supports verified backup, restore to a new authority,
+and adoption of schema-8 project copies. Online SQLite snapshots include the
+catalog and all project directories, including unpublished receipt stores.
+Private manifests record identity, schema, counts, size and SHA-256. Integrity,
+foreign keys and staged copy hashes are checked before durable publication.
+Outputs refuse overwrite; parent sync order is tested. Sources and imported
+history, counters, attribution, receipts and authentication state are preserved.
+Existing-authority administration requires the running service to stop. Restore
+publishes a separate destination without opening the existing authority.
+
+The linux/amd64 image runs as UID/GID 10001. Compose uses a private external
+gateway network, no published ports, a read-only root, dropped capabilities,
+no privilege gain, bounded resources and rotated logs. TLS and signing private
+keys, tunnel credentials and Docker sockets stay outside the image/container.
+
+The reviewed local image is tasks-server:reviewed-20261004, image ID
+sha256:cd294eb7a7765b0e4fa23f8fef65f5af6b6f4e554a6d5a009b71a30cc162f91f.
+Local Docker 29.2.1 rehearsal passed nine named checks: backend network isolation,
+two signed HTTPS origins, exact cross-route data/history/attribution, stale-version
+refusal without an extra event, nonce replay refusal before/after restart, lost
+response recovery with the exact original receipt, revocation on both origins,
+TLS hostname mismatch refusal, and verified exact backup/restore. Three mocked
+resource-ownership tests pass. All driver-owned containers/networks/volumes were
+removed; unrelated resources were untouched. Evidence under
+target/evidence/server-refactor: docker-build-reviewed.log,
+container-proof-reviewed-fixed/manifest.json and commands.jsonl,
+container-ownership-final.log. The first strict TLS run failed because the
+synthetic CA lacked AuthorityKeyIdentifier; the corrected fixture retains strict
+validation with appropriate key identifiers/usages. Earlier failed logs remain.
+
+An offline deployment candidate is prepared in target/qnap-server-candidate-20261004:
+the 85,741,056-byte image archive, Compose configuration, runbooks and hash manifest.
+See integration/qnap-server-runbook.md and integration/server-cutover.md.
+No NAS access, deployment, installed executable replacement or live migration
+occurred. Actual QNAP runtime support, trusted LAN/Cloudflare routing and physical
+LAN backend isolation on Docker 27.1.2-qnap8 remain deployment acceptance gates.
+The existing NAS Docker version and gateway ownership are retained. TSK-027 stays
+to-verify until deployment readiness and the preceding task gates are satisfied.

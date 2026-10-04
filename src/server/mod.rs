@@ -1,6 +1,7 @@
 //! Server-local identity and credential state. No network admin operations.
 pub mod api;
 mod export;
+pub mod maintenance;
 pub mod receipts;
 mod request_log;
 pub mod signatures;
