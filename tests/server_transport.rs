@@ -253,8 +253,14 @@ struct HttpFixture {
 }
 impl HttpFixture {
     fn new() -> Self {
+        Self::with_log_file(None)
+    }
+    fn with_log_file(log: Option<std::fs::File>) -> Self {
         let (root, server, signer) = signed_fixture();
-        let state = tasks_cli::server::transport::ServiceState::new(server);
+        let mut state = tasks_cli::server::transport::ServiceState::new(server);
+        if let Some(file) = log {
+            state = state.with_log_file(file);
+        }
         let app = state.router();
         let (send, receive) = std::sync::mpsc::channel();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -329,6 +335,50 @@ impl HttpFixture {
         stream.read_to_string(&mut bytes).unwrap();
         bytes
     }
+}
+
+#[test]
+fn request_logs_include_registered_actor_and_refusals_without_private_request_content() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("requests.jsonl");
+    let fixture = HttpFixture::with_log_file(Some(std::fs::File::create(&path).unwrap()));
+    let project = Uuid::new_v4();
+    let target = format!("/v1/projects/{project}/tasks?session_title=PRIVATE_QUERY");
+    let body = b"PRIVATE_BODY_AND_PROMPT";
+    let mut headers = fixture.headers(&Method::POST, &target, body, 125);
+    headers.insert("authorization", "Bearer PRIVATE_TOKEN".parse().unwrap());
+    headers.insert("x-forwarded-user", "PRIVATE_FORGED_ACTOR".parse().unwrap());
+    let mut stream = fixture.connect(&Method::POST, &target, &headers, body.len());
+    stream.write_all(body).unwrap();
+    assert!(HttpFixture::response(stream).starts_with("HTTP/1.1 404"));
+    assert!(HttpFixture::response(fixture.connect(
+        &Method::GET,
+        "/v1/info",
+        &Default::default(),
+        0
+    ))
+    .starts_with("HTTP/1.1 401"));
+    drop(fixture);
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(!text.contains("PRIVATE_"));
+    assert!(!text.contains("signature") && !text.contains("content-digest"));
+    let lines = text
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert_eq!(line.as_object().unwrap().len(), 6);
+        assert!(Uuid::parse_str(line["request_id"].as_str().unwrap()).is_ok());
+        assert!(line["duration_ms"].is_u64());
+    }
+    assert_eq!(lines[0]["actor_id"], "owner");
+    assert_eq!(lines[0]["project_id"], project.to_string());
+    assert_eq!(lines[0]["operation"], "task_create");
+    assert_eq!(lines[0]["outcome"], "http_404");
+    assert!(lines[1]["actor_id"].is_null());
+    assert_eq!(lines[1]["outcome"], "http_401");
 }
 impl Drop for HttpFixture {
     fn drop(&mut self) {

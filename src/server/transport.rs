@@ -22,6 +22,7 @@ pub struct ServiceState {
     server: Arc<OwnedServer>,
     operations: Arc<Semaphore>,
     draining: Arc<AtomicBool>,
+    logs: super::request_log::RequestLogs,
 }
 impl ServiceState {
     pub fn new(server: OwnedServer) -> Self {
@@ -29,7 +30,12 @@ impl ServiceState {
             server: Arc::new(server),
             operations: Arc::new(Semaphore::new(MAX_OPERATIONS)),
             draining: Arc::new(AtomicBool::new(false)),
+            logs: super::request_log::RequestLogs::stderr(),
         }
+    }
+    pub fn with_log_file(mut self, file: std::fs::File) -> Self {
+        self.logs = super::request_log::RequestLogs::file(file);
+        self
     }
     pub fn begin_shutdown(&self) {
         self.draining.store(true, Ordering::SeqCst);
@@ -72,6 +78,18 @@ impl IntoResponse for ServiceError {
 async fn handler(
     State(state): State<ServiceState>,
     request: Request<axum::body::Body>,
+) -> Response {
+    let mut log =
+        super::request_log::RequestLog::new(state.logs.clone(), request.method(), request.uri());
+    let response = dispatch(state, request, &mut log).await;
+    log.completed(response.status().as_u16());
+    response
+}
+
+async fn dispatch(
+    state: ServiceState,
+    request: Request<axum::body::Body>,
+    log: &mut super::request_log::RequestLog,
 ) -> Response {
     let mutation = is_mutation(request.method(), request.uri());
     if mutation && state.draining.load(Ordering::SeqCst) {
@@ -121,6 +139,7 @@ async fn handler(
             )
         }
     };
+    log.authenticated(&authenticated);
     if parts
         .headers
         .get("content-length")

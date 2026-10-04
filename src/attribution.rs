@@ -297,21 +297,13 @@ fn read_private_json<T: serde::de::DeserializeOwned>(root: &Path, path: &Path) -
         .ok()?
         .canonicalize()
         .ok()?;
-    let path = path.canonicalize().ok()?;
-    if !path.starts_with(&root) {
+    if !path.canonicalize().ok()?.starts_with(&root) {
         return None;
     }
-    let file = fs::File::open(path).ok()?;
+    let file = crate::private_fs::open_file(path).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > MAX_CONTEXT_BYTES {
         return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if meta.permissions().mode() & 0o077 != 0 {
-            return None;
-        }
     }
     let mut bytes = Vec::new();
     file.take(MAX_CONTEXT_BYTES + 1)
@@ -402,12 +394,8 @@ pub fn write_hook(root: &Path, harness: &str, input: &[u8]) -> Result<PathBuf, c
     };
     let root = crate::storage::validate_storage_root(root)?;
     let directory = root.join("contexts");
-    fs::create_dir_all(&directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-    }
+    fs::create_dir_all(&root)?;
+    crate::private_fs::create_dir(&directory)?;
     let path = context_path(
         &root,
         harness,
@@ -425,14 +413,7 @@ pub fn write_hook(root: &Path, harness: &str, input: &[u8]) -> Result<PathBuf, c
         }
     }
     let temporary = directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
+    let mut file = crate::private_fs::create_file(&temporary)?;
     let result = (|| -> Result<(), crate::AppError> {
         file.write_all(&serde_json::to_vec(&context)?)?;
         file.sync_all()?;

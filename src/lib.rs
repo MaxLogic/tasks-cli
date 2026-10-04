@@ -9,8 +9,11 @@ pub mod keys;
 pub mod markdown;
 pub mod model;
 pub mod output;
+pub mod private_fs;
 pub mod problems;
 pub mod registry;
+#[cfg(feature = "server")]
+pub mod remote;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod storage;

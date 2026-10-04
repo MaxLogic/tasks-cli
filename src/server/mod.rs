@@ -1,4 +1,5 @@
 //! Server-local identity and credential state. No network admin operations.
+mod request_log;
 pub mod signatures;
 pub mod transport;
 use crate::storage::{acquire_exclusive_lock_for, validate_storage_root, ExclusiveLock};
