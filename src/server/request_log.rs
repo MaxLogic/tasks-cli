@@ -30,7 +30,7 @@ impl RequestLogs {
         }
     }
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Record {
     request_id: Uuid,
     actor_id: Option<String>,
@@ -43,12 +43,14 @@ pub(super) struct RequestLog {
     sink: RequestLogs,
     started: Instant,
     record: Record,
+    emit: bool,
 }
 impl RequestLog {
     pub(super) fn new(sink: RequestLogs, method: &Method, uri: &Uri) -> Self {
         let (project_id, operation) = operation(method, uri);
         Self {
             sink,
+            emit: true,
             started: Instant::now(),
             record: Record {
                 request_id: Uuid::new_v4(),
@@ -72,9 +74,29 @@ impl RequestLog {
     pub(super) fn completed(&mut self, status: u16) {
         self.record.outcome = format!("http_{status}");
     }
+    pub(super) fn handoff(&mut self) -> Self {
+        self.emit = false;
+        Self {
+            sink: self.sink.clone(),
+            started: self.started,
+            record: self.record.clone(),
+            emit: true,
+        }
+    }
+    pub(super) fn export_finished(&mut self, success: bool) {
+        self.record.outcome = if success {
+            "export_complete"
+        } else {
+            "export_interrupted"
+        }
+        .into();
+    }
 }
 impl Drop for RequestLog {
     fn drop(&mut self) {
+        if !self.emit {
+            return;
+        }
         self.record.duration_ms =
             u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.sink.emit(&self.record);
@@ -118,6 +140,7 @@ fn operation(method: &Method, uri: &Uri) -> (Option<Uuid>, &'static str) {
         }
         (Some("rules"), None, None) if method == Method::PUT => "rules_update",
         (Some("key"), None, None) if method == Method::PUT => "key_update",
+        (Some("export"), None, None) if method == Method::GET => "export",
         _ => "unknown",
     };
     (project, operation)

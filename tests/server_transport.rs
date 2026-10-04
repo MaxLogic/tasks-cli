@@ -351,7 +351,7 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
     headers.insert("x-forwarded-user", "PRIVATE_FORGED_ACTOR".parse().unwrap());
     let mut stream = fixture.connect(&Method::POST, &target, &headers, body.len());
     stream.write_all(body).unwrap();
-    assert!(HttpFixture::response(stream).starts_with("HTTP/1.1 404"));
+    assert!(HttpFixture::response(stream).starts_with("HTTP/1.1 400"));
     assert!(HttpFixture::response(fixture.connect(
         &Method::GET,
         "/v1/info",
@@ -376,7 +376,7 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
     assert_eq!(lines[0]["actor_id"], "owner");
     assert_eq!(lines[0]["project_id"], project.to_string());
     assert_eq!(lines[0]["operation"], "task_create");
-    assert_eq!(lines[0]["outcome"], "http_404");
+    assert_eq!(lines[0]["outcome"], "http_400");
     assert!(lines[1]["actor_id"].is_null());
     assert_eq!(lines[1]["outcome"], "http_401");
 }
@@ -401,7 +401,7 @@ fn internal_http_requires_authentication_and_consumes_nonce_before_body_failure(
     let valid = HttpFixture::response(fixture.connect(&Method::GET, "/v1/info", &headers, 0));
     assert!(valid.starts_with("HTTP/1.1 200"), "{valid}");
     assert!(valid.contains(&fixture.signer.server_id.to_string()));
-    assert!(valid.contains("\"ready\":false"));
+    assert!(valid.contains("\"ready\":true"));
     let replay = HttpFixture::response(fixture.connect(&Method::GET, "/v1/info", &headers, 0));
     assert!(replay.starts_with("HTTP/1.1 401"));
     let headers = fixture.headers(&Method::GET, "/v1/info", b"good", 82);

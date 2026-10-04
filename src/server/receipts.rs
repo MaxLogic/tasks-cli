@@ -21,8 +21,11 @@ pub struct ReceiptResponse {
 
 pub fn refusal(error: &AppError) -> Option<ReceiptResponse> {
     let status = match error {
-        AppError::VersionConflict { .. } | AppError::StaleSnapshot(_) => 409,
+        AppError::VersionConflict { .. } | AppError::StaleSnapshot(_) | AppError::Conflict(_) => {
+            409
+        }
         AppError::NotFound(_) | AppError::NotFoundCode(_) => 404,
+        AppError::ResponseLimit(_) => 413,
         AppError::Usage(_)
         | AppError::Validation(_)
         | AppError::OpenPrerequisites { .. }

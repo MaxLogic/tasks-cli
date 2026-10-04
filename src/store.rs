@@ -300,6 +300,27 @@ pub fn create_project_db_with_context(
     key: Option<&str>,
     attribution: &Attribution,
 ) -> Result<StoreInfo, AppError> {
+    create_project_database(data_root, project_id, key, attribution, true)
+}
+
+/// An unpublished server project has no creation event until creation and its
+/// receipt commit together. Only the server's catalog lock may call this.
+#[cfg(feature = "server")]
+pub(crate) fn prepare_server_project(
+    data_root: &Path,
+    project_id: &Uuid,
+    attribution: &Attribution,
+) -> Result<StoreInfo, AppError> {
+    create_project_database(data_root, project_id, None, attribution, false)
+}
+
+fn create_project_database(
+    data_root: &Path,
+    project_id: &Uuid,
+    key: Option<&str>,
+    attribution: &Attribution,
+    record_creation: bool,
+) -> Result<StoreInfo, AppError> {
     let attribution_json = attribution.validated_json()?;
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id.to_string());
@@ -317,7 +338,13 @@ pub fn create_project_db_with_context(
         let version = schema_version(&conn)?;
         if version == 0 && !table_exists(&conn, "project")? && !table_exists(&conn, "tasks")? {
             configure_writer(&conn)?;
-            initialize_new_database(&mut conn, project_id, key, &attribution_json)?;
+            initialize_new_database(
+                &mut conn,
+                project_id,
+                key,
+                &attribution_json,
+                record_creation,
+            )?;
         } else {
             let info = verify_existing_project(&db_path, project_id)?;
             return Ok(info);
@@ -330,7 +357,13 @@ pub fn create_project_db_with_context(
             .map_err(|error| AppError::io_path("create the project database", &db_path, error))?;
         let mut conn = Connection::open(&db_path)?;
         configure_writer(&conn)?;
-        initialize_new_database(&mut conn, project_id, key, &attribution_json)?;
+        initialize_new_database(
+            &mut conn,
+            project_id,
+            key,
+            &attribution_json,
+            record_creation,
+        )?;
     }
     let info = verify_existing_project(&db_path, project_id)?;
     Ok(info)
@@ -517,6 +550,7 @@ fn initialize_new_database(
     project_id: &Uuid,
     key: Option<&str>,
     attribution_json: &str,
+    record_creation: bool,
 ) -> Result<(), AppError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     create_schema_objects(&tx)?;
@@ -528,10 +562,12 @@ fn initialize_new_database(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number, project_key) VALUES (?1, '', 1, 1, ?2)",
         params![project_id.to_string(), key],
     )?;
-    tx.execute(
+    if record_creation {
+        tx.execute(
         "INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES ('create',?1,?2,?3)",
         params![sqlite_now_ms(), json!({"project_id": project_id, "project_key": key}).to_string(), attribution_json],
     )?;
+    }
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -1492,6 +1528,29 @@ fn project_db_path(data_root: &Path, project: &str) -> Result<(PathBuf, Uuid, Pa
 }
 
 impl Store {
+    #[cfg(feature = "server")]
+    pub(crate) fn complete_server_project_creation(
+        &mut self,
+        name: &str,
+        key: Option<&str>,
+    ) -> Result<(), AppError> {
+        let tx = WriteTransaction::begin(&mut self.conn)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata_events WHERE operation='create')",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Err(AppError::Conflict(
+                "project UUID already exists; bind to it instead of creating it again".into(),
+            ));
+        }
+        tx.execute("UPDATE project SET project_key=?1", [key])?;
+        tx.execute("INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES('create',?1,?2,?3)",params![sqlite_now_ms(),json!({"project_id":self.project_id,"name":name,"project_key":key}).to_string(),self.attribution_json])?;
+        tx.commit()?;
+        self.project_key = key.map(str::to_string);
+        Ok(())
+    }
     pub fn set_attribution(&mut self, context: &Attribution) -> Result<(), AppError> {
         self.attribution_json = context.validated_json()?;
         Ok(())
@@ -1503,16 +1562,38 @@ impl Store {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Pagination<MetadataEvent>, AppError> {
+        self.metadata_history_with_budget(after, limit, None)
+    }
+
+    pub fn metadata_history_with_budget(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        budget: Option<u64>,
+    ) -> Result<Pagination<MetadataEvent>, AppError> {
         let limit = validate_limit(limit)?;
         let after = i64::try_from(after.unwrap_or(0)).map_err(|_| {
             AppError::Validation("metadata cursor exceeds the supported event range".into())
         })?;
-        let mut statement = self.conn.prepare(
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(budget) = budget {
+            let bytes: u64 = tx.query_row(
+                "SELECT COALESCE(SUM(length(CAST(snapshot_json AS BLOB))+length(CAST(attribution_json AS BLOB))+256),0) FROM (SELECT snapshot_json,attribution_json FROM metadata_events WHERE event_id>?1 ORDER BY event_id LIMIT ?2)",
+                params![after, limit],
+                |row| row.get(0),
+            )?;
+            if bytes > budget {
+                return Err(AppError::ResponseLimit(
+                    "project history exceeds the response budget; request a smaller page".into(),
+                ));
+            }
+        }
+        let mut statement = tx.prepare(
             "SELECT event_id,operation,created_ms,snapshot_json,attribution_json FROM metadata_events
              WHERE event_id > ?1 ORDER BY event_id LIMIT ?2",
         )?;
-        let mut items = statement
-            .query_map(params![after, limit + 1], |row| {
+        let items = statement
+            .query_map(params![after, limit], |row| {
                 Ok(MetadataEvent {
                     event_id: row.get::<_, i64>(0)? as u64,
                     operation: row.get(1)?,
@@ -1534,13 +1615,21 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let has_more = items.len() > limit;
-        items.truncate(limit);
+        let has_more = match items.last() {
+            Some(last) => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata_events WHERE event_id>?1)",
+                [last.event_id],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => false,
+        };
         let next_after = if has_more {
             items.last().map(|event| event.event_id)
         } else {
             None
         };
+        drop(statement);
+        tx.commit()?;
         Ok(Pagination {
             items,
             has_more,
@@ -2336,6 +2425,15 @@ impl Store {
         raw_ids: &[String],
         include_rules: bool,
     ) -> Result<(Vec<ShowTask>, Option<RuleRecord>), AppError> {
+        self.show_tasks_with_budget(raw_ids, include_rules, None)
+    }
+
+    pub fn show_tasks_with_budget(
+        &mut self,
+        raw_ids: &[String],
+        include_rules: bool,
+        max_source_bytes: Option<u64>,
+    ) -> Result<(Vec<ShowTask>, Option<RuleRecord>), AppError> {
         if raw_ids.len() > MAX_SHOW_IDS {
             return Err(AppError::Validation(format!(
                 "show received {} task IDs; the limit is {MAX_SHOW_IDS}. Split the request.",
@@ -2350,6 +2448,24 @@ impl Store {
             }
         }
         let snapshot = self.conn.unchecked_transaction()?;
+        if let Some(max_bytes) = max_source_bytes {
+            let mut bytes = if include_rules {
+                self.conn.query_row(
+                    "SELECT length(CAST(rules_markdown AS BLOB)) FROM project",
+                    [],
+                    |r| r.get::<_, u64>(0),
+                )?
+            } else {
+                0
+            };
+            for &id in &ids {
+                let task_bytes:u64=self.conn.query_row("SELECT coalesce((SELECT length(CAST(body AS BLOB))+length(CAST(title AS BLOB))+256 FROM tasks WHERE id=?1),0) + coalesce((SELECT sum(length(CAST(p.title AS BLOB))+128) FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=?1),0) + coalesce((SELECT sum(length(CAST(label AS BLOB))+32) FROM task_labels WHERE task_id=?1),0)",[id],|r|r.get(0))?;
+                bytes = bytes.saturating_add(task_bytes);
+                if bytes > max_bytes {
+                    return Err(AppError::ResponseLimit("show contains too much text for one response. Split the request into fewer task IDs; read shared rules separately if needed".into()));
+                }
+            }
+        }
         let mut tasks = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         for &id in &ids {
@@ -3314,54 +3430,31 @@ impl Store {
                 out.display()
             )));
         }
+        let (out_text, count) = self.markdown_snapshot()?;
+        publish_export(out, out_text.as_bytes())?;
+        Ok(count)
+    }
+
+    /// Generate the existing export from one read snapshot, without a server
+    /// path supplied by a client or a temporary output file.
+    pub fn markdown_snapshot(&mut self) -> Result<(String, usize), AppError> {
+        let mut bytes = Vec::new();
+        let count = self.write_markdown(&mut bytes)?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| AppError::Database("export is not valid UTF-8".into()))?;
+        Ok((text, count))
+    }
+
+    /// Emit the existing complete Markdown format from one read snapshot. Each
+    /// task body is loaded and released individually; the caller owns buffering.
+    pub fn write_markdown(&mut self, out: &mut impl std::io::Write) -> Result<usize, AppError> {
         let snapshot = self.conn.unchecked_transaction()?;
         let rules = self.project_rules()?;
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, title, body, status, version FROM tasks ORDER BY id ASC")?;
-        let it = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })?;
-        let mut all = Vec::new();
-        for row in it {
-            all.push(row?);
-        }
-        drop(stmt);
-        let mut export_labels = HashMap::new();
-        let mut export_priorities = HashMap::new();
-        let mut count = 0usize;
-        let mut sections = HashMap::<String, Vec<(u64, String, String, Vec<u64>, i64)>>::new();
-        for (id, title, body, status, version) in all {
-            count += 1;
-            export_labels.insert(id as u64, crate::labels::read(&self.conn, id as u64)?);
-            export_priorities.insert(
-                id as u64,
-                self.conn
-                    .query_row("SELECT priority FROM tasks WHERE id=?1", [id], |r| {
-                        r.get::<_, String>(0)
-                    })?,
-            );
-            let deps = Self::task_dependencies_from(&self.conn, id as u64)?;
-            sections
-                .entry(status)
-                .or_default()
-                .push((id as u64, title, body, deps, version));
-        }
-        snapshot.commit()?;
-        let mut out_text = String::new();
-        out_text.push_str("# Task Backlog\n\n");
-        out_text.push_str("> Snapshot export; the SQLite database is the recovery authority.\n\n");
-        out_text.push_str("Task schema: 1\n\n");
-        out_text.push_str(&format!("Project: {}\n\n", self.project_id));
-        out_text.push_str("## Rules\n\n");
-        append_canonical_frame(&mut out_text, "rules", &rules.body);
-        out_text.push_str("\n\n");
+        out.write_all(b"# Task Backlog\n\n> Snapshot export; the SQLite database is the recovery authority.\n\nTask schema: 1\n\n")?;
+        write!(out, "Project: {}\n\n## Rules\n\n", self.project_id)?;
+        write_canonical_frame(out, "rules", &rules.body)?;
+        out.write_all(b"\n\n")?;
+        let mut count = 0;
         for status in [
             "draft",
             "todo",
@@ -3371,32 +3464,42 @@ impl Store {
             "done",
             "cancelled",
         ] {
-            if let Some(list) = sections.remove(status) {
-                out_text.push_str(&format!("## {status}\n\n"));
-                for (id, title, body, deps, version) in list {
-                    out_text.push_str(&format!("### {} {title}\n", self.display_id(id)));
-                    out_text.push_str(&format!("Status: {status}\n"));
-                    out_text.push_str(&format!("Version: {version}\n"));
-                    out_text.push_str(&format!(
-                        "Depends on: {}\n",
-                        deps.iter()
-                            .map(|dep| self.display_id(*dep))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ));
-                    if let Some(labels) = export_labels.get(&id).filter(|v| !v.is_empty()) {
-                        out_text.push_str(&format!("Labels: {}\n", labels.join(", ")));
-                    }
-                    if let Some(priority) = export_priorities.get(&id) {
-                        out_text.push_str(&format!("Priority: {priority}\n"));
-                    }
-                    out_text.push_str("Body:\n");
-                    append_canonical_frame(&mut out_text, "body", &body);
-                    out_text.push('\n');
+            let mut statement = self.conn.prepare(
+                "SELECT id,title,body,version,priority FROM tasks WHERE status=?1 ORDER BY id",
+            )?;
+            let mut rows = statement.query([status])?;
+            let mut heading = false;
+            while let Some(row) = rows.next()? {
+                if !heading {
+                    write!(out, "## {status}\n\n")?;
+                    heading = true;
                 }
+                let id: u64 = row.get(0)?;
+                let title: String = row.get(1)?;
+                let body: String = row.get(2)?;
+                let version: u64 = row.get(3)?;
+                let priority: String = row.get(4)?;
+                let deps = Self::task_dependencies_from(&self.conn, id)?;
+                let labels = crate::labels::read(&self.conn, id)?;
+                write!(
+                    out,
+                    "### {} {title}\nStatus: {status}\nVersion: {version}\nDepends on: {}\n",
+                    self.display_id(id),
+                    deps.iter()
+                        .map(|dep| self.display_id(*dep))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+                if !labels.is_empty() {
+                    writeln!(out, "Labels: {}", labels.join(", "))?;
+                }
+                write!(out, "Priority: {priority}\nBody:\n")?;
+                write_canonical_frame(out, "body", &body)?;
+                out.write_all(b"\n")?;
+                count += 1;
             }
         }
-        publish_export(out, out_text.as_bytes())?;
+        snapshot.commit()?;
         Ok(count)
     }
 
@@ -3566,19 +3669,26 @@ impl Store {
     }
 }
 
-fn append_canonical_frame(output: &mut String, kind: &str, content: &str) {
+fn write_canonical_frame(
+    out: &mut impl std::io::Write,
+    kind: &str,
+    content: &str,
+) -> Result<(), AppError> {
     let digest = crate::markdown::sha256(content.as_bytes());
-    output.push_str(&format!(
-        "<!-- tasks-cli:canonical-v1:{kind} bytes={} sha256={digest} -->\n",
+    writeln!(
+        out,
+        "<!-- tasks-cli:canonical-v1:{kind} bytes={} sha256={digest} -->",
         content.len()
-    ));
-    output.push_str(content);
+    )?;
+    out.write_all(content.as_bytes())?;
     if !content.ends_with('\n') {
-        output.push('\n');
+        out.write_all(b"\n")?;
     }
-    output.push_str(&format!(
-        "<!-- tasks-cli:canonical-v1:end-{kind} sha256={digest} -->\n"
-    ));
+    writeln!(
+        out,
+        "<!-- tasks-cli:canonical-v1:end-{kind} sha256={digest} -->"
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

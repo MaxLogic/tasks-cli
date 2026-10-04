@@ -337,7 +337,8 @@ pub struct DependencySummary {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct TaskUpdate {
     pub priority: Option<Priority>,
     pub title: Option<String>,

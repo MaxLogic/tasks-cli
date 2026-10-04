@@ -6,7 +6,8 @@ use std::{io::Read, path::PathBuf, time::Duration};
 use thiserror::Error;
 use uuid::Uuid;
 
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("invalid remote configuration: {0}")]
@@ -15,8 +16,10 @@ pub enum ClientError {
     Transport,
     #[error("HTTPS endpoint returned a redirect; configure its final HTTPS origin explicitly")]
     Redirect,
-    #[error("server response exceeds the 8 MiB limit")]
+    #[error("server response exceeds the 16 MiB limit; use a smaller read or streamed export")]
     ResponseLimit,
+    #[error("export transfer is incomplete or invalid; discard partial output")]
+    Export,
     #[error("request signature could not be created; check credential identity and UTC clock")]
     Signature,
 }
@@ -43,6 +46,10 @@ pub struct HttpsClient {
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+}
+pub enum RemoteExportResponse {
+    Complete(super::export::ExportSummary),
+    Refused(HttpResponse),
 }
 
 impl HttpsClient {
@@ -119,7 +126,17 @@ impl HttpsClient {
         body: &[u8],
         receipt: Option<Uuid>,
     ) -> Result<HttpResponse, ClientError> {
-        if !target.starts_with("/v1/") || target.contains('#') || body.len() > MAX_BYTES {
+        self.read_response(self.request(method, target, body, receipt)?)
+    }
+
+    fn request(
+        &self,
+        method: Method,
+        target: &str,
+        body: &[u8],
+        receipt: Option<Uuid>,
+    ) -> Result<reqwest::blocking::Response, ClientError> {
+        if !target.starts_with("/v1/") || target.contains('#') || body.len() > MAX_REQUEST_BYTES {
             return Err(ClientError::Configuration(
                 "expected a bounded /v1/ request target",
             ));
@@ -149,7 +166,7 @@ impl HttpsClient {
             .identity
             .sign_now(&method, &uri, body, receipt)
             .map_err(|_| ClientError::Signature)?;
-        let mut response = self
+        let response = self
             .client
             .request(method, url)
             .headers(headers)
@@ -159,24 +176,62 @@ impl HttpsClient {
         if response.status().is_redirection() {
             return Err(ClientError::Redirect);
         }
+        Ok(response)
+    }
+
+    fn read_response(
+        &self,
+        mut response: reqwest::blocking::Response,
+    ) -> Result<HttpResponse, ClientError> {
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_BYTES as u64)
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
         {
             return Err(ClientError::ResponseLimit);
         }
         let status = response.status().as_u16();
         let mut bytes = Vec::new();
         Read::by_ref(&mut response)
-            .take((MAX_BYTES + 1) as u64)
+            .take((MAX_RESPONSE_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| ClientError::Transport)?;
-        if bytes.len() > MAX_BYTES {
+        if bytes.len() > MAX_RESPONSE_BYTES {
             return Err(ClientError::ResponseLimit);
         }
         Ok(HttpResponse {
             status,
             body: bytes,
         })
+    }
+
+    pub fn export(
+        &self,
+        project: Uuid,
+        out: &mut impl std::io::Write,
+    ) -> Result<RemoteExportResponse, ClientError> {
+        let response = self.request(
+            Method::GET,
+            &format!("/v1/projects/{project}/export"),
+            b"",
+            None,
+        )?;
+        if response.status().as_u16() != 200 {
+            return self
+                .read_response(response)
+                .map(RemoteExportResponse::Refused);
+        }
+        if response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(';').next())
+            .map(str::trim)
+            != Some("application/x-ndjson")
+        {
+            return Err(ClientError::Export);
+        }
+        let summary = super::export::consume(&mut std::io::BufReader::new(response), out, project)
+            .map_err(|_| ClientError::Export)?;
+        Ok(RemoteExportResponse::Complete(summary))
     }
 }
