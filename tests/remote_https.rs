@@ -167,12 +167,10 @@ fn tls_gateway_forwards_signatures_to_the_actual_private_rust_listener() {
     let backend = HttpBackend::new(ServiceState::new(server));
     let gateway = TlsFixture::new("localhost", false, Reply::Proxy(backend.address));
     let client = HttpsClient::new(&gateway.url(), gateway.options(), signer).unwrap();
-    let info = client
-        .send(Method::GET, "/v1/info?encoded=%2F", b"", None)
-        .unwrap();
+    let info = client.send(Method::GET, "/v1/info", b"", None).unwrap();
     assert_eq!(info.status, 200);
     let value: serde_json::Value = serde_json::from_slice(&info.body).unwrap();
-    assert_eq!(value["ready"], false);
+    assert_eq!(value["ready"], true);
     let target = format!("/v1/projects/{}/tasks?encoded=%2F", Uuid::new_v4());
     let write = client
         .send(
@@ -182,9 +180,127 @@ fn tls_gateway_forwards_signatures_to_the_actual_private_rust_listener() {
             Some(Uuid::new_v4()),
         )
         .unwrap();
-    // Authentication/body validation succeeded, and application dispatch (not
-    // implemented yet) explicitly refused the route. 401 would expose damage.
-    assert_eq!(write.status, 404);
+    // The signature and body passed verification; application dispatch refuses
+    // unsupported query parameters. 401 would expose forwarding damage.
+    assert_eq!(write.status, 400);
+
+    // A legitimate SQLite wait may exceed the gateway fixture's old three-second
+    // read timeout. It must reach the client under the production five-second
+    // busy bound rather than being converted into a lost transport response.
+    let path = root.path().join("server.sqlite");
+    let (ready, locked) = std::sync::mpsc::channel();
+    let lock = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3300));
+        connection.execute_batch("ROLLBACK").unwrap();
+    });
+    locked
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    let waited = client.send(Method::GET, "/v1/info", b"", None);
+    lock.join().unwrap();
+    assert_eq!(waited.unwrap().status, 200);
+}
+
+#[test]
+fn complete_large_export_streams_through_tls_without_a_whole_response_buffer() {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    use tasks_cli::{
+        model::TaskStatus,
+        remote::https::RemoteExportResponse,
+        server::{api, transport::ServiceState, OwnedServer, Registration},
+        store::Store,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let server = OwnedServer::initialize(root.path()).unwrap();
+    let mut signer = identity();
+    signer.server_id = server.server_id();
+    signer.credential_id = server
+        .register(&Registration {
+            public_key: signer.key.verifying_key().to_bytes(),
+            actor_id: "owner".into(),
+            actor_name: "Owner".into(),
+            installation_id: Uuid::new_v4(),
+            installation_name: "fixture".into(),
+        })
+        .unwrap();
+    let project = Uuid::new_v4();
+    let uri = "/v1/projects".parse().unwrap();
+    let bytes =
+        serde_json::to_vec(&serde_json::json!({"project_id":project,"name":"export fixture"}))
+            .unwrap();
+    let headers = signer
+        .sign_now(&Method::POST, &uri, &bytes, Some(Uuid::new_v4()))
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let auth = server
+        .authenticate(&Method::POST, &uri, &headers, now)
+        .unwrap();
+    assert_eq!(
+        api::handle(&server, &auth, &Method::POST, &uri, &bytes)
+            .unwrap()
+            .status,
+        200
+    );
+    let mut store = Store::open_rw(root.path(), &project.to_string()).unwrap();
+    store.rules_set("exact rules Ω\r\n", 1).unwrap();
+    for index in 0..20 {
+        store
+            .create_task(
+                &format!("large {index}"),
+                &"x".repeat(1024 * 1024),
+                TaskStatus::Ready,
+                vec![],
+            )
+            .unwrap();
+    }
+    struct Probe {
+        digest: Sha256,
+        bytes: u64,
+        largest_write: usize,
+    }
+    impl Write for Probe {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.digest.update(bytes);
+            self.bytes += bytes.len() as u64;
+            self.largest_write = self.largest_write.max(bytes.len());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut expected = Probe {
+        digest: Sha256::new(),
+        bytes: 0,
+        largest_write: 0,
+    };
+    assert_eq!(store.write_markdown(&mut expected).unwrap(), 20);
+    drop(store);
+    let backend = HttpBackend::new(ServiceState::new(server));
+    let gateway = TlsFixture::new("localhost", false, Reply::Proxy(backend.address));
+    let client = HttpsClient::new(&gateway.url(), gateway.options(), signer).unwrap();
+    let mut received = Probe {
+        digest: Sha256::new(),
+        bytes: 0,
+        largest_write: 0,
+    };
+    let RemoteExportResponse::Complete(summary) = client.export(project, &mut received).unwrap()
+    else {
+        panic!("export refused")
+    };
+    assert_eq!(summary.task_count, 20);
+    assert_eq!(received.bytes, expected.bytes);
+    assert!(received.bytes > 16 * 1024 * 1024);
+    assert!(received.largest_write <= tasks_cli::remote::export::CHUNK_BYTES);
+    assert_eq!(received.digest.finalize(), expected.digest.finalize());
+    assert_eq!(gateway.requests(), 1);
 }
 
 struct HttpBackend {
@@ -355,12 +471,12 @@ impl TlsFixture {
                         write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").unwrap();
                         // The client deliberately closes after the bounded read.
                         let _ =
-                            std::io::copy(&mut std::io::repeat(b'x').take(8388609), &mut stream);
+                            std::io::copy(&mut std::io::repeat(b'x').take(16777217), &mut stream);
                     }
                     Reply::Proxy(address) => {
                         let mut upstream = std::net::TcpStream::connect(address).unwrap();
                         upstream
-                            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
                             .unwrap();
                         upstream
                             .set_write_timeout(Some(std::time::Duration::from_secs(3)))
@@ -375,18 +491,13 @@ impl TlsFixture {
                         }
                         upstream.write_all(b"\r\n").unwrap();
                         upstream.write_all(&body).unwrap();
-                        let mut response = Vec::new();
-                        upstream
-                            .take(8 * 1024 * 1024 + 16384)
-                            .read_to_end(&mut response)
-                            .unwrap();
-                        stream.write_all(&response).unwrap();
+                        std::io::copy(&mut upstream.take(128 * 1024 * 1024), &mut stream).unwrap();
                     }
                     Reply::Redirect(location) => {
                         write!(stream,"HTTP/1.1 302 Found\r\nLocation: {location}/v1/info\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                     }
                     Reply::Large => {
-                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\nConnection: close\r\n\r\n").unwrap();
+                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Length: 16777217\r\nConnection: close\r\n\r\n").unwrap();
                     }
                     _ => {
                         if let Reply::Authenticate(server) = &reply {

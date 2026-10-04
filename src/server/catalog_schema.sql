@@ -1,0 +1,4 @@
+CREATE TABLE projects (
+    project_id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 1024)
+);

@@ -395,6 +395,10 @@ reads its task rows, dependencies and rules within one deferred read transaction
 In WAL mode, writers can commit while that read retains its original snapshot.
 Release the read transaction before rendering or publishing an export. History
 pages similarly use event IDs.
+The remote streaming export is an exception: retain its read snapshot while
+rendering one row at a time into bounded frames, then release it before the
+client publishes the validated complete file. This avoids holding the entire
+backlog in server memory while preserving a single consistent snapshot.
 `show` never silently truncates body text. It accepts 1–100 task IDs, shown in
 request order with repeats collapsed, all read in one snapshot; if any ID is
 missing, the whole command fails with exit 3 naming every missing ID and prints
@@ -467,6 +471,11 @@ Minimum tables:
   timestamp, snapshot and non-null attribution JSON. Project creation, key
   changes and import provenance append within the corresponding transaction.
   Database triggers reject UPDATE and DELETE of this metadata history.
+- `mutation_receipts` (schema 8): request UUID, registered actor/installation,
+  route, canonical payload SHA-256, HTTP status and original result JSON.
+  Mutation/history/receipt writes share one transaction. Triggers reject UPDATE
+  and DELETE. Terminal application refusals remain refused on replay; transient
+  storage/lock failures are not receipts. See the server API contract below.
 - `imports`: input SHA-256 unique, source name, original source bytes, report JSON,
   import timestamp. Preserve the original source for recovery/provenance.
 
@@ -1347,6 +1356,17 @@ operational tracing but do not create history or change stored attribution.
 | `PUT /v1/projects/{uuid}/rules` | Change rules with `expect_version` |
 | `PUT /v1/projects/{uuid}/key` | User-selected key change, preserving existing collision checks |
 | `GET /v1/projects/{uuid}/export` | Existing Markdown export generated on the server and written locally by the client |
+
+Ordinary API responses have a 16 MiB serialized ceiling. Show-many and project
+history preflight a 4 MiB source-text budget inside their read snapshot, returning
+413 and a smaller-page instruction when exceeded; successful reads remain complete.
+Export uses NDJSON `begin`, `chunk`, `end` frames: protocol version 1 and project
+UUID, base64 data chunks no larger than 16 KiB, then task count, byte count and
+SHA-256. Frames are capped at 32 KiB. The client requires the matching UUID,
+complete checksum/count and EOF after the end frame before publishing its file.
+The server queues at most two frames, retains admission during the stream,
+bounds backpressure waits to 15 seconds and the whole export to five minutes.
+All API responses disable caching.
 
 The query body is a tagged enum of supported reads, not arbitrary SQL or command
 execution. Viewer `info`, catalog and typed read/write requests map to these

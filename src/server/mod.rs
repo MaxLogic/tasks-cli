@@ -1,4 +1,6 @@
 //! Server-local identity and credential state. No network admin operations.
+pub mod api;
+mod export;
 pub mod receipts;
 mod request_log;
 pub mod signatures;
@@ -77,13 +79,14 @@ impl OwnedServer {
         )?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute_batch(include_str!("schema.sql"))?;
+        transaction.execute_batch(include_str!("catalog_schema.sql"))?;
         let id = Uuid::new_v4();
         transaction.execute(
             "INSERT INTO server_identity(singleton,server_id) VALUES (1,?1)",
             [id.to_string()],
         )?;
         Self::audit(&transaction, "initialize", None, None)?;
-        transaction.pragma_update(None, "user_version", 1)?;
+        transaction.pragma_update(None, "user_version", 2)?;
         transaction.commit()?;
         drop(connection);
         Ok(Self {
@@ -107,7 +110,7 @@ impl OwnedServer {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 1 {
+        if version != 2 {
             return Err(ServiceError::Validation(
                 "unsupported server schema; use a compatible server binary",
             ));
@@ -130,11 +133,72 @@ impl OwnedServer {
         })
     }
 
+    /// Explicit stopped-service upgrade, preserving a verified SQLite snapshot.
+    pub fn migrate(root: &Path) -> Result<Option<PathBuf>, ServiceError> {
+        let root = validate_storage_root(root)?;
+        if !root.join("server.sqlite").is_file() {
+            return Err(ServiceError::Validation("server is not initialized"));
+        }
+        let (root, _ownership) = Self::claim(&root)?;
+        let mut conn = Connection::open_with_flags(
+            root.join("server.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+        let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version == 2 {
+            Self::validate_schema_version(&conn, 2)?;
+            return Ok(None);
+        }
+        if version != 1 {
+            return Err(ServiceError::Validation(
+                "unsupported server schema; use a compatible server binary",
+            ));
+        }
+        Self::validate_schema_version(&conn, 1)?;
+        let backup = root.join(format!("server.v1-pre-migrate-{}.sqlite", Uuid::new_v4()));
+        conn.backup("main", &backup, None)?;
+        let verified =
+            Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Self::validate_schema_version(&verified, 1)?;
+        let id = |db: &Connection| {
+            db.query_row(
+                "SELECT server_id FROM server_identity WHERE singleton=1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        };
+        if id(&conn)? != id(&verified)?
+            || verified.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))? != 1
+        {
+            return Err(ServiceError::Validation(
+                "server migration backup does not match the authority",
+            ));
+        }
+        drop(verified);
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(include_str!("catalog_schema.sql"))?;
+        Self::audit(&tx, "migrate-schema", None, None)?;
+        tx.pragma_update(None, "user_version", 2)?;
+        Self::validate_schema_version(&tx, 2)?;
+        tx.commit()?;
+        Ok(Some(backup))
+    }
+
     pub fn server_id(&self) -> Uuid {
         self.id
     }
 
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.root
+    }
+
     fn validate_schema(connection: &Connection) -> Result<(), ServiceError> {
+        Self::validate_schema_version(connection, 2)
+    }
+
+    fn validate_schema_version(connection: &Connection, version: u32) -> Result<(), ServiceError> {
         fn definitions(
             connection: &Connection,
         ) -> Result<Vec<(String, String, String)>, rusqlite::Error> {
@@ -147,6 +211,9 @@ impl OwnedServer {
         // rather than trusting a user_version stamp or trigger names alone.
         let expected = Connection::open_in_memory()?;
         expected.execute_batch(include_str!("schema.sql"))?;
+        if version == 2 {
+            expected.execute_batch(include_str!("catalog_schema.sql"))?;
+        }
         if definitions(connection)? != definitions(&expected)? {
             return Err(ServiceError::Validation(
                 "server schema is damaged or incompatible; restore a verified backup",

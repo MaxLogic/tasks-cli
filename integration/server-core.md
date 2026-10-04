@@ -1,8 +1,8 @@
-# Server authentication candidate
+# Server API candidate
 
-This is the TSK-023 authentication/storage milestone. It is not a deployable
-task backend. `/v1/info` returns `ready: false`; task API, remote CLI profile
-routing and deployment proof remain open. Keep it on a
+This candidate includes authenticated task operations, catalog recovery and
+atomic request receipts (TSK-023/TSK-024). `/v1/info` advertises `ready: true`
+for the typed API; remote CLI profile routing and deployment proof remain open. Keep it on a
 synthetic local data root. No installed binary, live backlog, harness settings
 or NAS configuration was changed.
 
@@ -12,6 +12,7 @@ or NAS configuration was changed.
 cargo build --release --locked --features server --bin tasks --bin tasks-server --target-dir target/server-candidate
 target/server-candidate/release/tasks-server.exe --data-root <fresh-local-fixture> admin init
 target/server-candidate/release/tasks-server.exe --data-root <fixture> admin info
+target/server-candidate/release/tasks-server.exe --data-root <fixture> admin migrate
 target/server-candidate/release/tasks-server.exe --data-root <fixture> admin register --registration-file <public-enrollment.json>
 target/server-candidate/release/tasks-server.exe --data-root <fixture> admin revoke <credential-uuid>
 target/server-candidate/release/tasks-server.exe --data-root <fixture> serve --listen 127.0.0.1:8080
@@ -25,10 +26,13 @@ contains `public_key` (32-byte array), `actor_id`, `actor_name`, `installation_i
 (UUID) and `installation_name`. Do not put a private key in this file.
 
 Server identity, public registrations, revocations, append-only admin audit and
-replay nonces live in the separate server database. It uses FULL durability and
+replay nonces and project catalog live in the separate schema-2 server database. It uses FULL durability and
 five-second SQLite busy handling. Opening validates the schema, audit trigger
 bodies and integrity. Fresh initialization creates a new UUID; reopening
 retains it. A replacement registration receives a new credential UUID.
+The stopped-service `admin migrate` command upgrades schema 1 explicitly,
+preserving a verified SQLite pre-upgrade backup, identity, credentials, audit
+and replay nonces. Serving does not migrate implicitly.
 
 ## Authentication and resource ownership
 
@@ -44,15 +48,54 @@ Nonce consumption precedes bounded body reading; body refusal does not restore
 the nonce. Restart preserves replay protection. Per-credential/global capacity
 is 4096/65536 live entries; unexpired entries are never evicted. Invalid signatures
 cannot consume replay capacity. Fresh signatures may reuse an idempotency UUID,
-but application receipts are not implemented yet.
+and the project receipt returns the original committed success or terminal
+refusal. A different actor, installation, route or canonical payload under that
+request UUID returns a conflict without dispatching the mutation.
 
 Authentication replaces actor/installation identity from the server registration;
 reported session/harness data remains client context. Eight operation permits
 bound HTTP work, with a one-second admission wait and 8 MiB body limit. A blocking
-worker retains its permit even if the request is cancelled. Body reads have a
+worker retains its permit even if the request is cancelled. Response buffers retain
+that permit until their final owner releases them. Body reads have a
 15-second limit. New writes are refused during shutdown; the process has a
 30-second graceful deadline and SQLite recovery owns outcomes after forced exit.
-Admitted task writes still need acceptance once task dispatch exists.
+Synthetic HTTP proof covers admitted-write completion during shutdown and
+response loss/reconciliation after a service restart.
+
+## Shared operations and project ownership
+
+The typed `/v1` routes cover catalog/project creation, list/search/unlocks,
+show-many, history/rules/key reads, task/rules/key mutations and Markdown export.
+Store validation, optimistic version checks and history are shared with local
+commands. Queries accept only their tagged request type, never SQL or commands.
+The response carries the existing stdout JSON envelope and its text rendering.
+Ordinary replies are capped at 16 MiB. Show-many and project history preflight a
+4 MiB source-text budget in the same read snapshot before loading bodies or
+metadata JSON; oversized reads return 413 with an actionable smaller-page hint.
+No successful response silently truncates text.
+
+Export uses bounded NDJSON begin/chunk/end frames with 16 KiB data chunks,
+project UUID, complete byte count, task count and SHA-256. The server reads one
+SQLite snapshot row by row and holds at most two queued frames. Backpressure has
+a 15-second wait bound and a five-minute overall stream deadline. Missing or
+invalid completion frames fail the client; publication must follow validation.
+Responses use `Cache-Control: no-store`.
+
+Project schema 8 retains append-only receipts for the database's lifetime.
+Each mutation, history event and receipt commit together. Terminal validation
+and version refusals are retained; auth/capacity/lock failures are not. Read
+requests create no mutation history. Existing project upgrades remain explicit
+and backed up; no project database is migrated by a network request.
+
+Creation holds the registry lock. An unpublished database contains initialized
+schema but no creation history until its creation event and receipt commit.
+Catalog publication follows that commit. Reconciliation repairs an interrupted
+binding from the original creation receipt; competing creates cannot create
+another creation event or overwrite its name. UUIDs route operations; task
+references and dependency references use the store's current project key.
+Creation refusals are retained whenever the request supplies a usable project
+UUID, including invalid names and attribution. An absent or malformed UUID has
+no project receipt store and returns an immediate protocol refusal.
 
 ## HTTPS client and private files
 
@@ -61,7 +104,8 @@ and positive connect/request timeouts (three/15 seconds by default). TLS checks
 hostname, date and trust with TLS 1.2 or newer. Every request gets a fresh signature;
 redirects are refused and automatic request retries are disabled. Exact encoded
 path/query bytes are checked against the transmitted URL before signing. Bodies
-and responses are bounded at 8 MiB, including responses without Content-Length.
+are bounded at 8 MiB; ordinary responses at 16 MiB, including replies without
+Content-Length. Complete exports use the separately bounded streaming protocol.
 Errors contain fixed diagnostic categories, never raw URLs, headers or bodies.
 Remote CLI profile selection and pending mutation receipt handling are TSK-025.
 
@@ -84,7 +128,7 @@ The server emits one JSON log line per request to stderr, with exactly request I
 registered actor ID (null before authentication), valid project UUID, fixed
 operation name, duration and outcome. Query text, bodies, headers, keys, titles,
 environment and executable arguments are excluded. A cancelled handler records
-`cancelled`, not a claimed mutation result. Persistent receipts will own mutation
+`cancelled`, not a claimed mutation result. Persistent receipts own mutation
 outcome recovery. Log I/O errors are reported locally without changing committed
 application outcomes.
 
@@ -93,5 +137,5 @@ application outcomes.
 Synthetic TLS gateway proof reaches the actual authenticated private Rust HTTP
 listener and preserves signed metadata/body. This does not certify the NAS Caddy
 or Cloudflare route. Actual NAS TLS/network isolation waits for the user's gateway
-thread and TSK-027. Admitted task-write shutdown/recovery proof belongs with shared
-task dispatch in TSK-024; no task route is advertised as ready today.
+thread and TSK-027. Local/API readiness does not certify container isolation,
+remote CLI/viewer compatibility, a live NAS route or a migrated project.

@@ -48,6 +48,7 @@ pub enum Command {
     /// Record allow-listed hook metadata from stdin without conversation output.
     #[command(hide = true)]
     ContextHook {
+        /// Harness supplying the context: codex or claude-code.
         #[arg(long, value_parser = ["codex", "claude-code"])]
         harness: String,
         /// Private client configuration directory; defaults to the user profile.

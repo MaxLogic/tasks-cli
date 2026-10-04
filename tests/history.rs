@@ -5,6 +5,19 @@ use tasks_cli::store::{create_project_db, Store};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+fn cli(binary: &str) -> Command {
+    let mut command = Command::new(binary);
+    command
+        .env_remove("TASKS_WINDOWS_EXE")
+        .env_remove("TASKS_PROJECT");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
 fn fixture() -> (TempDir, Uuid, Store) {
     let root = tempfile::tempdir().expect("temporary directory");
     let project = Uuid::new_v4();
@@ -58,17 +71,21 @@ fn selected_history_text_and_json_include_the_same_snapshot() {
         "--event",
         event.as_str(),
     ];
-    let text = Command::new(binary)
+    let text = cli(binary)
         .args(["--format", "text"])
         .args(common)
         .output()
         .expect("text history");
-    assert!(text.status.success());
+    assert!(
+        text.status.success(),
+        "{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
     let text = String::from_utf8(text.stdout).expect("text UTF-8");
     assert!(text.contains("complete title"));
     assert!(text.contains("complete body Ω"));
 
-    let json = Command::new(binary)
+    let json = cli(binary)
         .args(["--format", "json"])
         .args(common)
         .output()

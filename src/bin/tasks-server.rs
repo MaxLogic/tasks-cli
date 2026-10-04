@@ -25,6 +25,7 @@ enum Command {
 #[derive(Subcommand)]
 enum Admin {
     Init,
+    Migrate,
     Info,
     Register {
         #[arg(long)]
@@ -43,6 +44,14 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Admin { command } => {
+            if matches!(command, Admin::Migrate) {
+                let backup = OwnedServer::migrate(&cli.data_root)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":2,"backup_path":backup})
+                );
+                return Ok(());
+            }
             if matches!(command, Admin::Init) {
                 let server = OwnedServer::initialize(&cli.data_root)?;
                 println!("{}", serde_json::json!({"server_id":server.server_id()}));
@@ -75,7 +84,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         serde_json::json!({"credential_id":credential_id,"revoked":true})
                     );
                 }
-                Admin::Init => {}
+                Admin::Init | Admin::Migrate => {}
             }
         }
         Command::Serve { listen } => {

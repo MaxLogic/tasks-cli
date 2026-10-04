@@ -81,9 +81,34 @@ async fn handler(
 ) -> Response {
     let mut log =
         super::request_log::RequestLog::new(state.logs.clone(), request.method(), request.uri());
-    let response = dispatch(state, request, &mut log).await;
+    let mut response = dispatch(state, request, &mut log).await;
+    response.headers_mut().insert(
+        "cache-control",
+        axum::http::HeaderValue::from_static("no-store"),
+    );
     log.completed(response.status().as_u16());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_buffers_keep_admission_until_every_clone_is_released() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().try_acquire_owned().unwrap();
+        let bytes = axum::body::Bytes::from_owner(ResponseBytes {
+            bytes: vec![1; 1024],
+            _permit: permit,
+        });
+        let clone = bytes.clone();
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(bytes);
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(clone);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
 }
 
 async fn dispatch(
@@ -128,7 +153,7 @@ async fn dispatch(
         Ok::<_, ServiceError>((authentication, permit, parts, server.server_id()))
     })
     .await;
-    let (authenticated, _permit, parts, server_id) = match authenticated {
+    let (authenticated, permit, parts, _server_id) = match authenticated {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => return error.into_response(),
         Err(_) => {
@@ -186,9 +211,96 @@ async fn dispatch(
     if let Err(error) = authenticated.check_body(&bytes) {
         return error.into_response();
     }
-    // Application routes are added in TSK-024. Do not advertise readiness for them.
-    if parts.method == axum::http::Method::GET && parts.uri.path() == "/v1/info" {
-        return Json(serde_json::json!({"protocol_version":1,"server_id":server_id,"ready":false,"capabilities":["authenticated-info","ed25519-signatures","persistent-replay-protection"]})).into_response();
+    let server = state.server.clone();
+    if parts.method == axum::http::Method::GET && parts.uri.path().ends_with("/export") {
+        let prepared = tokio::task::spawn_blocking(move || {
+            let prepared = super::api::prepare_export(&server, &parts.uri);
+            (prepared, permit, server)
+        })
+        .await;
+        let (prepared, permit, server) = match prepared {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "worker",
+                    "server worker failed",
+                )
+            }
+        };
+        let store = match prepared {
+            Ok(super::api::ExportPreparation::Ready(store)) => store,
+            Ok(super::api::ExportPreparation::Refused(reply)) => {
+                return json_response(reply, permit)
+            }
+            Err(error) => return error.into_response(),
+        };
+        let (sender, body) =
+            http_body_util::channel::Channel::<axum::body::Bytes, std::io::Error>::new(2);
+        let mut stream_log = log.handoff();
+        tokio::task::spawn_blocking(move || {
+            let _server = server;
+            let result = super::export::ExportWriter::new(sender, permit).run(*store);
+            stream_log.export_finished(result.is_ok());
+        });
+        return (
+            [("content-type", "application/x-ndjson")],
+            axum::body::Body::new(body),
+        )
+            .into_response();
     }
-    error(StatusCode::NOT_FOUND, "not_found", "unknown API route")
+    match tokio::task::spawn_blocking(move || {
+        let reply = super::api::handle(&server, &authenticated, &parts.method, &parts.uri, &bytes);
+        (reply, permit)
+    })
+    .await
+    {
+        Ok((Ok(reply), permit)) => json_response(reply, permit),
+        Ok((Err(error), _permit)) => error.into_response(),
+        Err(_) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "worker",
+            "server worker failed",
+        ),
+    }
+}
+
+struct ResponseBytes {
+    bytes: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl AsRef<[u8]> for ResponseBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+fn json_response(
+    reply: super::receipts::ReceiptResponse,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Response {
+    let bytes = match super::api::bounded_json(&reply.body) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return match super::receipts::refusal(&error) {
+                Some(reply) => json_response(reply, permit),
+                None => ServiceError::Storage(error).into_response(),
+            }
+        }
+    };
+    match StatusCode::from_u16(reply.status) {
+        Ok(status) => (
+            status,
+            [("content-type", "application/json")],
+            axum::body::Body::from(axum::body::Bytes::from_owner(ResponseBytes {
+                bytes,
+                _permit: permit,
+            })),
+        )
+            .into_response(),
+        Err(_) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "worker",
+            "invalid response status",
+        ),
+    }
 }

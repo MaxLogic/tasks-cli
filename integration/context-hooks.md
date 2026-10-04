@@ -29,8 +29,9 @@ Set `TASKS_CLIENT_DIR` once in the isolated harness environment to a fresh
 temporary directory. Production defaults are
 `%LOCALAPPDATA%/MaxLogic/tasks-cli/client` on Windows and
 `${XDG_CONFIG_HOME:-$HOME/.config}/tasks-cli/client` on Linux. Unix context
-directories/files use 0700/0600. Windows context ACL hardening remains unproven;
-do not use this candidate for sensitive context on a shared Windows account.
+directories/files use 0700/0600. Windows uses protected owner/SYSTEM/Administrators
+ACLs; synthetic file and concurrent hook cases pass. Live harness acceptance
+remains pending.
 
 Configure SessionStart plus PreToolUse for Bash/PowerShell so model changes
 refresh the record. SubagentStart retains a supplied agent ID separately.

@@ -236,3 +236,51 @@ checks pass. API routes, catalog recovery and HTTP acceptance still belong to
 the active TSK-024; this receipt milestone does not close that task.
 Both release candidates (`tasks`, `tasks-server`) build in the isolated Windows
 and Linux target directories; logs are `receipts-{windows,linux}-release.log`.
+
+## Shared API, 2026-10-04 (TSK-024)
+
+Typed catalog/project creation, list/search/unlocks/show/history/rules/key reads
+and task/rules/key mutations now share Store validation, versions and history.
+Authenticated identity replaces client actor/machine claims. Server schema 2
+adds the catalog through explicit backed-up migration; project schema remains 8.
+Creation commits its event/receipt before publishing a catalog binding. A replay
+repairs interrupted publication without creating another project or history event.
+Valid-UUID terminal creation refusals retain receipts without publishing a project.
+
+Normal replies have a 16 MiB serialization cap and retain operation admission
+while response buffers live. Show/history preflight source bytes in their read
+snapshot. History lookahead queries existence without loading the next snapshot.
+Complete exports stream one SQLite snapshot in bounded NDJSON frames, with byte
+count and SHA-256 verification. Queued frames retain admission after producer exit.
+Client atomic export publication belongs to TSK-025, not this milestone.
+
+Focused proof: 68 owning tests per platform across server_api (19), transport
+(13), HTTPS (7), attribution (8), history (2), project_keys (17), markdown (2).
+Library tests add 58 Windows / 59 Linux; all pass, zero failed/ignored/filtered.
+The TLS export proof transfers over 20 MiB through an actual gateway/listener,
+compares complete bytes/checksum/count and bounds consumer writes to 16 KiB.
+HTTP tests cover disconnect/lost acknowledgement, admitted-write shutdown,
+oversized bodies, exact-once receipts, competing creates and catalog recovery.
+
+Logs: `target/evidence/server-refactor/api-final-{windows,linux}-tests.log`,
+`api-final-{windows,linux}-clippy.log`, `api-final-{windows,linux}-release.log`.
+Both isolated release candidates build; focused Clippy is clean. Original RED
+and unsuccessful fixture runs remain separately named. The existing history
+fixture now suppresses Windows consoles and inherited delegation. Missing help
+on the context-hook harness option was exposed by library tests and corrected.
+
+A controlled 3.3-second SQLite lock reproduces the test gateway's old 3-second
+upstream timeout (`proxy-wait-red.log`). Aligning that fixture with the client's
+15-second request bound passes the same probe (`proxy-wait-green.log`); production
+timeouts were not changed. The regression is retained in the gateway test.
+
+Independent reviews used installed Codex CLI, GPT-6 Sol/high, default service
+tier, supplied-source read-only snapshots with tools/hooks disabled. Initial
+findings (response memory/refusal receipts), follow-up findings (queued permit
+ownership/lookahead), and final no-blocker result are retained in
+`api-review-{supplied,fixed,final}-findings.md` with measured run/usage records.
+An earlier shell-based review read no code because of policy refusals; its zero
+process exit is not claimed as review evidence. Final review's source snapshot
+precedes only the test-gateway timeout regression, documentation and formatting.
+Broad checkpoints remain after slices 1-5 and 6-7. No installation, live data
+migration, desktop operation or NAS deployment occurred.
