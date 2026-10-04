@@ -12,7 +12,7 @@ pub mod output;
 pub mod private_fs;
 pub mod problems;
 pub mod registry;
-#[cfg(feature = "server")]
+#[cfg(feature = "remote")]
 pub mod remote;
 #[cfg(feature = "server")]
 pub mod server;

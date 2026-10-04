@@ -9,11 +9,13 @@ re-clone, and the backlog stays exactly where it was. Reads are bounded, so
 along with them. Writes carry a version check, so two agents working the same
 backlog cannot silently overwrite each other.
 
-It is one synchronous executable. No daemon, no server, no ORM, no network. One
-connection per command, then it exits. Multi-query reads use a single WAL
-snapshot, so concurrent changes cannot mix task versions, rules and dependencies
-in one response. Export renders after releasing that snapshot and publishes
-without overwriting a competing file.
+Local operation uses one synchronous executable and one SQLite connection per
+command. Optional remote profiles send signed HTTPS requests to the Rust
+`tasks-server`, which owns the same task databases. Remote access requires an
+online server. See [remote setup and recovery](integration/remote-cli.md).
+Multi-query reads use one WAL snapshot, so concurrent changes cannot mix task
+versions, rules and dependencies. Export verifies a complete snapshot and
+publishes without overwriting a competing file.
 
 The bundled engine is SQLite 3.53.2 through rusqlite 0.40.2. This is the engine
 in the current crate, not a claim to bundle the latest upstream SQLite patch.

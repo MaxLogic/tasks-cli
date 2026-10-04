@@ -1,3 +1,4 @@
+mod support;
 use serde_json::Value;
 use tasks_cli::model::{Attribution, AttributionSource, TaskStatus, TaskUpdate};
 use tasks_cli::store::{create_project_db, Store};
@@ -221,7 +222,7 @@ fn supplied_context_is_snapshotted_paginated_and_restored_by_backup() {
 
     for (command, arg) in [("history", Some("T-1")), ("project-history", None)] {
         for format in ["text", "json"] {
-            let mut cli = std::process::Command::new(env!("CARGO_BIN_EXE_tasks"));
+            let mut cli = support::process::command(env!("CARGO_BIN_EXE_tasks"));
             cli.env_remove("TASKS_WINDOWS_EXE")
                 .env_remove("TASKS_PROJECT");
             cli.args([

@@ -1,5 +1,5 @@
+mod support;
 use std::fs;
-use std::process::Command;
 use tasks_cli::markdown;
 use tasks_cli::store::{create_project_db, Store};
 use tempfile::TempDir;
@@ -14,7 +14,7 @@ fn store() -> (TempDir, Store) {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tasks"))
+    support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(args)
         .output()
         .expect("tasks executable")

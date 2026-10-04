@@ -1,6 +1,6 @@
+mod support;
 use serde_json::Value;
 use std::fs;
-use std::process::Command;
 use tasks_cli::registry::{bind_root, resolve_project};
 use tasks_cli::store::{create_project_db, data_root_project_path};
 use tempfile::TempDir;
@@ -20,7 +20,7 @@ fn routed_project(
     explicit_project: Option<&str>,
     environment_project: Option<&str>,
 ) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command
         .args([
             "--format",
@@ -88,7 +88,7 @@ fn unknown_cli_directory_fails_without_creating_a_backlog() {
     let (temp, _) = setup();
     let unknown = temp.path().join("unknown");
     fs::create_dir_all(&unknown).expect("unknown directory");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(["--data-root", temp.path().to_str().unwrap(), "list"])
         .current_dir(&unknown)
         .output()
@@ -207,7 +207,7 @@ fn explicit_project_wins_and_invalid_nearest_identity_fails_closed() {
 
 #[test]
 fn version_flag_identifies_the_binary() {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .arg("--version")
         .output()
         .expect("tasks executable");
@@ -232,7 +232,7 @@ fn init_can_write_an_identity_and_route_with_it() {
     let workspace = tempfile::tempdir().expect("workspace");
     let project = Uuid::new_v4();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--format",
             "json",
@@ -271,7 +271,7 @@ fn init_can_write_an_identity_and_route_with_it() {
     )
     .expect("replace identity formatting");
     let second_data = tempfile::tempdir().expect("second data root");
-    let rerun = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let rerun = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--format",
             "json",
@@ -306,7 +306,7 @@ fn init_refuses_a_conflicting_identity_before_initializing() {
     let requested = Uuid::new_v4();
     write_identity(workspace.path(), existing);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--data-root",
             data.path().to_str().expect("UTF-8 data root"),

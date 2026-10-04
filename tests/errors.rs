@@ -1,5 +1,5 @@
+mod support;
 use serde_json::Value;
-use std::process::Command;
 use tasks_cli::model::{TaskStatus, TaskUpdate};
 use tasks_cli::store::{create_project_db, data_root_project_path, Store};
 use uuid::Uuid;
@@ -11,7 +11,7 @@ fn parse_error(output: std::process::Output) -> Value {
 
 #[test]
 fn clap_usage_errors_use_the_json_error_envelope() {
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(["--format=json", "not-a-command"])
         .output()
         .expect("CLI");
@@ -45,7 +45,7 @@ fn conflicts_have_stable_json_fields_and_exit_code() {
 
     let project_text = project.to_string();
     let root_text = root.path().to_str().expect("UTF-8 root");
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--format",
             "json",
@@ -74,7 +74,7 @@ fn missing_project_is_not_found_and_corrupt_database_is_database_error() {
     let root = tempfile::tempdir().expect("temporary directory");
     let missing = Uuid::new_v4().to_string();
     let root_text = root.path().to_str().expect("UTF-8 root");
-    let missing_output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let missing_output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--format=json",
             "--data-root",
@@ -95,7 +95,7 @@ fn missing_project_is_not_found_and_corrupt_database_is_database_error() {
         .expect("project directory");
     std::fs::write(&corrupt_path, b"not sqlite").expect("corrupt database");
     let corrupt_text = corrupt_project.to_string();
-    let corrupt_output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let corrupt_output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--format=json",
             "--data-root",

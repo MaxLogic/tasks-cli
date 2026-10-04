@@ -1,7 +1,8 @@
 #![cfg(feature = "test-hooks")]
 
+mod support;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tasks_cli::bulk::{self, BulkOptions};
 use tasks_cli::model::{SourceSchema, TaskStatus};
@@ -50,7 +51,7 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
     let project = preview.candidates[0].project_id.clone();
     let ready = temp.path().join("ready");
     let release = temp.path().join("release");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let mut child = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .arg("--data-root")
         .arg(&data)
         .arg("bulk-import")
@@ -80,7 +81,7 @@ fn failed_bulk_import_preserves_a_project_created_by_another_process() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let init = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let init = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .arg("--data-root")
         .arg(&data)
         .arg("--project")
@@ -157,7 +158,7 @@ fn verification_failure_on_a_preexisting_database_reports_retained_mutation() {
     create_project_db_with_key(&data, &project, Some("WS")).unwrap();
 
     let report_dir = temp.path().join("apply");
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--data-root",
             data.to_str().unwrap(),
@@ -216,7 +217,7 @@ fn competing_verification_export_reports_committed_preexisting_db_state() {
     let report_dir = temp.path().join("apply");
     let ready = temp.path().join("ready-export");
     let release = temp.path().join("release-export");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let mut child = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--data-root",
             data.to_str().unwrap(),

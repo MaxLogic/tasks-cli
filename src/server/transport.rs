@@ -275,9 +275,29 @@ impl AsRef<[u8]> for ResponseBytes {
     }
 }
 fn json_response(
-    reply: super::receipts::ReceiptResponse,
+    mut reply: super::receipts::ReceiptResponse,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Response {
+    if let Some(receipt) = reply.receipt {
+        let Some(body) = reply.body.as_object_mut() else {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "worker",
+                "invalid terminal response",
+            );
+        };
+        let receipt = match serde_json::to_value(receipt) {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "worker",
+                    "invalid terminal response",
+                )
+            }
+        };
+        body.insert("receipt".into(), receipt);
+    }
     let bytes = match super::api::bounded_json(&reply.body) {
         Ok(bytes) => bytes,
         Err(error) => {

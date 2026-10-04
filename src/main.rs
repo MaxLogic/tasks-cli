@@ -229,6 +229,32 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             "viewer commands are JSON-only; add --format json to the command line".to_string(),
         ));
     }
+    let client_root = cli
+        .data_root
+        .clone()
+        .unwrap_or_else(registry::default_data_root);
+    #[cfg(feature = "remote")]
+    {
+        if let Command::Remote(command) = &cli.command {
+            return tasks_cli::remote::command::setup(&cli, &client_root, command);
+        }
+        let profile = tasks_cli::remote::config::load(&client_root)?;
+        if matches!(profile, tasks_cli::remote::config::Profile::Remote { .. }) {
+            return tasks_cli::remote::command::execute(&cli, &client_root, &profile);
+        }
+    }
+    #[cfg(not(feature = "remote"))]
+    if match std::fs::symlink_metadata(client_root.join("client.toml")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    } {
+        return Err(AppError::Remote {
+            code: "remote_configuration",
+            message: "this build lacks remote profile support; use the standard tasks build".into(),
+            request_id: None,
+        });
+    }
     if interop::has_backend(&cli) && !interop::should_delegate(&cli) {
         return Err(AppError::Interop(
             "cannot use the Windows backend: --windows-exe or TASKS_WINDOWS_EXE is set, but this is not WSL; run the command on Windows, or run it from WSL"
@@ -629,6 +655,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 _ => Store::open_rw(&data_root, &project_id)?,
             };
             match cli.command.clone() {
+                #[cfg(feature = "remote")]
+                Command::Remote(_) => unreachable!(),
                 Command::Create {
                     priority,
                     labels,

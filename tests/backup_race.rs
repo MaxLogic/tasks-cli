@@ -1,5 +1,5 @@
+mod support;
 use rusqlite::Connection;
-use std::process::Command;
 use tasks_cli::model::TaskStatus;
 use tasks_cli::store::{create_project_db, Store};
 use uuid::Uuid;
@@ -29,11 +29,11 @@ fn concurrent_backups_publish_at_most_one_destination() {
         "--out",
         out_text,
     ];
-    let first = Command::new(binary)
+    let first = support::process::command(binary)
         .args(args)
         .spawn()
         .expect("first backup");
-    let second = Command::new(binary)
+    let second = support::process::command(binary)
         .args(args)
         .spawn()
         .expect("second backup");

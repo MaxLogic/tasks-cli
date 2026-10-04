@@ -1,4 +1,4 @@
-use std::process::Command;
+mod support;
 use tasks_cli::model::Attribution;
 use tasks_cli::store::{create_project_db, Store};
 use uuid::Uuid;
@@ -9,7 +9,7 @@ fn mutation(viewer: bool) -> Attribution {
     create_project_db(root.path(), &project).unwrap();
     let body = root.path().join("body.md");
     std::fs::write(&body, "audit body").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command
         .args([
             "--data-root",
@@ -61,7 +61,7 @@ fn context_mutation(
 ) -> Attribution {
     let body = root.join("hook-body.md");
     std::fs::write(&body, "body").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command
         .args([
             "--data-root",
@@ -194,7 +194,7 @@ fn hook_command_is_silent_and_claude_env_publication_is_append_only() {
     let client = root.path().join("client with quote '");
     let env_file = root.path().join("claude-env.sh");
     std::fs::write(&env_file, "export PREVIOUS='keep'\n").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command
         .args([
             "context-hook",
@@ -224,7 +224,7 @@ fn hook_command_is_silent_and_claude_env_publication_is_append_only() {
     .unwrap();
     assert!(!context.contains("never-read") && !context.contains("never-store"));
     let before = std::fs::read_dir(&client).unwrap().count();
-    let preview = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let preview = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(["context-setup", "--harness", "codex"])
         .env("TASKS_CLIENT_DIR", &client)
         .output()

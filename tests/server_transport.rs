@@ -1,4 +1,5 @@
 #![cfg(feature = "server")]
+mod support;
 use axum::http::{HeaderValue, Method, Uri};
 use ed25519_dalek::SigningKey;
 use tasks_cli::server::signatures::SigningIdentity;
@@ -58,7 +59,7 @@ fn invalid_registration_errors_do_not_echo_supplied_values() {
     drop(OwnedServer::initialize(root.path()).unwrap());
     let input = root.path().join("bad.json");
     std::fs::write(&input, br#"{"public_key":"PRIVATE_VALUE_MUST_NOT_APPEAR"}"#).unwrap();
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_tasks-server"))
+    let result = support::process::command(env!("CARGO_BIN_EXE_tasks-server"))
         .args([
             "--data-root",
             root.path().to_str().unwrap(),
@@ -499,7 +500,7 @@ fn server_identity_persists_and_process_ownership_excludes_administration() {
 #[test]
 fn global_replay_capacity_and_real_admin_process_exclusion_are_enforced() {
     let (root, server, signer) = signed_fixture();
-    let admin = std::process::Command::new(env!("CARGO_BIN_EXE_tasks-server"))
+    let admin = support::process::command(env!("CARGO_BIN_EXE_tasks-server"))
         .args([
             "--data-root",
             root.path().to_str().unwrap(),

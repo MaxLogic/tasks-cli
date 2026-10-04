@@ -1,9 +1,6 @@
+mod support;
 use rusqlite::Connection;
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Stdio},
-};
+use std::{fs, path::PathBuf, process::Stdio};
 use tasks_cli::store::{data_root_project_path, Store};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -153,7 +150,7 @@ fn migrate_output_reports_backup_path_in_text_and_json() {
     for format in ["text", "json"] {
         let (root, project_id, _) = legacy_fixture("ready");
         let project_text = project_id.to_string();
-        let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args([
                 "--data-root",
                 root.path().to_str().expect("UTF-8 root"),
@@ -365,7 +362,7 @@ fn concurrent_migrations_serialize_and_both_exit_successfully() {
         project_text.as_str(),
         "migrate",
     ];
-    let first = Command::new(binary)
+    let first = support::process::command(binary)
         .args(args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
@@ -373,7 +370,7 @@ fn concurrent_migrations_serialize_and_both_exit_successfully() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("first migration");
-    let second = Command::new(binary)
+    let second = support::process::command(binary)
         .args(args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")

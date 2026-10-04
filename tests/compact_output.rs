@@ -1,8 +1,9 @@
 //! Token-efficient output contract: compact JSON, opt-in rules, multi-ID show,
 //! lean history, trimmed text rows and label add/remove.
 
+mod support;
 use serde_json::{json, Value};
-use std::{fs, process::Command, process::Output};
+use std::{fs, process::Output};
 use tasks_cli::store::create_project_db;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ impl Fixture {
     }
 
     fn raw(&self, format: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tasks"))
+        support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args([
                 "--data-root",
                 self.root.path().to_str().unwrap(),

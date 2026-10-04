@@ -3,10 +3,11 @@
 //! reports it in the all-problems format, and that a passing dry run is not
 //! followed by an apply failure for a data reason.
 
+mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -20,7 +21,7 @@ fn string_arg(value: impl AsRef<Path>) -> String {
 }
 
 fn run(args: &[String]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tasks"))
+    support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")

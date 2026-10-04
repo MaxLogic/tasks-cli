@@ -2,6 +2,7 @@
 //! output, cross-project enrichment, migration and bulk import. Every test
 //! uses its own temporary data root and real subprocesses.
 
+mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ impl Env {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+        let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

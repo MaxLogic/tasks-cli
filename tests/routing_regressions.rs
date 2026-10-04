@@ -1,5 +1,6 @@
+mod support;
 use serde_json::Value;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tasks_cli::registry;
 use tasks_cli::store::create_project_db;
 use uuid::Uuid;
@@ -102,7 +103,7 @@ fn concurrent_init_processes_publish_one_binding_and_one_database() {
         "--key",
         "RR",
     ];
-    let first = Command::new(binary)
+    let first = support::process::command(binary)
         .args(args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
@@ -110,7 +111,7 @@ fn concurrent_init_processes_publish_one_binding_and_one_database() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("first init");
-    let second = Command::new(binary)
+    let second = support::process::command(binary)
         .args(args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")

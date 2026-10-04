@@ -17,6 +17,8 @@ pub struct ReceiptIdentity {
 pub struct ReceiptResponse {
     pub status: u16,
     pub body: Value,
+    #[serde(skip)]
+    pub receipt: Option<crate::remote::protocol::RequestReceipt>,
 }
 
 pub fn refusal(error: &AppError) -> Option<ReceiptResponse> {
@@ -36,7 +38,11 @@ pub fn refusal(error: &AppError) -> Option<ReceiptResponse> {
     // Only application errors with public messages enter the durable response.
     let mut body = serde_json::from_str::<Value>(&error.json()).ok()?;
     body["error"]["exit_code"] = json!(error.exit_code());
-    Some(ReceiptResponse { status, body })
+    Some(ReceiptResponse {
+        status,
+        body,
+        receipt: None,
+    })
 }
 
 /// Owning the connection ensures even a panic drops and rolls back the outer
@@ -74,6 +80,7 @@ pub fn execute(
             || prior_digest != digest
         {
             return Ok(ReceiptResponse {
+                receipt: None,
                 status: 409,
                 body: json!({"schema_version":1,"error":{
                     "code":"idempotency_conflict", "message":"this request ID belongs to a different request", "exit_code":4
@@ -81,6 +88,12 @@ pub fn execute(
             });
         }
         return Ok(ReceiptResponse {
+            receipt: Some(crate::remote::protocol::RequestReceipt {
+                request_id: identity.request_id,
+                route: identity.route.clone(),
+                payload_sha256: digest,
+                status,
+            }),
             status,
             body: serde_json::from_str(&body)?,
         });
@@ -92,7 +105,11 @@ pub fn execute(
     let response = match mutation(&mut store) {
         Ok(body) => {
             store.conn.execute_batch("RELEASE receipt_operation")?;
-            ReceiptResponse { status: 200, body }
+            ReceiptResponse {
+                status: 200,
+                body,
+                receipt: None,
+            }
         }
         Err(error) => {
             store
@@ -111,5 +128,13 @@ pub fn execute(
         params![identity.request_id.to_string(),identity.actor_id,identity.installation_id.to_string(),identity.route,digest,response.status,body],
     )?;
     store.conn.execute_batch("COMMIT")?;
-    Ok(response)
+    Ok(ReceiptResponse {
+        receipt: Some(crate::remote::protocol::RequestReceipt {
+            request_id: identity.request_id,
+            route: identity.route.clone(),
+            payload_sha256: digest,
+            status: response.status,
+        }),
+        ..response
+    })
 }

@@ -1,7 +1,8 @@
+mod support;
 use clap::Parser;
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tasks_cli::cli::Cli;
 use uuid::Uuid;
 
@@ -38,7 +39,7 @@ fn subprocess_preserves_stdin_body_and_nonzero_exit_codes() {
     fs::create_dir_all(&root).expect("root");
     let data = temp.path().join("data");
     let binary = env!("CARGO_BIN_EXE_tasks");
-    let init = Command::new(binary)
+    let init = support::process::command(binary)
         .args([
             "--data-root",
             data.to_str().unwrap(),
@@ -59,7 +60,7 @@ fn subprocess_preserves_stdin_body_and_nonzero_exit_codes() {
         .unwrap()
         .trim()
         .to_string();
-    let mut child = Command::new(binary)
+    let mut child = support::process::command(binary)
         .args([
             "--data-root",
             data.to_str().unwrap(),
@@ -87,7 +88,7 @@ fn subprocess_preserves_stdin_body_and_nonzero_exit_codes() {
         .expect("create result")
         .status
         .success());
-    let bad = Command::new(binary)
+    let bad = support::process::command(binary)
         .args([
             "--data-root",
             data.to_str().unwrap(),

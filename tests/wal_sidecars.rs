@@ -4,11 +4,12 @@
 //! pending WAL must keep its bytes and its WAL untouched by the same commands.
 //! Every test uses its own temporary data root and real subprocesses.
 
+mod support;
 use rusqlite::config::DbConfig;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use tasks_cli::store::data_root_project_path;
 
 struct Env {
@@ -34,7 +35,7 @@ impl Env {
 
     fn run(&self, args: &[&str], stdin: &str) -> Output {
         use std::io::Write;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        let mut child = support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .arg("--data-root")
             .arg(self.data())
             .args(args)

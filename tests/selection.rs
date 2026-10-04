@@ -1,5 +1,6 @@
+mod support;
 use serde_json::{json, Value};
-use std::{fs, process::Command};
+use std::fs;
 use tasks_cli::{
     model::TaskStatus,
     store::{create_project_db, Store},
@@ -20,7 +21,7 @@ impl Fixture {
         Self { root, id }
     }
     fn run(&self, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args([
                 "--data-root",
                 self.root.path().to_str().unwrap(),

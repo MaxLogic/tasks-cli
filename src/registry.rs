@@ -317,10 +317,55 @@ pub fn resolve_project(
         })?
 }
 
+/// Resolve an exact legacy workspace binding without opening a project store.
+pub fn bound_project_at_root(data_root: &Path, root: &Path) -> Result<Option<Uuid>, AppError> {
+    let data_root = validate_storage_root(data_root)?;
+    let registry = Registry::load(&registry_path(&data_root))?;
+    for binding in registry.bindings {
+        if same_path(Path::new(&binding.root), root) {
+            return canonical_project_id(&binding.project_id).and_then(|id| {
+                Uuid::parse_str(&id)
+                    .map(Some)
+                    .map_err(|_| AppError::Registry("invalid bound project UUID".into()))
+            });
+        }
+    }
+    Ok(None)
+}
+
 pub fn bind_root(
     data_root: &Path,
     root: &Path,
     project: Option<String>,
+) -> Result<String, AppError> {
+    bind_root_inner(data_root, root, project, true)
+}
+
+/// The remote backend has already validated server ownership. This writes only
+/// workspace routing and never inspects a leftover local project database.
+pub fn bind_remote_root(
+    data_root: &Path,
+    root: &Path,
+    project: String,
+) -> Result<String, AppError> {
+    let id = canonical_project_id(&project)?;
+    if project_identity_at_root(root)?.is_some_and(|existing| existing.to_string() != id) {
+        return Err(AppError::Validation(
+            "workspace identity selects another project; refusing to replace it".into(),
+        ));
+    }
+    let bound = bind_root_inner(data_root, root, Some(id.clone()), false)?;
+    write_project_identity(
+        root,
+        &Uuid::parse_str(&id).map_err(|_| AppError::Validation("invalid project UUID".into()))?,
+    )?;
+    Ok(bound)
+}
+fn bind_root_inner(
+    data_root: &Path,
+    root: &Path,
+    project: Option<String>,
+    local: bool,
 ) -> Result<String, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let mut canonical_root = root.to_path_buf();
@@ -344,7 +389,9 @@ pub fn bind_root(
     let mut found_project = project.clone();
     Registry::with_bindings(&data_root, |registry| {
         // Keep validation protected from bulk cleanup until the binding is saved.
-        crate::store::Store::open_readonly(&data_root, &project)?;
+        if local {
+            crate::store::Store::open_readonly(&data_root, &project)?;
+        }
         if let Some(existing) = registry
             .bindings
             .iter()
