@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
-use tasks_cli::server::{transport::ServiceState, OwnedServer, Registration};
+use tasks_cli::server::{maintenance, transport::ServiceState, OwnedServer, Registration};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -34,6 +34,22 @@ enum Admin {
     Revoke {
         credential_id: Uuid,
     },
+    Backup {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    Restore {
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    ImportProject {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
 }
 fn main() {
     if let Err(error) = run(Cli::parse()) {
@@ -55,6 +71,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if matches!(command, Admin::Init) {
                 let server = OwnedServer::initialize(&cli.data_root)?;
                 println!("{}", serde_json::json!({"server_id":server.server_id()}));
+                return Ok(());
+            }
+            if let Admin::Restore { backup, out } = command {
+                let result = maintenance::restore(&backup, &out)?;
+                println!("{}", serde_json::to_string(&result)?);
                 return Ok(());
             }
             let server = OwnedServer::open(&cli.data_root)?;
@@ -84,7 +105,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         serde_json::json!({"credential_id":credential_id,"revoked":true})
                     );
                 }
-                Admin::Init | Admin::Migrate => {}
+                Admin::Backup { out } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&maintenance::backup(&server, &out)?)?
+                    );
+                }
+                Admin::ImportProject { database, name } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&maintenance::import_project(
+                            &server, &database, &name
+                        )?)?
+                    );
+                }
+                Admin::Init | Admin::Migrate | Admin::Restore { .. } => {}
             }
         }
         Command::Serve { listen } => {
