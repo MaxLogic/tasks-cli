@@ -465,3 +465,30 @@ occurred. Actual QNAP runtime support, trusted LAN/Cloudflare routing and physic
 LAN backend isolation on Docker 27.1.2-qnap8 remain deployment acceptance gates.
 The existing NAS Docker version and gateway ownership are retained. TSK-027 stays
 to-verify until deployment readiness and the preceding task gates are satisfied.
+
+## Real harness acceptance milestone, 2026-10-04 (TSK-022)
+
+Actual isolated Codex 0.160.0 and Claude Code 2.1.287 sessions used ordinary
+candidate CLI writes, then resumed the same session with a different model.
+Private previewed adapters generated eight filtered identity records; every
+adapter exited 0 with zero stdout/stderr. Task histories matched OS account,
+machine, harness and session. Claude supplied its session title but no model;
+Codex supplied refreshed model fields but no matching agent/execution identity,
+so stored model remained null. Optional unavailable fields were not guessed.
+No attribution parameters, hook additionalContext or context variable assignments
+were added to ordinary task writes. Direct Bash, Bash-to-native-PowerShell and
+native PowerShell paths were exercised as documented in integration/context-hooks.md.
+
+Global harness settings, hooks and trust records were untouched. Codex's
+hooks/list verified exact owned IDs/hashes; per-run overrides disabled external
+hooks and trusted only owned definitions. Claude used private settings with
+user/project sources excluded. Failed initial probes are retained separately;
+they do not count as adapter acceptance. Evidence under target/evidence/server-refactor:
+codex-context-proof-fixed-manifest.json and claude-context-proof-fixed-manifest.json.
+
+Windows private ACL and Linux bounded ancestry proof already pass. The remaining
+TSK-022 decision is whether Windows caller executable fields stay unavailable
+under the current no-unsafe/selective-process-access constraints, or a narrowly
+scoped native wrapper exception is approved. TSK-022 remains to-verify; TSK-025's
+implementation and final gates pass but it cannot become done ahead of that
+prerequisite. No model attribution is inferred from a shared concurrent session.

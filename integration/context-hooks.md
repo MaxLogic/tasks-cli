@@ -30,13 +30,13 @@ temporary directory. Production defaults are
 `%LOCALAPPDATA%/MaxLogic/tasks-cli/client` on Windows and
 `${XDG_CONFIG_HOME:-$HOME/.config}/tasks-cli/client` on Linux. Unix context
 directories/files use 0700/0600. Windows uses protected owner/SYSTEM/Administrators
-ACLs; synthetic file and concurrent hook cases pass. Live harness acceptance
-remains pending.
+ACLs; synthetic file and concurrent hook cases pass. Real isolated Bash/native
+PowerShell child acceptance is recorded below.
 
 Configure SessionStart plus PreToolUse for Bash/PowerShell so model changes
 refresh the record. SubagentStart retains a supplied agent ID separately.
-The installed versions inspected on 2026-10-03 were Codex 0.160.0 and Claude
-Code 2.1.287. Actual sessions using these adapters still need verification.
+The installed versions verified on 2026-10-04 were Codex 0.160.0 and Claude
+Code 2.1.287.
 
 ## Ordinary mutations
 
@@ -67,13 +67,40 @@ forwards a bounded typed context envelope to the Windows binary so the original
 Linux observation is preserved. None of this local context is authenticated;
 the future server replaces actor/installation identity from the credential.
 
-## Remaining acceptance
+## Actual isolated harness acceptance, 2026-10-04
 
-Run isolated Codex and Claude sessions, ordinary writes and a model change;
-compare stored history with the actual hook payloads and confirm no routine hook
-text entered the model context. Verify supported Bash/native PowerShell paths
-and the selected Windows ancestry behavior before
-closing TSK-022. Automated fixtures are not this manual acceptance evidence.
+Fresh headless harness sessions used unique synthetic stores and private context
+directories, the candidate release CLI and previewed adapters. Ordinary writes
+contained no attribution flags or injected context variables. Both harnesses
+resumed the same session with a different model and created a second task.
+
+- Claude: Haiku then Sonnet, direct Bash then Bash invoking native `pwsh`.
+  Session ID/title, machine and account matched the hook records and history.
+  This installed version supplied no hook model field; history retained null.
+  Settings came from an isolated `--settings` file with user/project sources
+  excluded. No global settings were edited.
+- Codex: GPT-6 Luna/high/default then GPT-6 Sol/medium/default, ordinary native
+  PowerShell writes. Hook payload models refreshed while the thread ID stayed
+  stable. History kept the model null because no matching agent/execution
+  identity was exported. The optional title was absent in the payload.
+  `hooks/list` verified exact IDs/hashes; CLI overrides disabled external hooks
+  and trusted only these owned definitions. No hook-trust bypass or persisted
+  trust/config edit was used.
+- All eight adapter invocations exited 0 with zero stdout/stderr. The helper
+  recorded only selected identity fields, not prompts or tool arguments.
+
+Evidence under `target/evidence/server-refactor/`:
+`claude-context-proof-fixed-manifest.json` and
+`codex-context-proof-fixed-manifest.json` point to retained private fixtures,
+filtered hook records, harness events and exact task histories. Failed initial
+probes remain separate: ambiguous prompt punctuation added a CLI argument;
+quoted dotted Codex override keys were ignored. Neither was accepted as a
+successful adapter run.
+
+Remaining: select the Windows executable ancestry behavior. Linux bounded
+ancestry, Windows nullable fallback and permission/security fixtures are already
+verified. A standalone Claude PowerShell tool was not claimed: the tested native
+PowerShell child inherited the documented Bash environment channel.
 
 Private hook directory/file creation and reads now use native permission checks
 on both platforms. Windows uses protected owner/SYSTEM/Administrators ACLs;
