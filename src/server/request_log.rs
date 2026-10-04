@@ -107,6 +107,12 @@ fn operation(method: &Method, uri: &Uri) -> (Option<Uuid>, &'static str) {
     if path == "/v1/info" && method == Method::GET {
         return (None, "info");
     }
+    if path == "/v1/viewer/info" && method == Method::GET {
+        return (None, "viewer_info");
+    }
+    if path == "/v1/viewer/projects" && method == Method::POST {
+        return (None, "viewer_projects");
+    }
     if path == "/v1/projects" {
         return (
             None,
@@ -140,6 +146,8 @@ fn operation(method: &Method, uri: &Uri) -> (Option<Uuid>, &'static str) {
         }
         (Some("rules"), None, None) if method == Method::PUT => "rules_update",
         (Some("key"), None, None) if method == Method::PUT => "key_update",
+        (Some("viewer"), Some("update"), None) if method == Method::PATCH => "viewer_update",
+        (Some("archive"), None, None) if method == Method::PUT => "viewer_archive",
         (Some("export"), None, None) if method == Method::GET => "export",
         _ => "unknown",
     };

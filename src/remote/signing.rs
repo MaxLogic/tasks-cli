@@ -37,6 +37,9 @@ pub fn is_mutation(method: &Method, uri: &Uri) -> bool {
         return false;
     }
     if *method == Method::POST {
+        if uri.path() == "/v1/viewer/projects" {
+            return false;
+        }
         let segments = uri.path().split('/').collect::<Vec<_>>();
         if segments.len() == 5
             && segments[1] == "v1"

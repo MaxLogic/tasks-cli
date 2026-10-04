@@ -123,7 +123,15 @@ fn import_payload(
 /// `--format json`, which `execute` enforces before reaching this function.
 fn execute_viewer(cli: &Cli, command: &ViewerCommand) -> Result<(), AppError> {
     match command {
-        ViewerCommand::Archive { unarchive } => {
+        ViewerCommand::Archive {
+            unarchive,
+            request_id,
+        } => {
+            if request_id.is_some() {
+                return Err(AppError::Usage(
+                    "request IDs require a remote viewer profile".into(),
+                ));
+            }
             let data_root = resolved_root(cli)?;
             let project_id = resolved_project(cli, &data_root)?;
             let payload = tasks_cli::viewer::archive_project(&data_root, &project_id, !unarchive)?;
@@ -175,6 +183,13 @@ fn execute_viewer(cli: &Cli, command: &ViewerCommand) -> Result<(), AppError> {
                 cli.format,
             );
         }
+        ViewerCommand::Recovery
+        | ViewerCommand::Reconcile { .. }
+        | ViewerCommand::Acknowledge { .. } => {
+            return Err(AppError::Usage(
+                "receipt recovery requires a remote viewer profile".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -220,6 +235,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             | Command::Import { apply: true, .. }
             | Command::BulkImport { apply: true, .. }
             | Command::Viewer(ViewerCommand::Update { .. })
+            | Command::Viewer(ViewerCommand::Archive { .. })
     );
     if mutation {
         tasks_cli::attribution::initialize(matches!(&cli.command, Command::Viewer(_)));

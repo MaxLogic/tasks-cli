@@ -91,7 +91,8 @@ complete bodies are never silently truncated. Title enrichment batches at most
 
 Import, bulk-import, backup, migration and doctor require server-local
 administration; the remote CLI refuses them before opening local SQLite/input.
-Remote viewer operations are the subsequent TSK-026 slice. Real NAS deployment,
+Remote viewer operations and retained receipt recovery are described in
+[remote-viewer.md](remote-viewer.md). Real NAS deployment,
 LAN/public DNS/certificate provisioning and installation remain separate gates.
 
 Dependency notes: the selected TOML parser is `toml 0.9.12+spec-1.1.0`

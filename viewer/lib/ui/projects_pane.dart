@@ -44,6 +44,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     debugLabel: 'projects preview enrichment',
   );
   final ProjectLauncher _projectLauncher = const ProjectLauncher();
+  String? _pendingRecoveryError;
 
   ProjectController get _projects => widget.model.projectList;
 
@@ -235,6 +236,8 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   maxHeight: budget.status,
                   child: _buildStatusLine(context, projects),
                 ),
+                if (widget.model.pendingRemoteChanges.isNotEmpty)
+                  _buildPendingRemoteChange(context),
                 Expanded(child: _buildList(context, projects)),
                 ConstrainedBox(
                   constraints: BoxConstraints(
@@ -397,6 +400,49 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   }
 
   // -------------------------------------------------------------- status
+
+  Widget _buildPendingRemoteChange(BuildContext context) {
+    final receipt = widget.model.pendingRemoteChanges.first;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              _pendingRecoveryError ??
+                  'Pending remote change ${receipt.requestId}. Other writes are paused.',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+          TextButton(
+            onPressed: () async {
+              try {
+                await widget.model.checkPendingRemoteChange(receipt.requestId);
+                if (mounted) {
+                  setState(() => _pendingRecoveryError = null);
+                }
+                widget.api.announce('Pending change checked', dynamic: true);
+              } on ViewerFailure catch (failure) {
+                if (mounted) {
+                  setState(
+                    () => _pendingRecoveryError =
+                        'Pending ${receipt.requestId}: ${failure.message}',
+                  );
+                }
+                widget.api.announce(
+                  'Pending change check failed: ${failure.message}',
+                  dynamic: true,
+                );
+              }
+            },
+            child: const Text('Check pending change'),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildStatusLine(BuildContext context, ProjectController projects) {
     final blocking = widget.model.startupError ?? projects.firstLoadError;

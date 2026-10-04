@@ -265,9 +265,16 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     if (snapshot == null) {
       return 'Loading event $eventId snapshot';
     }
+    final attribution = state.historyEvents
+        .where((event) => event.eventId == eventId)
+        .firstOrNull
+        ?.attribution;
+    final context = attribution == null || attribution.detailText.isEmpty
+        ? ''
+        : '${attribution.detailText}\n\n';
     return snapshot.isEmpty
         ? 'Event $eventId has no stored snapshot.'
-        : snapshot;
+        : '$context$snapshot';
   }
 
   /// Speaks a read that is still running after [viewerSlowReadAfter].
@@ -1701,7 +1708,14 @@ class _HistoryRowTile extends StatelessWidget {
               ),
             ],
           ),
-          Text(when, style: theme.textTheme.bodySmall),
+          Text(
+            event.attribution?.summary.isNotEmpty == true
+                ? '$when. ${event.attribution!.summary}'
+                : when,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall,
+          ),
         ],
       ),
     );

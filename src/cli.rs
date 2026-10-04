@@ -364,6 +364,21 @@ pub enum ViewerCommand {
         /// Restore an archived project.
         #[arg(long)]
         unarchive: bool,
+        /// Frontend recovery identity for a remote archive mutation.
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+    },
+    /// List retained remote changes without exposing task content.
+    Recovery,
+    /// Check the exact original remote change; never rebase its payload.
+    Reconcile {
+        /// UUID of the original pending mutation to check.
+        request_id: uuid::Uuid,
+    },
+    /// Clear a confirmed change after the frontend has received its result.
+    Acknowledge {
+        /// UUID of the confirmed mutation whose local receipt may be cleared.
+        request_id: uuid::Uuid,
     },
     /// Report the protocol version, operations and editable-field limits without opening a store.
     Info,

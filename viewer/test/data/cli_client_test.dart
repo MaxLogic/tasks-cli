@@ -77,6 +77,12 @@ class FakeProcessHandle implements ViewerProcessHandle {
   @override
   Future<int> get exitCode => _exit.future;
 
+  void finishWithoutResponse() {
+    if (!_exit.isCompleted) _exit.complete(exit);
+    unawaited(_stdout.close());
+    unawaited(_stderr.close());
+  }
+
   @override
   void kill() {
     killCount += 1;
@@ -139,6 +145,23 @@ class ScriptedLauncher implements ProcessLauncher {
     );
     launches.add(LaunchedProcess(executable, arguments, handle));
     return handle;
+  }
+}
+
+class GatedMutationLauncher extends ScriptedLauncher {
+  final mutationStarted = Completer<void>();
+  final releaseMutation = Completer<void>();
+
+  @override
+  Future<ViewerProcessHandle> start(
+    String executable,
+    List<String> arguments,
+  ) async {
+    if (arguments.contains('archive') && !mutationStarted.isCompleted) {
+      mutationStarted.complete();
+      await releaseMutation.future;
+    }
+    return super.start(executable, arguments);
   }
 }
 
@@ -370,6 +393,8 @@ void main() {
       expect(await client.probe(), same(info));
       expect(launcher.launches.length, 1);
       expect(launcher.launches.single.arguments, <String>[
+        '--data-root',
+        r'C:\store',
         '--format',
         'json',
         'viewer',
@@ -734,6 +759,214 @@ void main() {
   });
 
   group('timing and cancellation', () {
+    test('queued local writers share one detail timeout budget', () async {
+      final launcher = ScriptedLauncher()..replyWith(infoDocument());
+      final client = buildClient(
+        launcher: launcher,
+        readTimeout: const Duration(seconds: 1),
+      );
+      await client.probe();
+      launcher.answer = false;
+      final firstOutcome = expectLater(
+        client.setProjectArchived(projectUuid, archived: true),
+        throwsA(isA<ViewerTimeoutFailure>()),
+      );
+      await firstOutcome;
+      final first = launcher.launches.last.handle;
+      final secondOutcome = expectLater(
+        client.setProjectArchived(projectUuid, archived: false),
+        throwsA(isA<ViewerTimeoutFailure>()),
+      );
+      Object? detailFailure;
+      final detailOutcome = client
+          .fetchTaskDetail(projectUuid, 42)
+          .then<void>(
+            (_) => fail('a detail read must not launch while its writer runs'),
+            onError: (Object error) {
+              detailFailure = error;
+            },
+          );
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      first.finishWithoutResponse();
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      final failureAtDeadline = detailFailure;
+      final second = launcher.launches.last.handle;
+      second.finishWithoutResponse();
+      await pumpEventQueue();
+      await secondOutcome;
+      await detailOutcome;
+      expect(failureAtDeadline, isA<ViewerTimeoutFailure>());
+      expect(launcher.launches, hasLength(3));
+      expect(second.killCount, 0);
+    });
+
+    test(
+      'a detail wait can be cancelled without killing its local writer',
+      () async {
+        final launcher = ScriptedLauncher()..replyWith(infoDocument());
+        final client = buildClient(
+          launcher: launcher,
+          readTimeout: const Duration(milliseconds: 40),
+        );
+        await client.probe();
+        launcher.answer = false;
+        await expectLater(
+          client.setProjectArchived(projectUuid, archived: true),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        final writer = launcher.launches.last.handle;
+        final detailOutcome = expectLater(
+          client.fetchTaskDetail(projectUuid, 42),
+          throwsA(isA<ViewerCancelledFailure>()),
+        );
+        client.cancelScope('detail');
+        try {
+          await detailOutcome;
+          expect(launcher.launches, hasLength(2));
+          expect(writer.killCount, 0);
+        } finally {
+          writer.finishWithoutResponse();
+          await pumpEventQueue();
+        }
+      },
+    );
+
+    test(
+      'detail read rechecks a queued local writer after the first exits',
+      () async {
+        final launcher = ScriptedLauncher()..replyWith(infoDocument());
+        final client = buildClient(
+          launcher: launcher,
+          readTimeout: const Duration(milliseconds: 80),
+        );
+        await client.probe();
+        launcher.answer = false;
+        await expectLater(
+          client.setProjectArchived(projectUuid, archived: true),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        final first = launcher.launches.last.handle;
+        final secondOutcome = expectLater(
+          client.setProjectArchived(projectUuid, archived: false),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        final detailOutcome = expectLater(
+          client.fetchTaskDetail(projectUuid, 42),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        first.finishWithoutResponse();
+        await secondOutcome;
+        await detailOutcome;
+        expect(
+          launcher.launches,
+          hasLength(3),
+          reason: 'probe and two writers only',
+        );
+        expect(launcher.launches.last.handle.killCount, 0);
+        launcher.launches.last.handle.finishWithoutResponse();
+        await pumpEventQueue();
+      },
+    );
+
+    test('a failed local mutation launch releases its reservation', () async {
+      final launcher = ScriptedLauncher();
+      final client = await probedClient(launcher);
+      launcher.startError = StateError('synthetic launch failure');
+      await expectLater(
+        client.setProjectArchived(projectUuid, archived: true),
+        throwsA(isA<ViewerProcessStartFailure>()),
+      );
+      launcher
+        ..startError = null
+        ..replyWith(
+          '{"schema_version":1,"project_id":"$projectUuid","data":'
+          '{"command":"viewer_archive","protocol_version":1,'
+          '"archived_at_ms":1700000003000}}',
+        );
+      expect(
+        await client.setProjectArchived(projectUuid, archived: true),
+        1700000003000,
+      );
+    });
+
+    test(
+      'local mutation reserves its writer before asynchronous launch',
+      () async {
+        final launcher = GatedMutationLauncher()..replyWith(infoDocument());
+        final client = buildClient(
+          launcher: launcher,
+          readTimeout: const Duration(milliseconds: 40),
+        );
+        await client.probe();
+        launcher.answer = false;
+        final firstOutcome = expectLater(
+          client.setProjectArchived(projectUuid, archived: true),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        await launcher.mutationStarted.future;
+        await expectLater(
+          client.setProjectArchived(projectUuid, archived: false),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        await expectLater(
+          client.fetchTaskDetail(projectUuid, 42),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        expect(
+          launcher.launches,
+          hasLength(1),
+          reason: 'only the probe launched',
+        );
+        launcher.releaseMutation.complete();
+        await firstOutcome;
+        expect(
+          launcher.launches,
+          hasLength(2),
+          reason: 'exactly one writer launched',
+        );
+        expect(launcher.launches.last.handle.killCount, 0);
+        launcher.launches.last.handle.finishWithoutResponse();
+        await pumpEventQueue();
+      },
+    );
+
+    test(
+      'a running local writer blocks reconciliation and another write',
+      () async {
+        final launcher = ScriptedLauncher()..replyWith(infoDocument());
+        final client = buildClient(
+          launcher: launcher,
+          readTimeout: const Duration(milliseconds: 40),
+        );
+        await client.probe();
+        launcher.answer = false;
+        await expectLater(
+          client.setProjectArchived(projectUuid, archived: true),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        final writer = launcher.launches.last.handle;
+        final launchCount = launcher.launches.length;
+        await expectLater(
+          client.fetchTaskDetail(projectUuid, 42),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        await expectLater(
+          client.setProjectArchived(projectUuid, archived: false),
+          throwsA(isA<ViewerTimeoutFailure>()),
+        );
+        client.cancelScope('project-archive');
+        expect(writer.killCount, 0);
+        expect(launcher.launches, hasLength(launchCount));
+        writer.finishWithoutResponse();
+        await pumpEventQueue();
+        launcher
+          ..answer = true
+          ..replyWith(showDocument());
+        expect((await client.fetchTaskDetail(projectUuid, 42)).id, 42);
+      },
+    );
+
     test('a read that outlives the timeout is killed and reported', () async {
       final launcher = ScriptedLauncher();
       final client = buildClient(

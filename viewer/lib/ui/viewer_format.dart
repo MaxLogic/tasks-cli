@@ -203,7 +203,8 @@ String viewerDependencyRowLabel(
 /// Accessible name of one history event row; [when] is its formatted time.
 String viewerHistoryRowLabel(HistoryEvent event, String when) =>
     'Event ${event.eventId}, ${event.operation}, version '
-    '${event.resultingVersion}, $when';
+    '${event.resultingVersion}, $when'
+    '${event.attribution?.summary.isNotEmpty == true ? ', ${event.attribution!.summary}' : ''}';
 
 /// Local date and time of [epochMs], for example `21 September 2026, 10:30`.
 String viewerTimestamp(BuildContext context, int epochMs) {

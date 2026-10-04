@@ -332,3 +332,95 @@ All Rust test subprocess constructors now use a common hidden Windows launcher.
 No desktop/clipboard verification, installed binary change, live DB migration or
 NAS deployment occurred. Viewer remote flows and Docker/cutover remain the next
 slices; actual harness acceptance remains separate under TSK-022.
+
+## Remote viewer milestone, 2026-10-04 (TSK-026)
+
+The existing CLI JSON protocol now provides a remote project catalog, task
+pages/details/history, viewer updates and shared archival metadata. Client root
+bindings stay local; server filesystem paths are not returned. Snapshot tokens
+bind the server query and client bindings. Per-project availability errors do
+not discard healthy projects. Catalog size and raw response sources are bounded
+before serialization. History renders typed nullable attribution.
+
+The viewer preassigns mutation UUIDs. Private request evidence and confirmation
+markers remain until the frontend validates the response and acknowledges it.
+Confirmation binds server and credential identity. Explicit reconciliation
+replays the original payload/version; later edits cannot prove an earlier save
+by matching text. Unknown outcomes preserve drafts and inhibit new writes.
+Reconciliation outages preserve pending state. Timed-out original CLI processes
+are not killed; checks wait for their exit, then distinguish a saved receipt
+from a preflight failure without sending another write. Known refusal, failed
+launch, lost cleanup output and failed detail refresh have separate recovery
+paths. See integration/remote-viewer.md.
+
+Focused Rust proof: 49 tests on each platform across remote_cli, remote_pending,
+remote_viewer (5), server_maintenance and viewer_api. Logs:
+viewer-maintenance-reviewed-{windows,linux}.log under target/evidence/server-refactor.
+Flutter owning proof includes 17 remote cases in the final broad suite. Observed
+runtime RED/GREEN covers lost editor pending state on reconciliation outage and
+the still-running preflight case. Initial test compilation mistakes are retained
+and are not runtime RED. Logs: viewer-reconcile-outage-red-selected.log,
+viewer-reconcile-outage-green.log, viewer-preflight-timeout-red.log and
+viewer-preflight-timeout-green.log.
+
+Independent source reviews used hidden installed Codex CLI, GPT-6 Sol/high/default,
+with tools/hooks disabled and supplied frozen sources. Five initial viewer and
+maintenance findings were fixed. Final reviews report no confirmed remaining
+must-fix defect; the suggested terminal-reconciliation refusal regression was
+added. Review briefs/events/findings/run records remain under the same evidence
+directory. Reviews are not executable proof.
+
+A release provider characterization sampled five runs each at 50 and 500 empty
+synthetic projects. Replacing repeated Store validation/connections with one
+read transaction per project reduced the 500-project samples from 5.47-6.53s to
+1.06-1.62s; 50-project samples changed from 507-590ms to 86-104ms. Complete
+provider outputs were compared, excluding sample time. These are separate
+equivalent fixtures and provider-only timings, not full CLI/TLS p95 certification.
+Logs/source: viewer-provider-{baseline,candidate}.log and measure-viewer-provider.rs.
+
+### Final background gates
+
+- Rust: Windows 359 tests and native WSL/Linux 364 tests pass, 51 target results
+  each, zero failures/ignored/filtered. Format, all-target server Clippy, isolated
+  release builds and default/local-only feature checks pass on both platforms.
+  Three inherited test-only Clippy warnings remain; no new production warning.
+  Logs: checkpoint2-final-verified-windows-*.log and checkpoint2-final-linux-*.log.
+- Flutter: analysis has no issues; 612 tests pass with a fresh seeded headless
+  E2E fixture and an isolated schema-8 test-hooks CLI. The one explicit skip is
+  the console-window case in a console-free runner; it separately passes with
+  a hidden console. Final focused transport, real CLI/recovery and remote cases
+  also pass (59).
+  The first lost-response check expected a kill request, contrary to the spec's
+  prohibition on cancelling writes. The revised test forwards any actual kill,
+  expects none, observes the response deadline before commit, and verifies one
+  persisted update after reconciliation. Removing the launcher's read delay
+  exposed a production race: reconciliation read the old WAL version before
+  its writer exited. The client now waits for its own local writer and reserves
+  that slot before asynchronous process launch. Detail reads recheck a queued
+  writer before launch; failed launches release their reservation. Read waiting
+  remains cancellable and shares one timeout budget across queued writers and
+  response draining. Six focused regressions cover these cases. The original
+  failures are retained, including
+  the RED test's failed teardown while its writer was still alive; the fixture
+  now awaits its owned writer before cleanup.
+  Logs: viewer-final-analyze.log,
+  checkpoint2-flutter-final-seeded-tests.log, viewer-hidden-console-proof-fixed.log,
+  viewer-test-hooks-recovery.log, viewer-local-reconcile-race-{red,green}.log,
+  viewer-final-wait-focused-fixed.log and viewer-local-cancel-red.log. An initial
+  widget test mixed fake timer advancement with a real Stopwatch; its budget
+  test failure is retained but is not behavior RED. The corrected real-timer
+  case passes. Final local-race reviews found reservation, cancellation and
+  budget gaps, all fixed and regression-covered; final findings are in
+  local-race-review-findings.md, earlier findings in *-first/second/third-findings.md.
+- Windows viewer release builds. The isolated portable bundle at
+  target/viewer-server-final passes all four headless launch cases, plus clip,
+  credential and hash checks. The first packaging invocation supplied a relative
+  settings root and failed startup argument validation; rerunning with absolute
+  fixture paths passed without source changes. The final bundle includes the
+  local writer fix. Evidence: package-final/package-summary.json,
+  viewer-final-release.log and viewer-package-final.log. Earlier packaging
+  failure/pass evidence remains under package-reviewed/ and package-accepted/.
+
+No installed CLI/viewer or user harness setting was changed. No live project was
+migrated and no NAS service was changed. Real packaged viewer/NVDA spoken-outage/focus/retry proof remains
+pending until the workstation is available. TSK-026 remains to-verify.
