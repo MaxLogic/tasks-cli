@@ -1,8 +1,8 @@
 # Server authentication candidate
 
 This is the TSK-023 authentication/storage milestone. It is not a deployable
-task backend. `/v1/info` returns `ready: false`; task API, HTTPS client, private
-key storage, proxy fixtures and deployment proof remain open. Keep it on a
+task backend. `/v1/info` returns `ready: false`; task API, remote CLI profile
+routing and deployment proof remain open. Keep it on a
 synthetic local data root. No installed binary, live backlog, harness settings
 or NAS configuration was changed.
 
@@ -54,12 +54,44 @@ worker retains its permit even if the request is cancelled. Body reads have a
 30-second graceful deadline and SQLite recovery owns outcomes after forced exit.
 Admitted task writes still need acceptance once task dispatch exists.
 
-## Remaining TSK-023 acceptance
+## HTTPS client and private files
 
-Implement the strict synchronous HTTPS client and synthetic proxy TLS fixtures
-(trusted/private CA, wrong hostname, expired/untrusted certificates), owner-only
-private key setup/validation on both platforms, configured proxy preservation
-proof and safe request logging. Complete real service shutdown/write proof after
-shared task dispatch. Actual NAS route and isolation proof waits for the other
-thread's gateway and the later deployment rehearsal. No TLS verification bypass
-or unauthenticated health/admin HTTP endpoint is provided.
+The synchronous client accepts an HTTPS origin, optional private CA PEM bundle
+and positive connect/request timeouts (three/15 seconds by default). TLS checks
+hostname, date and trust with TLS 1.2 or newer. Every request gets a fresh signature;
+redirects are refused and automatic request retries are disabled. Exact encoded
+path/query bytes are checked against the transmitted URL before signing. Bodies
+and responses are bounded at 8 MiB, including responses without Content-Length.
+Errors contain fixed diagnostic categories, never raw URLs, headers or bodies.
+Remote CLI profile selection and pending mutation receipt handling are TSK-025.
+
+Explicit key generation produces an OS-random Ed25519 key in PKCS#8 PEM and
+returns only its public key. Existing keys are never overwritten. Load requires
+a protected parent and a secure opened file; missing, malformed, oversized and
+insecure files are refused. Unix requires owner identity and exact 0700/0600
+permissions; linked files are refused. Windows uses protected ACLs restricted
+to the filesystem owner, SYSTEM and Administrators, with reparse points refused.
+Use a trusted personal data root, never a shared writable directory. Key setup
+is a library building block until the explicit remote CLI configuration slice.
+
+Per-session hook files share this protection. Windows protects an empty unique
+directory before publishing its name, so simultaneous hooks cannot encounter a
+directory whose ACL is still being set. Existing insecure directories are refused;
+the helper does not silently change their permissions or trust their contents.
+No production unsafe Rust or permission-setting subprocess is introduced.
+
+The server emits one JSON log line per request to stderr, with exactly request ID,
+registered actor ID (null before authentication), valid project UUID, fixed
+operation name, duration and outcome. Query text, bodies, headers, keys, titles,
+environment and executable arguments are excluded. A cancelled handler records
+`cancelled`, not a claimed mutation result. Persistent receipts will own mutation
+outcome recovery. Log I/O errors are reported locally without changing committed
+application outcomes.
+
+## Deployment and dependent proof
+
+Synthetic TLS gateway proof reaches the actual authenticated private Rust HTTP
+listener and preserves signed metadata/body. This does not certify the NAS Caddy
+or Cloudflare route. Actual NAS TLS/network isolation waits for the user's gateway
+thread and TSK-027. Admitted task-write shutdown/recovery proof belongs with shared
+task dispatch in TSK-024; no task route is advertised as ready today.

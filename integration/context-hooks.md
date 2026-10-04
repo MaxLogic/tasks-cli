@@ -70,9 +70,16 @@ the future server replaces actor/installation identity from the credential.
 
 Run isolated Codex and Claude sessions, ordinary writes and a model change;
 compare stored history with the actual hook payloads and confirm no routine hook
-text entered the model context. Verify supported Bash/native PowerShell paths,
-Windows private context ACLs, and the selected Windows ancestry behavior before
+text entered the model context. Verify supported Bash/native PowerShell paths
+and the selected Windows ancestry behavior before
 closing TSK-022. Automated fixtures are not this manual acceptance evidence.
+
+Private hook directory/file creation and reads now use native permission checks
+on both platforms. Windows uses protected owner/SYSTEM/Administrators ACLs;
+shared, null or inherited ACLs are refused. Unix requires owner-only 0700/0600
+and rejects symlinks/hard links. Existing insecure directories are refused rather
+than repaired implicitly. The Windows shared-ACL regression and simultaneous
+hook fixture pass; no machine interaction or installed harness setting changed.
 
 References: [Codex hooks](https://developers.openai.com/codex/hooks),
 [Claude Code hooks](https://code.claude.com/docs/en/hooks).

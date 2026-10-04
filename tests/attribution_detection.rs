@@ -258,3 +258,33 @@ fn viewer_origin_clears_inherited_ai_session_and_model() {
     assert!(context.model.is_none());
     assert!(context.harness_version.is_none());
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_hook_context_with_a_shared_acl_is_ignored() {
+    use windows_permissions::constants::{SeObjectType::SE_FILE_OBJECT, SecurityInformation};
+    use windows_permissions::{wrappers, LocalBox, SecurityDescriptor};
+    let root = tempfile::tempdir().unwrap();
+    let project = Uuid::new_v4();
+    create_project_db(root.path(), &project).unwrap();
+    let client = root.path().join("client");
+    let path = tasks_cli::attribution::write_hook(
+        &client,
+        "codex",
+        br#"{"session_id":"private-session","session_title":"PRIVATE_TITLE"}"#,
+    )
+    .unwrap();
+    let descriptor: LocalBox<SecurityDescriptor> = "D:P(A;;FA;;;WD)".parse().unwrap();
+    wrappers::SetNamedSecurityInfo(
+        path.as_os_str(),
+        SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        descriptor.dacl(),
+        None,
+    )
+    .unwrap();
+    let context = context_mutation(root.path(), project, "private-session", None);
+    assert!(context.session_name.is_none());
+}

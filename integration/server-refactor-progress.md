@@ -141,3 +141,66 @@ Dependencies locked and source-checked: Axum 0.8.9 (MIT, Rust 1.80), Tokio 1.53.
 (MIT/Apache-2.0, Rust 1.77), base64 0.22.1 and rand_core 0.6.4. The runtime is confined to
 the opt-in server feature; normal local CLI builds remain synchronous. Installed
 Rust 1.98.1 satisfies the selected package requirements.
+
+## Security group, 2026-10-04
+
+TSK-023 transport implementation now includes strict synchronous HTTPS/private CA,
+OS-random Ed25519 PKCS#8 key generation/private loading, a TLS gateway fixture
+reaching the actual Rust listener, and fixed metadata request logs. Client profile
+routing, enrollment export and pending receipt reconciliation remain TSK-025.
+Task routes still return 404 and info remains `ready: false` until TSK-024.
+TSK-023 awaits the scheduled batch; NAS routing/isolation remains TSK-027.
+Admitted task-write shutdown proof is scheduled with TSK-024's dispatch.
+
+The same protected-file helper closes the Windows hook ACL gap in TSK-022.
+Isolated real harness/shell/model-switch acceptance and Windows ancestry selection
+remain open. Desktop and installed application interaction are deferred while
+the user works. This group changes no installed command, harness setting, NAS
+configuration or live project authority.
+
+### Exact focused proof
+
+Six owning test targets (`attribution`, `attribution_detection`, `history`,
+`private_credentials`, `remote_https`, `server_transport`) pass: 38 on Windows,
+37 on native Linux, zero failures/ignored/filtered. Windows has one extra ACL
+hook regression. The platform credential target selects three real filesystem
+cases each. HTTPS selects six cases: configuration, certificate trust/date/name,
+redirect/declared and streamed limits, exact encoded signed requests, actual
+gateway/private-listener forwarding, and timed-out admitted write sent once.
+Transport now includes a request-log privacy/refusal regression (13 cases total).
+The existing attribution/detection/history checks stay green.
+
+Full logs under `target/evidence/server-refactor/`:
+`security-group-windows-final.log`, `security-group-linux-final.log`,
+`security-group-windows-clippy-final.log`, `security-group-linux-clippy.log`,
+`security-group-windows-release.log`, `security-group-linux-release.log`,
+`security-group-fmt.log`. Focused clippy covers the library, two binaries and
+four security/detection targets, without warnings. Both `tasks` and `tasks-server`
+release candidates build in separate target directories. Broad checkpoints
+remain scheduled after slices 1-5 and after 6-7.
+
+Observed RED: missing credential/HTTPS/log APIs and a shared Windows hook ACL
+incorrectly accepted (`private-credentials-red.log`, `remote-https-red.log`,
+`request-logs-red.log`, `private-context-red.log`). The initial Windows credential
+run exposed the ACL dependency's null-DACL panic; conversion now refuses null
+ACLs before that accessor. Source review also avoids its incorrect generic
+security setter and unused account-name lookup. Direct safe handle APIs are used;
+no unsafe Rust or permission-setting subprocess was added.
+
+The first TLS fixture inherited nonblocking sockets on Windows. The retained
+`remote-https-socket-diagnosis.log` records error 10035/WouldBlock; accepted
+sockets now explicitly select bounded blocking I/O. This was a fixture defect,
+not evidence of relaxed TLS. The first concurrent hook run exposed publication
+before directory ACL protection; Windows now publishes only a protected empty
+directory. Passing original fixtures provide regression proof for both fixes.
+Earlier native runs are retained with `-first` names, not mixed with final counts.
+
+Coordinator security review checked permissions before reading/writing secrets,
+opened-object validation, bounded inputs/replies, private-value error suppression,
+encoded-target signing, no redirects/retries, and registration-only actor logs.
+Independent agent review remains unavailable through the priority-only tier.
+No existing Cargo package version was removed or upgraded. New dependencies:
+reqwest 0.12.28 (MIT/Apache-2.0, Rust 1.64), windows-permissions 0.2.4 (MIT,
+no declared MSRV) and rustix 1.1.4 (Apache-2.0 with LLVM exception/Apache-2.0/MIT),
+with rcgen 0.14.10 and rustls 0.23.45 as synthetic TLS proof dependencies. The
+installed Rust toolchains build and execute them natively on both platforms.
