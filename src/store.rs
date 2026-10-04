@@ -20,7 +20,67 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 7;
+pub const CURRENT_SCHEMA_VERSION: i32 = 8;
+
+fn create_receipt_schema(conn: &Connection) -> Result<(), AppError> {
+    conn.execute_batch(include_str!("receipt_schema.sql"))?;
+    Ok(())
+}
+
+fn validate_receipt_schema(conn: &Connection) -> Result<(), AppError> {
+    fn definitions(conn: &Connection) -> Result<Vec<(String, String)>, AppError> {
+        let mut query = conn.prepare("SELECT name,sql FROM sqlite_schema WHERE name IN ('mutation_receipts','mutation_receipts_no_update','mutation_receipts_no_delete') ORDER BY name")?;
+        let rows = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+    let expected = Connection::open_in_memory()?;
+    create_receipt_schema(&expected)?;
+    if definitions(conn)? != definitions(&expected)? {
+        return Err(AppError::Database(
+            "mutation receipt schema is damaged; restore a verified backup".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Local commands own a transaction. Server commands run the same mutation
+/// inside a savepoint of the transaction that also persists its receipt.
+enum WriteTransaction<'a> {
+    Transaction(rusqlite::Transaction<'a>),
+    Savepoint(rusqlite::Savepoint<'a>),
+}
+
+impl<'a> WriteTransaction<'a> {
+    fn begin(conn: &'a mut Connection) -> Result<Self, AppError> {
+        if conn.is_autocommit() {
+            Ok(Self::Transaction(conn.transaction_with_behavior(
+                TransactionBehavior::Immediate,
+            )?))
+        } else {
+            Ok(Self::Savepoint(conn.savepoint()?))
+        }
+    }
+
+    fn commit(self) -> Result<(), AppError> {
+        match self {
+            Self::Transaction(tx) => tx.commit()?,
+            Self::Savepoint(tx) => tx.commit()?,
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for WriteTransaction<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Transaction(tx) => tx,
+            Self::Savepoint(tx) => tx,
+        }
+    }
+}
 
 fn create_attribution_schema(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
     tx.execute_batch(
@@ -463,6 +523,7 @@ fn initialize_new_database(
     crate::labels::create_schema(&tx)?;
     create_selection_schema(&tx)?;
     create_attribution_schema(&tx)?;
+    create_receipt_schema(&tx)?;
     tx.execute(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number, project_key) VALUES (?1, '', 1, 1, ?2)",
         params![project_id.to_string(), key],
@@ -503,11 +564,13 @@ fn validate_current_schema(
         "task_labels",
         "tasks_fts",
         "metadata_events",
+        "mutation_receipts",
     ] {
         if !table_exists(conn, table)? {
             return Err(missing(&format!("the {table} table")));
         }
     }
+    validate_receipt_schema(conn)?;
     for column in [
         "project_id",
         "rules_markdown",
@@ -534,6 +597,19 @@ fn validate_current_schema(
         }
     }
     for (table, columns) in [
+        (
+            "mutation_receipts",
+            [
+                "request_id",
+                "actor_id",
+                "installation_id",
+                "route",
+                "payload_sha256",
+                "status",
+                "response_json",
+            ]
+            .as_slice(),
+        ),
         ("dependencies", ["task_id", "depends_on_id"].as_slice()),
         ("task_labels", ["task_id", "label"].as_slice()),
         ("tasks_fts", ["title", "body"].as_slice()),
@@ -586,6 +662,8 @@ fn validate_current_schema(
         "tasks_fts_delete",
         "metadata_events_no_update",
         "metadata_events_no_delete",
+        "mutation_receipts_no_update",
+        "mutation_receipts_no_delete",
     ] {
         let count: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
@@ -1623,9 +1701,7 @@ impl Store {
     /// caller holds the registry lock and has checked uniqueness. Task bodies
     /// are not rewritten: old `OLDKEY-N` mentions stay as written.
     pub fn set_project_key(&mut self, key: &str) -> Result<Option<String>, AppError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = WriteTransaction::begin(&mut self.conn)?;
         let previous = crate::keys::read_key(&tx)?;
         if previous.as_deref() != Some(key) {
             let changed = tx.execute(
@@ -2408,9 +2484,7 @@ impl Store {
     pub fn rules_set(&mut self, body: &str, expect_version: u64) -> Result<u64, AppError> {
         let who = format!("rules set in project {}", self.project_id);
         validate_rules(&who, body)?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = WriteTransaction::begin(&mut self.conn)?;
         let current_version: i64 = tx.query_row("SELECT rules_version FROM project", [], |r| {
             r.get::<_, i64>(0)
         })?;
@@ -2614,9 +2688,7 @@ impl Store {
             )));
         }
         let now = sqlite_now_ms();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = WriteTransaction::begin(&mut self.conn)?;
         tx.execute(
             "INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms,priority)
              VALUES(
@@ -2733,9 +2805,7 @@ impl Store {
             }
         }
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = WriteTransaction::begin(&mut self.conn)?;
         let current = tx
             .query_row(
                 "SELECT title, body, status, version FROM tasks WHERE id = ?1",
@@ -3409,6 +3479,9 @@ impl Store {
             }
             if current < 7 {
                 create_attribution_schema(&tx)?;
+            }
+            if current < 8 {
+                create_receipt_schema(&tx)?;
             }
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;

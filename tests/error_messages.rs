@@ -10,6 +10,11 @@ use uuid::Uuid;
 
 fn run(args: &[&str], cwd: Option<&Path>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     command.args(args);
     if let Some(dir) = cwd {
         command.current_dir(dir);
@@ -102,7 +107,8 @@ fn schema_errors_name_the_database_the_found_version_and_the_required_one() {
     create_project_db(temp.path(), &project).expect("database");
     let db_path = data_root_project_path(temp.path(), &project.to_string());
     let conn = rusqlite::Connection::open(&db_path).expect("open database");
-    conn.pragma_update(None, "user_version", 7i32)
+    let future_version = tasks_cli::store::CURRENT_SCHEMA_VERSION + 1;
+    conn.pragma_update(None, "user_version", future_version)
         .expect("set schema version");
     drop(conn);
     let project_text = project.to_string();
@@ -124,9 +130,15 @@ fn schema_errors_name_the_database_the_found_version_and_the_required_one() {
         message.contains(&db_path.display().to_string()),
         "{message}"
     );
-    assert!(message.contains("schema version 7"), "{message}");
     assert!(
-        message.contains("newer than this build supports (6)"),
+        message.contains(&format!("schema version {future_version}")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "newer than this build supports ({})",
+            tasks_cli::store::CURRENT_SCHEMA_VERSION
+        )),
         "{message}"
     );
     assert!(message.contains("upgrade tasks-cli"), "{message}");
@@ -154,7 +166,13 @@ fn schema_errors_name_the_database_the_found_version_and_the_required_one() {
         "{message}"
     );
     assert!(message.contains("schema version 0"), "{message}");
-    assert!(message.contains("requires 6"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "requires {}",
+            tasks_cli::store::CURRENT_SCHEMA_VERSION
+        )),
+        "{message}"
+    );
     assert!(message.contains("tasks migrate --project"), "{message}");
 }
 

@@ -1,4 +1,5 @@
 //! Server-local identity and credential state. No network admin operations.
+pub mod receipts;
 mod request_log;
 pub mod signatures;
 pub mod transport;
