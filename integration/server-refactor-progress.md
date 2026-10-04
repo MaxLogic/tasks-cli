@@ -204,3 +204,35 @@ reqwest 0.12.28 (MIT/Apache-2.0, Rust 1.64), windows-permissions 0.2.4 (MIT,
 no declared MSRV) and rustix 1.1.4 (Apache-2.0 with LLVM exception/Apache-2.0/MIT),
 with rcgen 0.14.10 and rustls 0.23.45 as synthetic TLS proof dependencies. The
 installed Rust toolchains build and execute them natively on both platforms.
+
+## Atomic receipt core, 2026-10-04 (TSK-024, partial milestone)
+
+Project schema 8 adds append-only mutation receipts. Existing task, rules and
+key methods use a savepoint when the service owns their transaction; ordinary
+local commands retain their immediate transaction. Deduplication precedes entity
+version checks and retains terminal validation/conflict responses. Receipt
+insertion failure rolls back tasks, history, rules and the ID counter together.
+A multi-step refused operation rolls back its earlier steps and keeps only the
+refusal receipt. Busy/storage failures are not made durable refusals.
+
+Schema 7 upgrades require explicit migration and a verified pre-upgrade backup.
+Schema validation checks receipt table and trigger definitions, including a
+same-name trigger whose append-only protection was weakened. Legacy task/history
+bytes survive the upgrade. No live database or installed binary was changed.
+
+Eight owning targets (`server_api`, `attribution`, `history`, `migrations`,
+`recovery`, `states`, `error_messages`, `project_keys`) select 61 tests on each
+platform: all pass, zero failed/ignored/filtered. RED for missing receipt APIs is
+retained in `receipts-api-red.log`; earlier fixture/compiler failures are retained
+separately. The schema-error fixture previously hard-coded future/current schema
+7/6; it now derives both numbers from the actual schema constant. Its subprocess
+and project-key subprocesses use hidden Windows creation flags.
+
+Proof: `target/evidence/server-refactor/receipts-windows-verified.log`,
+`receipts-linux-verified.log`, and `receipts-{windows,linux}-clippy.log`.
+Focused Clippy succeeds on both platforms with one inherited test-only
+`field_reassign_with_default` warning in `tests/attribution.rs`. Format and diff
+checks pass. API routes, catalog recovery and HTTP acceptance still belong to
+the active TSK-024; this receipt milestone does not close that task.
+Both release candidates (`tasks`, `tasks-server`) build in the isolated Windows
+and Linux target directories; logs are `receipts-{windows,linux}-release.log`.

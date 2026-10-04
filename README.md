@@ -126,7 +126,7 @@ leaves the rules out.
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
 
-The server candidate uses schema 7 for mutation attribution. `history` includes
+The server candidate uses schema 8 for mutation attribution and atomic request receipts. `history` includes
 the stored context; `project-history` pages through project creation, key changes
 and import provenance. Legacy history retains null attribution. This candidate
 requires an explicit migration from schema 6; older installed binaries cannot
