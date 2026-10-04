@@ -1,5 +1,6 @@
+mod support;
 use serde_json::{json, Value};
-use std::process::{Command, Output};
+use std::process::Output;
 use tasks_cli::store::create_project_db;
 use uuid::Uuid;
 
@@ -18,7 +19,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tasks"))
+        support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args(["--format", "json", "--data-root"])
             .arg(self.temp.path())
             .arg("--project")

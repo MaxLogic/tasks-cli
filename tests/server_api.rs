@@ -454,6 +454,36 @@ mod api_routes {
     }
 
     #[test]
+    fn unknown_project_refusal_has_a_durable_receipt_even_after_later_creation() {
+        let f = ApiFixture::new();
+        let project = Uuid::new_v4();
+        let key = Uuid::new_v4();
+        let route = format!("/v1/projects/{project}/tasks");
+        let body = json!({"title":"must never be created","body":"body","status":"todo","deps":[],"labels":[]});
+        let refusal = f.request(Method::POST, &route, body.clone(), Some(key));
+        assert_eq!(refusal.status, 404);
+        assert!(
+            refusal.receipt.is_some(),
+            "terminal refusal needs request identity"
+        );
+        let created = f.request(
+            Method::POST,
+            "/v1/projects",
+            json!({"project_id":project,"name":"later","project_key":"LATER"}),
+            Some(Uuid::new_v4()),
+        );
+        assert_eq!(created.status, 200);
+        assert_eq!(f.request(Method::POST, &route, body, Some(key)), refusal);
+        assert_eq!(
+            store(f.root.path(), project)
+                .conn
+                .query_row("SELECT count(*) FROM tasks", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn large_project_history_is_refused_before_deserializing_snapshots() {
         let f = ApiFixture::new();
         let project = Uuid::new_v4();

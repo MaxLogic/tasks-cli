@@ -39,6 +39,10 @@ pub enum OutputFormat {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Configure remote access and recover pending write receipts.
+    #[cfg(feature = "remote")]
+    #[command(subcommand)]
+    Remote(RemoteCommand),
     /// Preview silent context hook configuration; never edits harness settings.
     ContextSetup {
         /// Harness to configure: codex or claude-code.
@@ -307,6 +311,50 @@ pub enum Command {
     /// Additive JSON protocol for the tasks viewer; requires --format json.
     #[command(subcommand)]
     Viewer(ViewerCommand),
+}
+
+#[cfg(feature = "remote")]
+#[derive(Subcommand, Debug, Clone)]
+pub enum RemoteCommand {
+    /// Generate a fresh protected installation key; print public enrollment only.
+    Keygen {
+        /// New private directory for this installation's signing key.
+        #[arg(long)]
+        directory: PathBuf,
+    },
+    /// Verify an enrolled HTTPS server and save this data root's remote profile.
+    Configure {
+        /// Final HTTPS origin for the LAN or public route.
+        #[arg(long)]
+        server_url: String,
+        /// Server UUID from server administration.
+        #[arg(long)]
+        server_id: uuid::Uuid,
+        /// Credential UUID from public-key enrollment.
+        #[arg(long)]
+        credential_id: uuid::Uuid,
+        /// Absolute protected Ed25519 PKCS#8 key file.
+        #[arg(long)]
+        credential_file: PathBuf,
+        /// Optional absolute trusted private CA PEM bundle.
+        #[arg(long)]
+        private_ca: Option<PathBuf>,
+        /// Connection deadline in seconds, 1-60.
+        #[arg(long, default_value_t = 3)]
+        connect_timeout_seconds: u64,
+        /// Whole-request deadline in seconds, 1-300.
+        #[arg(long, default_value_t = 15)]
+        request_timeout_seconds: u64,
+    },
+    /// Select local operation explicitly after pending writes are resolved.
+    Local,
+    /// List outstanding request IDs without printing their task content.
+    Pending,
+    /// Resend an exact stored request/key to recover its original outcome.
+    Reconcile {
+        /// Pending request UUID reported by the failed invocation.
+        request_id: uuid::Uuid,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

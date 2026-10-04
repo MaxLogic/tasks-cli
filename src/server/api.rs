@@ -5,150 +5,18 @@ use super::{
     OwnedServer, ServiceError,
 };
 use crate::{
-    model::{Attribution, ListCursor, Priority, TaskStatus, TaskUpdate},
+    model::{Attribution, ListCursor},
     output::{CommandPayload, Envelope, ShowPayload},
     store::Store,
     AppError,
 };
 use axum::http::{Method, Uri};
 use rusqlite::params;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-fn page_size() -> usize {
-    20
-}
-fn initial_status() -> TaskStatus {
-    TaskStatus::Backlog
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReadRequest {
-    List {
-        #[serde(default)]
-        status: Option<TaskStatus>,
-        #[serde(default)]
-        after: Option<String>,
-        #[serde(default = "page_size")]
-        limit: usize,
-        #[serde(default)]
-        label: Option<String>,
-        #[serde(default)]
-        open: bool,
-        #[serde(default)]
-        needs_human: bool,
-    },
-    Unlocks {
-        #[serde(default)]
-        offset: u64,
-        #[serde(default = "page_size")]
-        limit: usize,
-    },
-    Search {
-        text: String,
-        #[serde(default)]
-        ranked: bool,
-        #[serde(default)]
-        prefix: bool,
-        #[serde(default)]
-        label: Option<String>,
-        #[serde(default)]
-        after: Option<u64>,
-        #[serde(default)]
-        offset: u64,
-        #[serde(default = "page_size")]
-        limit: usize,
-    },
-    Show {
-        ids: Vec<String>,
-        #[serde(default)]
-        rules: bool,
-    },
-    History {
-        id: String,
-        #[serde(default)]
-        after: Option<u64>,
-        #[serde(default = "page_size")]
-        limit: usize,
-        #[serde(default)]
-        event: Option<u64>,
-    },
-    ProjectHistory {
-        #[serde(default)]
-        after: Option<u64>,
-        #[serde(default = "page_size")]
-        limit: usize,
-    },
-    Rules,
-    ProjectKey,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CreateProject {
-    pub project_id: Uuid,
-    pub name: String,
-    #[serde(default)]
-    pub project_key: Option<String>,
-    #[serde(default)]
-    pub attribution: Attribution,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CreateTask {
-    pub title: String,
-    pub body: String,
-    #[serde(default)]
-    pub priority: Priority,
-    #[serde(default = "initial_status")]
-    pub status: TaskStatus,
-    #[serde(default)]
-    pub deps: Vec<String>,
-    #[serde(default)]
-    pub labels: Vec<String>,
-    #[serde(default)]
-    pub attribution: Attribution,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateTask {
-    pub task_ref: String,
-    pub expect_version: u64,
-    pub changes: TaskUpdate,
-    /// Keyed dependency references are resolved under the mutation transaction.
-    #[serde(default)]
-    pub dependency_refs: Option<Vec<String>>,
-    #[serde(default)]
-    pub attribution: Attribution,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetRules {
-    pub body: String,
-    pub expect_version: u64,
-    #[serde(default)]
-    pub attribution: Attribution,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SetKey {
-    pub project_key: String,
-    #[serde(default)]
-    pub attribution: Attribution,
-}
-
-/// The JSON member is exactly the existing CLI envelope; text uses the same
-/// renderer. Clients select one representation without reconstructing fields.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApiOutput {
-    pub output: Value,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub catalog_name: Option<String>,
-}
+pub use crate::remote::protocol::*;
 
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) fn bounded_json(value: &impl Serialize) -> Result<Vec<u8>, AppError> {
@@ -209,7 +77,11 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, AppError> {
 }
 fn response(result: Result<Value, AppError>) -> Result<ReceiptResponse, ServiceError> {
     match result {
-        Ok(body) => Ok(ReceiptResponse { status: 200, body }),
+        Ok(body) => Ok(ReceiptResponse {
+            status: 200,
+            body,
+            receipt: None,
+        }),
         Err(error) => match receipts::refusal(&error) {
             Some(response) => Ok(response),
             None => Err(error.into()),
@@ -266,7 +138,7 @@ fn unique_key(server: &OwnedServer, project: Uuid, key: &str) -> Result<(), AppE
     Ok(())
 }
 
-fn query(store: &mut Store, request: ReadRequest) -> Result<Value, AppError> {
+fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Result<Value, AppError> {
     let data = match request {
         ReadRequest::List {
             status,
@@ -390,6 +262,68 @@ fn query(store: &mut Store, request: ReadRequest) -> Result<Value, AppError> {
             project_key: store.project_key.clone(),
             previous_key: None,
         },
+        ReadRequest::Titles { references } => {
+            if references.len() > 500 {
+                return Err(AppError::validation(
+                    "title lookup accepts at most 500 references",
+                ));
+            }
+            let mut by_slot = std::collections::BTreeMap::<Option<String>, Vec<u64>>::new();
+            for reference in references {
+                let reference =
+                    crate::model::parse_task_ref(&reference).map_err(AppError::validation)?;
+                if reference.id == 0 || reference.id > i64::MAX as u64 {
+                    return Err(AppError::validation("invalid title lookup ID"));
+                }
+                let key = reference
+                    .key
+                    .filter(|key| Some(key.as_str()) != store.project_key.as_deref());
+                by_slot.entry(key).or_default().push(reference.id);
+            }
+            let mut titles = std::collections::HashMap::new();
+            let mut known_keys = Vec::new();
+            if let Some(ids) = by_slot.get(&None) {
+                crate::enrich::read_titles_with_budget(
+                    &store.conn,
+                    ids,
+                    &mut titles,
+                    &None,
+                    Some(4 * 1024 * 1024),
+                )?;
+            }
+            if by_slot.keys().any(Option::is_some) {
+                let projects = crate::keys::scan(server.data_root(), false)?;
+                for (key, ids) in by_slot.iter().filter(|(key, _)| key.is_some()) {
+                    let Some(project) = projects.iter().find(|project| &project.key == key) else {
+                        continue;
+                    };
+                    if !catalogued(server, project.project_id)
+                        .map_err(|_| AppError::Database("server catalog is unavailable".into()))?
+                    {
+                        continue;
+                    }
+                    let foreign =
+                        Store::open_readonly(server.data_root(), &project.project_id.to_string())?;
+                    let used = titles.values().map(|title| title.len() as u64).sum::<u64>();
+                    crate::enrich::read_titles_with_budget(
+                        &foreign.conn,
+                        ids,
+                        &mut titles,
+                        key,
+                        Some((4 * 1024 * 1024u64).saturating_sub(used)),
+                    )?;
+                    if let Some(key) = key {
+                        known_keys.push(key.clone());
+                    }
+                }
+            }
+            let mut titles = titles
+                .into_iter()
+                .map(|((key, id), title)| TitleMatch { key, id, title })
+                .collect::<Vec<_>>();
+            titles.sort_by(|a, b| (&a.key, a.id).cmp(&(&b.key, b.id)));
+            return Ok(serde_json::to_value(TitlesResult { titles, known_keys })?);
+        }
     };
     output(store, data)
 }
@@ -615,6 +549,7 @@ fn projects(server: &OwnedServer, uri: &Uri) -> Result<ReceiptResponse, ServiceE
     }
     let next_after = items.last().and_then(|v| v.get("project_id")).cloned();
     Ok(ReceiptResponse {
+        receipt: None,
         status: 200,
         body: json!({"items":items,"has_more":has_more,"next_after":next_after}),
     })
@@ -635,8 +570,9 @@ pub fn handle(
             ));
         }
         return Ok(ReceiptResponse {
+            receipt: None,
             status: 200,
-            body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":["typed-task-api","project-catalog","atomic-receipts","ed25519-signatures","persistent-replay-protection"]}),
+            body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":["typed-task-api","project-catalog","atomic-receipts","request-bound-receipts","ed25519-signatures","persistent-replay-protection"]}),
         });
     }
     if uri.path() == "/v1/projects" {
@@ -670,6 +606,21 @@ pub fn handle(
         )));
     }
     if !catalogued(server, project)? {
+        if super::signatures::is_mutation(method, uri) {
+            // Keep a terminal missing-project refusal under the same UUID, so
+            // a later project creation cannot turn its replay into a write.
+            let _lock =
+                crate::storage::acquire_exclusive_lock(&server.data_root().join("registry.lock"))?;
+            let attribution = context(auth, Attribution::default())?;
+            crate::store::prepare_server_project(server.data_root(), &project, &attribution)?;
+            let store = Store::open_rw(server.data_root(), &project.to_string())?;
+            return Ok(receipts::execute(
+                store,
+                &identity(auth, method, uri)?,
+                &canonical(bytes)?,
+                |_| Err(not_found()),
+            )?);
+        }
         return response(Err(not_found()));
     }
     if parts.len() == 5 && parts[4] == "query" && *method == Method::POST {
@@ -678,7 +629,7 @@ pub fn handle(
             Err(error) => return response(Err(error)),
         };
         let mut store = Store::open_readonly(server.data_root(), &project.to_string())?;
-        return response(query(&mut store, input));
+        return response(query(server, &mut store, input));
     }
     if parts.len() == 5 && parts[4] == "export" && *method == Method::GET {
         return Err(ServiceError::Validation(
@@ -741,6 +692,7 @@ pub(crate) fn prepare_export(
     let parts = uri.path().split('/').collect::<Vec<_>>();
     let refusal = |status, code, message| {
         ExportPreparation::Refused(ReceiptResponse {
+            receipt: None,
             status,
             body: json!({"schema_version":1,"error":{"code":code,"message":message,"exit_code":if status==404{3}else{2}}}),
         })

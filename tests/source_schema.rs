@@ -1,11 +1,11 @@
+mod support;
 use std::fs;
-use std::process::Command;
 use tasks_cli::markdown::{parse, parse_with_schema};
 use tasks_cli::model::SourceSchema;
 use tasks_cli::store::Store;
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tasks"))
+    support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(args)
         .output()
         .expect("tasks executable")

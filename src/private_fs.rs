@@ -63,6 +63,69 @@ pub fn validate_dir(path: &Path) -> Result<(), AppError> {
 
 pub fn create_file(path: &Path) -> Result<File, AppError> {
     validate_dir(path.parent().ok_or_else(insecure)?)?;
+    create_output_file(path)
+}
+
+/// Retain directory handles on Windows so no component can be renamed while
+/// an exclusively opened source file is linked. Unix publication requires
+/// ownership and non-writable ancestors (sticky temporary roots are allowed).
+pub(crate) struct ExportDirectory {
+    pub path: std::path::PathBuf,
+    #[cfg(windows)]
+    _directories: Vec<File>,
+}
+pub(crate) fn validate_export_directory(path: &Path) -> Result<ExportDirectory, AppError> {
+    let path = path.canonicalize()?;
+    let meta = fs::symlink_metadata(&path)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(insecure());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != rustix::process::geteuid().as_raw() || meta.mode() & 0o022 != 0 {
+            return Err(AppError::Validation(
+                "export directory must be owned by you and not writable by another user".into(),
+            ));
+        }
+        for ancestor in path.ancestors().skip(1) {
+            let meta = fs::metadata(ancestor)?;
+            if !matches!(meta.uid(), 0) && meta.uid() != rustix::process::geteuid().as_raw()
+                || meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0
+            {
+                return Err(AppError::Validation(
+                    "export directory has an ancestor writable by another user".into(),
+                ));
+            }
+        }
+    }
+    #[cfg(windows)]
+    let directories = {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        let mut directories = Vec::new();
+        for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            let file = OpenOptions::new()
+                .access_mode(0x20080)
+                .share_mode(3)
+                .custom_flags(0x02200000)
+                .open(ancestor)?;
+            if !file.metadata()?.is_dir() || file.metadata()?.file_attributes() & 0x400 != 0 {
+                return Err(insecure());
+            }
+            directories.push(file);
+        }
+        directories
+    };
+    Ok(ExportDirectory {
+        path,
+        #[cfg(windows)]
+        _directories: directories,
+    })
+}
+
+/// A new unpublished export beside a user-selected destination. Its parent
+/// need not be private, but the created file itself remains owner-protected.
+pub(crate) fn create_output_file(path: &Path) -> Result<File, AppError> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(unix)]

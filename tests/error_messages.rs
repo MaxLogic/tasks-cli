@@ -1,15 +1,16 @@
 //! One test per error class: every message must name what failed, what was
 //! found, and what to do next.
 
+mod support;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use tasks_cli::store::{create_project_db, data_root_project_path};
 use uuid::Uuid;
 
 fn run(args: &[&str], cwd: Option<&Path>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

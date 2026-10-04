@@ -38,7 +38,7 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
     fixture(root.path(), &id);
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (3, 6));
+    assert_eq!((from, to), (3, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let old =
         Connection::open_with_flags(backup.unwrap(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
@@ -63,7 +63,11 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
         ),
         ("dependencies", "*", "task_id"),
         ("task_labels", "*", "task_id"),
-        ("events", "*", "event_id"),
+        (
+            "events",
+            "event_id,task_id,entity_type,operation,resulting_version,created_ms,snapshot_json",
+            "event_id",
+        ),
         ("imports", "*", "input_sha256"),
     ] {
         let sql = format!("SELECT {columns} FROM {table} ORDER BY {order}");
@@ -82,7 +86,14 @@ fn schema_three_upgrade_preserves_all_records_and_verified_backup() {
         .conn
         .execute("UPDATE tasks SET priority='P4' WHERE id=7", [])
         .is_err());
-    assert_eq!(store.migrate().unwrap(), (6, 6, None));
+    assert_eq!(
+        store.migrate().unwrap(),
+        (
+            tasks_cli::store::CURRENT_SCHEMA_VERSION,
+            tasks_cli::store::CURRENT_SCHEMA_VERSION,
+            None
+        )
+    );
 }
 
 #[test]

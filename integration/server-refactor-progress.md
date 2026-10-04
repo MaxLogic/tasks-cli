@@ -284,3 +284,51 @@ process exit is not claimed as review evidence. Final review's source snapshot
 precedes only the test-gateway timeout regression, documentation and formatting.
 Broad checkpoints remain after slices 1-5 and 6-7. No installation, live data
 migration, desktop operation or NAS deployment occurred.
+
+## Remote CLI and first broad checkpoint, 2026-10-04 (TSK-025)
+
+Default builds now include strict HTTPS profiles, local enrollment/configuration,
+automatic attribution, remote routing before WSL delegation, complete export
+publication and explicit original-request reconciliation. Ordinary reads/writes,
+errors, version conflicts, routing and batched enrichment retain their contracts.
+Maintenance operations refuse remote execution without opening local SQLite.
+Setup/recovery is documented in integration/remote-cli.md.
+
+Actual CLI/TLS fixtures use two protected installations and test response loss,
+an intermediary JSON503 after commit, poisoned local DB/outage, repeated init
+including registry-only routing, complete/interrupted exports and original-version
+replay after another installation changes the task. Unmarked/nonterminal replies
+retain private evidence. Terminal replies bind UUID/route/digest/status. Missing-
+project writes retain negative receipts, so later creation cannot execute a replay.
+Windows pending files use native write-through publication via atomicwrites;
+Unix uses directory fsync. Physical power-loss proof is not claimed.
+
+Independent source reviews used GPT-6 Sol/high/default with installed hidden
+Codex CLI and disabled tools/hooks. Initial receipt/profile/deletion findings,
+then registry/publication findings, then negative-receipt/sticky-ancestor/Windows
+durability findings were fixed. Final bounded review reports no confirmed remaining
+must-fix issue in those fixes: remote-cli-review-terminal-findings.md (69.266s).
+Review logs/results and every first-failure proof remain under target/evidence/
+server-refactor. Compilation errors and characterization tests are distinguished
+from runtime RED; no claim that every added test began with a runtime RED.
+
+First broad checkpoint: Windows 348 tests, native WSL/Linux 353 tests, all pass;
+49 test target results per platform, zero failed/ignored/filtered. fmt, all-target
+server Clippy, isolated release builds of both binaries, default-client and
+local-only feature checks pass. Two inherited test-only Clippy warnings remain
+(items_after_test_module and field_reassign_with_default). Logs are
+checkpoint1-verified-windows-{fmt,clippy,tests,release,local-feature,default-feature}.log
+and checkpoint1-linux-{fmt,clippy,tests,release,local-feature,default-feature}.log.
+Candidate Windows/Cargo hashes: checkpoint1-candidate-hashes.json. Linux SHA256:
+tasks 92402cff079c0ae0fef9b535091dd76456faf3d481b4c736a2a96e0490071783;
+server 2fabd862f3d238a53bcd9587850a707d82cbb97f60364a60e05f27a94e51025c.
+
+The original broad Windows run failed five tests: three migration fixtures pinned
+schema6, and two deterministic export tests no longer matched the streamed SQL.
+Their historical-field comparisons now explicitly exclude added nullable columns;
+the export test checks its interleave actually fired. Revised broad gates pass;
+checkpoint1-windows-tests.log and the first focused fixture failure are preserved.
+All Rust test subprocess constructors now use a common hidden Windows launcher.
+No desktop/clipboard verification, installed binary change, live DB migration or
+NAS deployment occurred. Viewer remote flows and Docker/cutover remain the next
+slices; actual harness acceptance remains separate under TSK-022.

@@ -18,6 +18,18 @@ pub enum AppError {
     Conflict(String),
     #[error("response limit: {0}")]
     ResponseLimit(String),
+    #[error("remote service: {message}")]
+    Remote {
+        code: &'static str,
+        message: String,
+        request_id: Option<uuid::Uuid>,
+    },
+    #[error("{message}")]
+    RemoteReply {
+        message: String,
+        payload: serde_json::Value,
+        exit_code: i32,
+    },
     #[error("stale snapshot: {0}")]
     StaleSnapshot(String),
     #[error("lock timeout: {0}")]
@@ -91,6 +103,8 @@ impl AppError {
             Self::VersionConflict { .. } => "version_conflict",
             Self::Conflict(_) => "conflict",
             Self::ResponseLimit(_) => "response_limit",
+            Self::Remote { code, .. } => code,
+            Self::RemoteReply { .. } => "remote_application",
             Self::StaleSnapshot(_) => "stale_snapshot",
             Self::LockTimeout(_) | Self::Busy(_) => "lock_timeout",
             Self::Database(_) => "database",
@@ -111,6 +125,8 @@ impl AppError {
             Self::VersionConflict { .. } => 4,
             Self::Conflict(_) => 4,
             Self::ResponseLimit(_) => 2,
+            Self::Remote { .. } => 5,
+            Self::RemoteReply { exit_code, .. } => *exit_code,
             Self::StaleSnapshot(_) => 4,
             Self::LockTimeout(_) | Self::Busy(_) => 5,
             Self::InvalidPath(_)
@@ -173,9 +189,19 @@ impl AppError {
     }
 
     pub fn json(&self) -> String {
+        if let Self::RemoteReply { payload, .. } = self {
+            return payload.to_string();
+        }
         let mut error = serde_json::Map::new();
         error.insert("code".to_string(), serde_json::json!(self.code()));
         error.insert("message".to_string(), serde_json::json!(self.to_string()));
+        if let Self::Remote {
+            request_id: Some(id),
+            ..
+        } = self
+        {
+            error.insert("request_id".into(), serde_json::json!(id));
+        }
         if let Self::VersionConflict { expected, current } = self {
             error.insert(
                 "conflict".to_string(),

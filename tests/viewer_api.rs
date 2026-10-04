@@ -4,13 +4,14 @@
 //! Every test runs the real `tasks` binary against an explicit unique
 //! temporary data root; nothing here touches the real default store.
 
+mod support;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use tasks_cli::model::{Priority, TaskStatus};
 use tasks_cli::registry;
 use tasks_cli::store::{create_project_db, data_root_project_path, Store};
@@ -83,7 +84,7 @@ impl Run {
 }
 
 fn spawn(args: &[String], stdin: Option<&[u8]>) -> Run {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command.args(args);
     let output: Output = match stdin {
         None => command.output().unwrap(),

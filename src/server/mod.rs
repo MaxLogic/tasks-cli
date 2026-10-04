@@ -38,6 +38,16 @@ impl From<std::io::Error> for ServiceError {
         Self::Storage(error.into())
     }
 }
+impl From<crate::remote::signing::SigningError> for ServiceError {
+    fn from(error: crate::remote::signing::SigningError) -> Self {
+        use crate::remote::signing::SigningError;
+        match error {
+            SigningError::Unauthorized(message) => Self::Unauthorized(message),
+            SigningError::Validation(message) => Self::Validation(message),
+            SigningError::Clock => Self::Clock,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,5 +1,6 @@
+mod support;
 use rusqlite::Connection;
-use std::{fs, process::Command};
+use std::fs;
 use tasks_cli::{
     markdown,
     model::TaskStatus,
@@ -190,7 +191,7 @@ fn canonical_states_work_in_cli_output_filters_and_exports() {
     .iter()
     .enumerate()
     {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+        let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
         command.args([
             "--data-root",
             root.path().to_str().unwrap(),
@@ -225,7 +226,7 @@ fn canonical_states_work_in_cli_output_filters_and_exports() {
     assert!(!text.contains("Status: backlog"));
     let parsed = markdown::parse("export.md", text.into_bytes(), None).unwrap();
     assert_eq!(parsed.tasks.len(), 6);
-    let output = Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--data-root",
             root.path().to_str().unwrap(),

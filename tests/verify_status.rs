@@ -2,9 +2,10 @@
 //! default list and unlocks, the completion guard, listing scopes, the CLI
 //! lifecycle and Markdown round trip.
 
+mod support;
 use rusqlite::{types::Value, Connection};
 use serde_json::Value as Json;
-use std::{fs, process::Command, process::Output};
+use std::{fs, process::Output};
 use tasks_cli::{
     markdown,
     model::{TaskStatus, TaskUpdate},
@@ -97,20 +98,20 @@ const PRESERVED: [(&str, &str); 6] = [
         "SELECT * FROM dependencies ORDER BY task_id",
     ),
     ("task_labels", "SELECT * FROM task_labels ORDER BY task_id"),
-    ("events", "SELECT * FROM events ORDER BY event_id"),
+    ("events", "SELECT event_id,task_id,entity_type,operation,resulting_version,created_ms,snapshot_json FROM events ORDER BY event_id"),
     ("imports", "SELECT * FROM imports ORDER BY input_sha256"),
 ];
 
 #[test]
 fn schema_four_upgrade_rebuilds_status_check_with_verified_backup() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 6);
+    assert!(CURRENT_SCHEMA_VERSION >= 5);
     let root = tempfile::tempdir().unwrap();
     let id = Uuid::new_v4();
     v4_fixture(root.path(), &id);
     assert!(Store::open_readonly(root.path(), &id.to_string()).is_err());
     let mut store = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
     let (from, to, backup) = store.migrate().unwrap();
-    assert_eq!((from, to), (4, 6));
+    assert_eq!((from, to), (4, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let backup = backup.unwrap();
     assert!(backup
         .file_name()
@@ -197,10 +198,17 @@ fn schema_four_upgrade_rebuilds_status_check_with_verified_backup() {
         .conn
         .execute_batch("INSERT INTO tasks_fts(tasks_fts) VALUES('integrity-check')")
         .unwrap();
-    assert_eq!(store.doctor().unwrap().2, 6);
+    assert_eq!(store.doctor().unwrap().2, CURRENT_SCHEMA_VERSION);
     drop(store);
     let mut again = Store::open_for_migration(root.path(), &id.to_string()).unwrap();
-    assert_eq!(again.migrate().unwrap(), (6, 6, None));
+    assert_eq!(
+        again.migrate().unwrap(),
+        (
+            tasks_cli::store::CURRENT_SCHEMA_VERSION,
+            tasks_cli::store::CURRENT_SCHEMA_VERSION,
+            None
+        )
+    );
 }
 
 #[test]
@@ -433,7 +441,7 @@ impl Cli {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tasks"))
+        support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args([
                 "--data-root",
                 self.root.path().to_str().unwrap(),

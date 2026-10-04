@@ -1,3 +1,4 @@
+mod support;
 use serde_json::Value;
 use std::process::Command;
 use tasks_cli::model::TaskStatus;
@@ -6,7 +7,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 fn cli(binary: &str) -> Command {
-    let mut command = Command::new(binary);
+    let mut command = support::process::command(binary);
     command
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT");

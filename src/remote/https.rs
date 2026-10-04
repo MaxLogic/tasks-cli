@@ -1,6 +1,6 @@
 //! Strict synchronous HTTPS with bounded bodies and fresh request signatures.
-use crate::server::signatures::SigningIdentity;
-use axum::http::{Method, Uri};
+use super::signing::SigningIdentity;
+use http::{Method, Uri};
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use std::{io::Read, path::PathBuf, time::Duration};
 use thiserror::Error;
@@ -43,6 +43,23 @@ pub struct HttpsClient {
     origin: Url,
     identity: SigningIdentity,
 }
+pub(crate) fn validate_origin(endpoint: &str) -> Result<Url, ClientError> {
+    let origin =
+        Url::parse(endpoint).map_err(|_| ClientError::Configuration("expected an HTTPS origin"))?;
+    if origin.scheme() != "https"
+        || origin.host_str().is_none()
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+    {
+        return Err(ClientError::Configuration(
+            "use an HTTPS origin without credentials, path, query or fragment",
+        ));
+    }
+    Ok(origin)
+}
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
@@ -58,20 +75,7 @@ impl HttpsClient {
         options: ClientOptions,
         identity: SigningIdentity,
     ) -> Result<Self, ClientError> {
-        let origin = Url::parse(endpoint)
-            .map_err(|_| ClientError::Configuration("expected an HTTPS origin"))?;
-        if origin.scheme() != "https"
-            || origin.host_str().is_none()
-            || !origin.username().is_empty()
-            || origin.password().is_some()
-            || origin.path() != "/"
-            || origin.query().is_some()
-            || origin.fragment().is_some()
-        {
-            return Err(ClientError::Configuration(
-                "use an HTTPS origin without credentials, path, query or fragment",
-            ));
-        }
+        let origin = validate_origin(endpoint)?;
         if options.connect_timeout.is_zero() || options.request_timeout.is_zero() {
             return Err(ClientError::Configuration(
                 "timeouts must be greater than zero",

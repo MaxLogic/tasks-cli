@@ -1,7 +1,5 @@
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+mod support;
+use std::{io::Write, process::Stdio};
 use tasks_cli::store::{create_project_db, Store};
 use uuid::Uuid;
 #[test]
@@ -20,7 +18,7 @@ fn enrich_cli_preserves_stdin_file_and_json_contracts() {
         .unwrap();
     drop(store);
     let run = |args: &[&str], input: &[u8]| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_tasks"))
+        let mut child = support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args([
                 "--data-root",
                 root.path().to_str().unwrap(),

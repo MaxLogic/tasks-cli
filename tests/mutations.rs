@@ -1,3 +1,4 @@
+mod support;
 use std::fs;
 use std::process::Command;
 use tasks_cli::model::{TaskStatus, TaskUpdate};
@@ -15,7 +16,7 @@ fn setup() -> (TempDir, Uuid, std::path::PathBuf) {
 }
 
 fn cli(temp: &TempDir, id: &Uuid, work: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tasks"));
+    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
     command
         .arg("--data-root")
         .arg(temp.path())

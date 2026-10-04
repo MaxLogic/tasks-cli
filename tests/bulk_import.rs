@@ -1,8 +1,8 @@
+mod support;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 const MAP_TEMPLATE: &str = r#"{"sections":{"In Progress":"in-progress","Blocked":"blocked","Done":"done","Next - Today":"ready","Next - This Week":"ready","Next - Later":"backlog","Next _EN_ Today":"ready","Next _EN_ This Week":"ready","Next _EN_ Later":"backlog","Ongoing":"in-progress"},"section_patterns":[{"pattern":"^\\d{4}-\\d{2}-\\d{2}","status":"done"}]}"#;
 
@@ -39,7 +39,7 @@ fn run(args: &[&str]) -> std::process::Output {
             args.push(string_arg(&key_map));
         }
     }
-    Command::new(env!("CARGO_BIN_EXE_tasks"))
+    support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args(&args)
         .env_remove("TASKS_WINDOWS_EXE")
         .env_remove("TASKS_PROJECT")
@@ -147,7 +147,7 @@ fn make_directory_link(target: &Path, link: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        let output = Command::new("cmd")
+        let output = support::process::command("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(link)
             .arg(target)
@@ -981,7 +981,7 @@ fn verification_failure_leaves_the_sources_in_place() {
     let seed_project = seed_data_root(&data_root);
     let before = snapshot(&data_root, &report_dir);
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("cargo")
+    let output = support::process::command("cargo")
         .args([
             "run",
             "--quiet",

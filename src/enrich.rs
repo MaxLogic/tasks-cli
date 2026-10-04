@@ -41,17 +41,36 @@ pub fn enrich(conn: &Connection, text: &str) -> Result<EnrichedText, AppError> {
 /// A reference target: the current project (`None`) or another project's key.
 type Slot = Option<String>;
 
-fn read_titles(
+pub(crate) fn read_titles(
     conn: &Connection,
     ids: &[u64],
     titles: &mut HashMap<(Slot, u64), String>,
     slot: &Slot,
 ) -> Result<(), AppError> {
+    read_titles_with_budget(conn, ids, titles, slot, None)
+}
+pub(crate) fn read_titles_with_budget(
+    conn: &Connection,
+    ids: &[u64],
+    titles: &mut HashMap<(Slot, u64), String>,
+    slot: &Slot,
+    budget: Option<u64>,
+) -> Result<(), AppError> {
     let snapshot = conn.unchecked_transaction()?;
+    let mut remaining = budget;
     for batch in ids.chunks(500) {
         let slots = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
             .join(",");
+        if let Some(left) = remaining {
+            let bytes: u64=conn.query_row(&format!("SELECT COALESCE(SUM(length(CAST(title AS BLOB))),0) FROM tasks WHERE id IN ({slots})"),params_from_iter(batch.iter()),|row| row.get(0))?;
+            if bytes > left {
+                return Err(AppError::ResponseLimit(
+                    "title lookup exceeds the response budget; request fewer references".into(),
+                ));
+            }
+            remaining = Some(left - bytes);
+        }
         let mut stmt =
             conn.prepare(&format!("SELECT id,title FROM tasks WHERE id IN ({slots})"))?;
         let rows = stmt.query_map(params_from_iter(batch.iter()), |r| {
@@ -66,10 +85,60 @@ fn read_titles(
     Ok(())
 }
 
+#[derive(Default)]
+pub struct TitleResolution {
+    pub titles: HashMap<(Option<String>, u64), String>,
+    pub known_keys: BTreeSet<String>,
+}
+pub type TitleRequests = BTreeMap<Option<String>, Vec<u64>>;
+
 pub fn enrich_with(
     conn: &Connection,
     text: &str,
     context: EnrichContext<'_>,
+) -> Result<EnrichedText, AppError> {
+    enrich_using(text, context.own_key, |by_slot| {
+        let mut titles = HashMap::<(Slot, u64), String>::new();
+        // Keys whose project was found; references to any other key are left alone.
+        let mut known_keys = BTreeSet::<String>::new();
+        if let Some(local) = by_slot.get(&None) {
+            read_titles(conn, local, &mut titles, &None)?;
+        }
+        let has_foreign = by_slot.keys().any(Option::is_some);
+        if has_foreign {
+            if let Some(data_root) = context.data_root {
+                // One read-only pass over the data root, only when the text names
+                // another project's key; unreadable projects are skipped.
+                let projects = crate::keys::scan_cached(data_root)?;
+                for (slot, slot_ids) in by_slot.iter().filter(|(slot, _)| slot.is_some()) {
+                    let Some(project) = projects.iter().find(|project| {
+                        project.key.as_deref() == slot.as_deref()
+                            && Some(&project.project_id) != context.own_project
+                    }) else {
+                        continue;
+                    };
+                    let Ok(store) = crate::store::Store::open_readonly(
+                        data_root,
+                        &project.project_id.to_string(),
+                    ) else {
+                        continue;
+                    };
+                    read_titles(&store.conn, slot_ids, &mut titles, slot)?;
+                    if let Some(key) = slot {
+                        known_keys.insert(key.clone());
+                    }
+                }
+            }
+        }
+        Ok(TitleResolution { titles, known_keys })
+    })
+}
+
+/// Shared lexical/rendering rules with a bounded concrete title lookup seam.
+pub fn enrich_using(
+    text: &str,
+    own_key: Option<&str>,
+    resolve: impl FnOnce(&TitleRequests) -> Result<TitleResolution, AppError>,
 ) -> Result<EnrichedText, AppError> {
     if text.len() > MAX_INPUT_BYTES {
         return Err(AppError::Validation(
@@ -98,7 +167,7 @@ pub fn enrich_with(
                 if crate::model::RESERVED_KEYS.contains(&key) {
                     continue;
                 }
-                if Some(key) == context.own_key {
+                if Some(key) == own_key {
                     (None, number)
                 } else {
                     (Some(key.to_string()), number)
@@ -152,37 +221,7 @@ pub fn enrich_with(
     for (slot, id) in ids {
         by_slot.entry(slot).or_default().push(id);
     }
-    let mut titles = HashMap::<(Slot, u64), String>::new();
-    // Keys whose project was found; references to any other key are left alone.
-    let mut known_keys = BTreeSet::<String>::new();
-    if let Some(local) = by_slot.get(&None) {
-        read_titles(conn, local, &mut titles, &None)?;
-    }
-    let has_foreign = by_slot.keys().any(Option::is_some);
-    if has_foreign {
-        if let Some(data_root) = context.data_root {
-            // One read-only pass over the data root, only when the text names
-            // another project's key; unreadable projects are skipped.
-            let projects = crate::keys::scan_cached(data_root)?;
-            for (slot, slot_ids) in by_slot.iter().filter(|(slot, _)| slot.is_some()) {
-                let Some(project) = projects.iter().find(|project| {
-                    project.key.as_deref() == slot.as_deref()
-                        && Some(&project.project_id) != context.own_project
-                }) else {
-                    continue;
-                };
-                let Ok(store) =
-                    crate::store::Store::open_readonly(data_root, &project.project_id.to_string())
-                else {
-                    continue;
-                };
-                read_titles(&store.conn, slot_ids, &mut titles, slot)?;
-                if let Some(key) = slot {
-                    known_keys.insert(key.clone());
-                }
-            }
-        }
-    }
+    let TitleResolution { titles, known_keys } = resolve(&by_slot)?;
     let reportable = |slot: &Slot| match slot {
         None => true,
         Some(key) => known_keys.contains(key),
@@ -242,7 +281,7 @@ pub fn enrich_with(
     let unknown_refs = unknown
         .iter()
         .map(|(slot, id)| {
-            let key = slot.as_deref().or(context.own_key).unwrap_or("T");
+            let key = slot.as_deref().or(own_key).unwrap_or("T");
             format!("{key}-{id}")
         })
         .collect();

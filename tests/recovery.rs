@@ -1,3 +1,4 @@
+mod support;
 use rusqlite::Connection;
 use std::fs;
 use std::thread;
@@ -75,7 +76,7 @@ fn newer_schema_fails_safely_and_killed_precommit_writer_rolls_back() {
     drop(conn);
     let marker = temp.path().join("precommit.ready");
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut child = std::process::Command::new("cargo")
+    let mut child = support::process::command("cargo")
         .args([
             "run",
             "--quiet",
@@ -134,7 +135,7 @@ fn backups_during_subprocess_writes_contain_committed_pairs() {
     let (temp, id, work) = setup();
     let body = temp.path().join("body.md");
     fs::write(&body, "body").expect("body");
-    let mut writer = std::process::Command::new(env!("CARGO_BIN_EXE_tasks"))
+    let mut writer = support::process::command(env!("CARGO_BIN_EXE_tasks"))
         .args([
             "--data-root",
             temp.path().to_str().unwrap(),

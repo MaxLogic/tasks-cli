@@ -92,11 +92,19 @@ fn show_keeps_task_and_rules_in_one_snapshot() {
 #[test]
 fn export_keeps_rules_and_tasks_in_one_snapshot() {
     let (temp, mut reader, writer) = fixture();
-    interleave(&mut reader, "SELECT id, title, body", move || {
-        writer.execute_batch("BEGIN; UPDATE tasks SET title='changed owner' WHERE id=2; UPDATE project SET rules_version=2,rules_markdown='new rules'; COMMIT;").unwrap();
-    });
+    interleave(
+        &mut reader,
+        "SELECT id,title,body,version,priority",
+        move || {
+            writer.execute_batch("BEGIN; UPDATE tasks SET title='changed owner' WHERE id=2; UPDATE project SET rules_version=2,rules_markdown='new rules'; COMMIT;").unwrap();
+        },
+    );
     let out = temp.path().join("export.md");
     reader.export_markdown(&out).unwrap();
+    assert!(
+        INTERLEAVE.with(|slot| slot.borrow().is_none()),
+        "export interleave was not reached"
+    );
     let text = std::fs::read_to_string(out).unwrap();
     assert!(
         text.contains("T-002 owner"),
@@ -111,9 +119,13 @@ fn export_does_not_overwrite_a_file_created_during_its_read() {
     let (temp, mut reader, _writer) = fixture();
     let out = temp.path().join("export.md");
     let competitor = out.clone();
-    interleave(&mut reader, "SELECT id, title, body", move || {
-        std::fs::write(competitor, "other process owns this file").unwrap();
-    });
+    interleave(
+        &mut reader,
+        "SELECT id,title,body,version,priority",
+        move || {
+            std::fs::write(competitor, "other process owns this file").unwrap();
+        },
+    );
     assert!(reader.export_markdown(&out).is_err());
     assert_eq!(
         std::fs::read_to_string(out).unwrap(),
