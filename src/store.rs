@@ -22,6 +22,34 @@ use uuid::Uuid;
 
 pub const CURRENT_SCHEMA_VERSION: i32 = 8;
 
+/// Caller owns a read/write snapshot. Fetch only bounded archive metadata.
+pub(crate) fn effective_archive_from(conn: &Connection) -> Result<Option<i64>, AppError> {
+    let latest: Option<(i64,Option<String>)> = conn.query_row(
+        "SELECT length(CAST(snapshot_json AS BLOB)),CASE WHEN length(CAST(snapshot_json AS BLOB))<=16384 THEN snapshot_json ELSE NULL END FROM metadata_events WHERE operation='viewer-archive' ORDER BY event_id DESC LIMIT 1",
+        [],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let Some((_, snapshot)) = latest else {
+        return Ok(None);
+    };
+    let snapshot = snapshot.ok_or_else(|| {
+        AppError::ResponseLimit("archive metadata exceeds its 16 KiB read budget".into())
+    })?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ArchiveState {
+        archived_at_ms: Option<i64>,
+        task_event_watermark: u64,
+    }
+    let state: ArchiveState = serde_json::from_str(&snapshot)
+        .map_err(|_| AppError::Database("invalid viewer archive metadata".into()))?;
+    let current: u64 =
+        conn.query_row("SELECT COALESCE(MAX(event_id),0) FROM events", [], |row| {
+            row.get(0)
+        })?;
+    Ok(state
+        .archived_at_ms
+        .filter(|_| current <= state.task_event_watermark))
+}
+
 fn create_receipt_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(include_str!("receipt_schema.sql"))?;
     Ok(())
@@ -1554,6 +1582,35 @@ impl Store {
     pub fn set_attribution(&mut self, context: &Attribution) -> Result<(), AppError> {
         self.attribution_json = context.validated_json()?;
         Ok(())
+    }
+
+    /// Archive state is a metadata event. A later task event makes an archived
+    /// project active without rewriting append-only history.
+    pub fn effective_archive(&self) -> Result<Option<i64>, AppError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let archived_at_ms = effective_archive_from(&tx)?;
+        tx.commit()?;
+        Ok(archived_at_ms)
+    }
+
+    pub fn set_archive(&mut self, archived: bool) -> Result<Option<i64>, AppError> {
+        let tx = WriteTransaction::begin(&mut self.conn)?;
+        let previous = effective_archive_from(&tx)?;
+        if previous.is_some() == archived {
+            tx.commit()?;
+            return Ok(previous);
+        }
+        let watermark: i64 =
+            tx.query_row("SELECT COALESCE(MAX(event_id),0) FROM events", [], |row| {
+                row.get(0)
+            })?;
+        let archived_at_ms = archived.then(sqlite_now_ms);
+        tx.execute(
+            "INSERT INTO metadata_events(operation,created_ms,snapshot_json,attribution_json) VALUES('viewer-archive',?1,?2,?3)",
+            params![sqlite_now_ms(), json!({"archived_at_ms":archived_at_ms,"task_event_watermark":watermark as u64}).to_string(), self.attribution_json],
+        )?;
+        tx.commit()?;
+        Ok(archived_at_ms)
     }
 
     /// Bounded project/key audit history; these events never alter task versions.

@@ -25,7 +25,7 @@
 /// `viewer show`): the task must carry exactly one `update` event with the final
 /// field values, because no path may send a second write on its own.
 ///
-/// Three documented client seams make this possible without touching
+/// Two documented client seams make this possible without touching
 /// `viewer/lib`:
 ///
 /// * [ProcessLauncher] is the injection point of `ViewerCliClient`. Neither the
@@ -33,15 +33,12 @@
 ///   CLI, so this file supplies a launcher that starts the identical executable
 ///   with the two test-hook variables added to the child environment; the
 ///   production launcher stays untouched.
-/// * On a read timeout the client kills the process it was waiting for, and a
-///   write still holding before its commit does not survive that kill (the
-///   store keeps the old version), so the launcher records the kill request and
-///   leaves the timed-out writer alone. That is the acknowledgement-loss
-///   premise: the viewer gave up on the answer, not on the write. The store runs
-///   in WAL mode, where a reader concurrent with the held write sees the
-///   pre-commit snapshot, so the launcher also waits for that in-flight write to
-///   finish before it starts the client's next read; the reconciliation then
-///   observes the committed record, as spec section 7 requires.
+/// * Writes remain alive after their response deadline; the launcher records
+///   any kill request and actually forwards it, so the test detects accidental
+///   write cancellation. The test client records the response deadline. The
+///   store runs in WAL mode, where a concurrent read sees the pre-commit
+///   snapshot. The launcher does not delay reads: the production client must
+///   wait for its own writer before attempting reconciliation.
 /// * A test-only client scopes the short deadline to `updateTask`. Setup and
 ///   reconciliation keep the production read budget, with deliberately slower
 ///   read responses proving that separation. Closing the update's stdin waits
@@ -286,10 +283,10 @@ void main() {
     _printCall(updateCall);
     expect(
       updateCall.killRequested,
-      isTrue,
-      reason: 'the client gave up at its read timeout and killed the read',
+      isFalse,
+      reason: 'a response timeout must not cancel the atomic write',
     );
-    expect(updateCall.killRequestedAt, isNotNull);
+    expect(updateCall.responseDeadlineAt, isNotNull);
     expect(updateCall.completedAt, isNotNull);
     expect(
       updateCall.readyMarkerAtGiveUp,
@@ -297,7 +294,7 @@ void main() {
       reason: 'the CLI had already reached the pre-commit hold',
     );
     expect(
-      updateCall.completedAt!.isAfter(updateCall.killRequestedAt!),
+      updateCall.completedAt!.isAfter(updateCall.responseDeadlineAt!),
       isTrue,
       reason: 'the write still had to commit after the viewer gave up',
     );
@@ -316,7 +313,7 @@ void main() {
     );
     print(
       '$_logTag timeline give_up='
-      '${updateCall.killRequestedAt!.difference(saveStartedAt).inMilliseconds}ms '
+      '${updateCall.responseDeadlineAt!.difference(saveStartedAt).inMilliseconds}ms '
       'writer_exit='
       '${updateCall.completedAt!.difference(saveStartedAt).inMilliseconds}ms '
       'save_return='
@@ -435,6 +432,7 @@ final class _CliCall {
   /// True once the viewer's client killed this process after a read timeout.
   bool killRequested = false;
   DateTime? killRequestedAt;
+  DateTime? responseDeadlineAt;
 
   /// Whether the CLI had already written its pre-commit marker when the client
   /// gave up on the answer.
@@ -465,7 +463,10 @@ final class _RecordingLauncher implements ProcessLauncher {
   final Duration readResponseDelay;
 
   final List<_CliCall> invocations = <_CliCall>[];
-  Completer<void>? _writerExit;
+  final List<Future<int>> _ownedWriterExits = <Future<int>>[];
+
+  Future<void> waitForOwnedWriters() =>
+      Future.wait(_ownedWriterExits).timeout(viewerReadTimeout);
 
   /// The one `viewer update` the client sent; a retry would show up here.
   _CliCall get singleViewerUpdate {
@@ -497,16 +498,6 @@ final class _RecordingLauncher implements ProcessLauncher {
     final call = _CliCall(executable, arguments, environment: environment);
     invocations.add(call);
 
-    // A read the client starts while the held write is still running would see
-    // the pre-commit WAL snapshot, so the client's next read waits for that
-    // write to finish. Nothing else can start in this window: the client is
-    // still awaiting the timed-out update when it reconciles.
-    final pending = _writerExit;
-    if (pending != null && !call.isViewerUpdate) {
-      print('$_logTag holding the client read until the lost write committed');
-      await pending.future;
-    }
-
     call.startedAt = DateTime.now();
     final process = await Process.start(
       executable,
@@ -515,27 +506,23 @@ final class _RecordingLauncher implements ProcessLauncher {
       environment: environment,
     );
     if (hold != null && call.isViewerUpdate) {
-      final exit = Completer<void>();
-      _writerExit = exit;
+      _ownedWriterExits.add(process.exitCode);
       unawaited(
         process.exitCode.then((code) {
           call.exitCode ??= code;
           call.completedAt ??= DateTime.now();
-          if (identical(_writerExit, exit)) {
-            _writerExit = null;
-          }
-          if (!exit.isCompleted) {
-            exit.complete();
-          }
         }),
       );
     }
     return _RealCliHandle(process, call, this);
   }
 
-  /// True for the write whose answer this scenario deliberately lost.
-  bool leavesTimedOutWriterAlive(_CliCall call) =>
-      precommitHold != null && call.isViewerUpdate;
+  void recordResponseDeadline() {
+    final call = singleViewerUpdate;
+    call.responseDeadlineAt = DateTime.now();
+    final marker = readyMarkerPath;
+    call.readyMarkerAtGiveUp = marker != null && File(marker).existsSync();
+  }
 
   void printSummary() {
     print(
@@ -612,13 +599,6 @@ final class _RealCliHandle implements ViewerProcessHandle {
   void kill() {
     _call.killRequested = true;
     _call.killRequestedAt = DateTime.now();
-    final marker = _launcher.readyMarkerPath;
-    if (marker != null) {
-      _call.readyMarkerAtGiveUp = File(marker).existsSync();
-    }
-    if (_launcher.leavesTimedOutWriterAlive(_call)) {
-      return;
-    }
     _process.kill();
   }
 }
@@ -628,8 +608,11 @@ final class _RealCliHandle implements ViewerProcessHandle {
 final class _AcknowledgementLossClient extends ViewerCliClient {
   _AcknowledgementLossClient({
     required super.environment,
-    required super.launcher,
-  });
+    required _RecordingLauncher launcher,
+  }) : _recordingLauncher = launcher,
+       super(launcher: launcher);
+
+  final _RecordingLauncher _recordingLauncher;
 
   bool _updating = false;
 
@@ -645,6 +628,9 @@ final class _AcknowledgementLossClient extends ViewerCliClient {
     _updating = true;
     try {
       return await super.updateTask(projectId, request);
+    } on ViewerTimeoutFailure {
+      _recordingLauncher.recordResponseDeadline();
+      rethrow;
     } finally {
       _updating = false;
     }
@@ -745,8 +731,9 @@ final class _Slice5Harness {
     expect(projectId, isA<String>());
     print('$_logTag seeded synthetic project $projectId in the temp store');
 
-    addTearDown(() {
+    addTearDown(() async {
       controller.dispose();
+      await launcher.waitForOwnedWriters();
       if (root.existsSync()) {
         root.deleteSync(recursive: true);
         print('$_logTag removed temp data root ${root.path}');

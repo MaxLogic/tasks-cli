@@ -15,6 +15,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import '../app_environment.dart';
 import 'editor_models.dart';
@@ -28,6 +29,52 @@ const int viewerRequestByteLimit = 8 * 1024 * 1024;
 
 /// Read timeout for one CLI invocation.
 const Duration viewerReadTimeout = Duration(seconds: 30);
+
+/// Minimal CLI-owned receipt metadata. No request body is stored in Dart.
+final class ViewerPendingReceipt {
+  const ViewerPendingReceipt(
+    this.requestId,
+    this.projectId,
+    this.operation, {
+    this.taskId,
+    this.archived,
+    this.outcomeKnown = false,
+  });
+
+  final String requestId;
+  final String? projectId;
+  final String operation;
+  final int? taskId;
+  final bool? archived;
+  final bool outcomeKnown;
+
+  factory ViewerPendingReceipt.fromJson(Map<String, Object?> json) {
+    final id = json['request_id'];
+    final projectId = json['project_id'];
+    final operation = json['operation'];
+    final taskId = json['task_id'];
+    final archived = json['archived'];
+    final known = json['outcome_known'];
+    if (id is! String ||
+        (projectId != null && projectId is! String) ||
+        operation is! String ||
+        (taskId != null && taskId is! int) ||
+        (archived != null && archived is! bool) ||
+        known is! bool) {
+      throw const ViewerMalformedResponseFailure(
+        'invalid pending receipt metadata',
+      );
+    }
+    return ViewerPendingReceipt(
+      id,
+      projectId as String?,
+      operation,
+      taskId: taskId as int?,
+      archived: archived as bool?,
+      outcomeKnown: known,
+    );
+  }
+}
 
 /// One running CLI process, as far as the client needs it.
 ///
@@ -116,6 +163,7 @@ class ViewerCliClient
         CancellableTaskReader,
         CancellableTaskDetailReader,
         TaskUpdateWriter,
+        TaskWriteReconciler,
         ClipboardEnricher,
         ProjectArchiveWriter {
   ViewerCliClient({
@@ -151,6 +199,27 @@ class ViewerCliClient
 
   bool _probePassed = false;
   ViewerInfo? _info;
+  final List<ViewerPendingReceipt> _pendingReceipts = <ViewerPendingReceipt>[];
+  final Map<String, ViewerUpdateResult> _confirmedTaskResults =
+      <String, ViewerUpdateResult>{};
+  final Map<String, bool> _originalWriteExited = <String, bool>{};
+  final Set<String> _timedOutWrites = <String>{};
+  Future<int>? _localWriterExit;
+
+  List<ViewerPendingReceipt> get pendingReceipts =>
+      List<ViewerPendingReceipt>.unmodifiable(_pendingReceipts);
+
+  bool get hasPendingReceipt => _pendingReceipts.isNotEmpty;
+  @override
+  bool get usesRemoteReceipts => _info?.isRemote ?? false;
+
+  @override
+  bool hasPendingTask(String projectId, int taskId) => _pendingReceipts.any(
+    (receipt) =>
+        receipt.projectId?.toLowerCase() == projectId.toLowerCase() &&
+        receipt.taskId == taskId &&
+        receipt.operation == 'viewer_update',
+  );
 
   /// True once `viewer info` decoded with a supported protocol version.
   bool get probePassed => _probePassed;
@@ -204,13 +273,33 @@ class ViewerCliClient
     if (_probePassed && !force && cached != null) {
       return cached;
     }
+    final dataRoot = environment.dataRoot;
     final envelope = await _runViewerCommand(
       scopeKey: 'probe',
-      arguments: const <String>['--format', 'json', 'viewer', 'info'],
+      arguments: <String>[
+        if (dataRoot != null && dataRoot.isNotEmpty) ...<String>[
+          '--data-root',
+          dataRoot,
+        ],
+        '--format',
+        'json',
+        'viewer',
+        'info',
+      ],
       request: null,
       expectedCommands: const <String>{'viewer_info'},
     );
     final decoded = ViewerInfo.fromJson(envelope.data);
+    if (decoded.isRemote) {
+      if (!decoded.receiptRecovery) {
+        throw const ViewerMalformedResponseFailure(
+          'remote CLI does not support viewer receipt recovery',
+        );
+      }
+      await _refreshPendingReceipts();
+    } else {
+      _pendingReceipts.clear();
+    }
     _info = decoded;
     _probePassed = true;
     return decoded;
@@ -249,29 +338,77 @@ class ViewerCliClient
     if (!_probePassed) {
       throw const ViewerProbeRequiredFailure();
     }
-    final envelope = await _runViewerCommand(
-      scopeKey: 'project-archive',
-      arguments: <String>[
-        '--data-root',
-        _requireDataRoot('changing the project archive state'),
-        '--project',
-        projectId,
-        '--format',
-        'json',
-        'viewer',
-        'archive',
-        if (!archived) '--unarchive',
-      ],
-      request: null,
-      expectedCommands: const <String>{'viewer_archive'},
-    );
-    _requireProjectEcho(envelope, projectId);
+    final remote = _info?.isRemote ?? false;
+    if (remote) _requireNoPendingReceipt();
+    if (remote) {
+      _originalWriteExited.clear();
+      _timedOutWrites.clear();
+    }
+    final requestId = remote ? _newRequestId() : null;
+    if (requestId != null) {
+      _pendingReceipts.add(
+        ViewerPendingReceipt(
+          requestId,
+          projectId,
+          'archive',
+          archived: archived,
+        ),
+      );
+    }
+    final ViewerEnvelope envelope;
+    try {
+      envelope = await _runViewerCommand(
+        scopeKey: 'project-archive',
+        arguments: <String>[
+          '--data-root',
+          _requireDataRoot('changing the project archive state'),
+          '--project',
+          projectId,
+          '--format',
+          'json',
+          'viewer',
+          'archive',
+          if (requestId != null) ...<String>['--request-id', requestId],
+          if (!archived) '--unarchive',
+        ],
+        request: null,
+        expectedCommands: const <String>{'viewer_archive'},
+        cancellable: false,
+        originalWriteId: requestId,
+        localMutation: !remote,
+      );
+      _requireProjectEcho(envelope, projectId);
+    } on ViewerCliErrorFailure catch (error) {
+      if (requestId != null) await _settleRemoteWriteError(requestId, error);
+      rethrow;
+    } on ViewerRequestTooLargeFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    } on ViewerProcessStartFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    } on ViewerExecutableNotFoundFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    }
     final value = envelope.data['archived_at_ms'];
     if (value != null && value is! int) {
       throw const ViewerMalformedResponseFailure(
         'viewer archive returned an invalid archived_at_ms',
       );
     }
+    if ((archived && value == null) || (!archived && value != null)) {
+      throw const ViewerMalformedResponseFailure(
+        'viewer archive returned the wrong archive state',
+      );
+    }
+    if (requestId != null) await _acknowledge(requestId);
     return value as int?;
   }
 
@@ -310,6 +447,7 @@ class ViewerCliClient
     }
     final envelope = await _runViewerCommand(
       scopeKey: 'detail',
+      waitForLocalWriter: true,
       arguments: <String>[
         '--data-root',
         _requireDataRoot('loading a task'),
@@ -378,9 +516,66 @@ class ViewerCliClient
     String projectId,
     ViewerUpdateRequest request,
   ) async {
-    final envelope = await _updateTaskEnvelope(projectId, request);
-    _requireProjectEcho(envelope, projectId);
-    return ViewerUpdateResult.fromJson(envelope.data);
+    final remote = _info?.isRemote ?? false;
+    if (remote) _requireNoPendingReceipt();
+    if (remote) _confirmedTaskResults.clear();
+    if (remote) {
+      _originalWriteExited.clear();
+      _timedOutWrites.clear();
+    }
+    final requestId = remote ? _newRequestId() : null;
+    final effectiveRequest = requestId == null
+        ? request
+        : ViewerUpdateRequest(
+            id: request.id,
+            expectVersion: request.expectVersion,
+            changes: request.changes,
+            requestId: requestId,
+          );
+    if (requestId != null) {
+      _pendingReceipts.add(
+        ViewerPendingReceipt(
+          requestId,
+          projectId,
+          'viewer_update',
+          taskId: request.id,
+        ),
+      );
+    }
+    try {
+      final envelope = await _updateTaskEnvelope(projectId, effectiveRequest);
+      _requireProjectEcho(envelope, projectId);
+      final result = ViewerUpdateResult.fromJson(envelope.data);
+      if (result.id != request.id ||
+          result.version !=
+              request.expectVersion + (result.eventId == null ? 0 : 1) ||
+          (request.changes.status != null &&
+              result.status != request.changes.status)) {
+        throw const ViewerMalformedResponseFailure(
+          'viewer update returned a mismatched task or version',
+        );
+      }
+      if (requestId != null) await _acknowledge(requestId);
+      return result;
+    } on ViewerCliErrorFailure catch (error) {
+      if (requestId != null) await _settleRemoteWriteError(requestId, error);
+      rethrow;
+    } on ViewerRequestTooLargeFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    } on ViewerProcessStartFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    } on ViewerExecutableNotFoundFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+      }
+      rethrow;
+    }
   }
 
   Future<ViewerEnvelope> _updateTaskEnvelope(
@@ -406,6 +601,9 @@ class ViewerCliClient
       ],
       request: request.toJson(),
       expectedCommands: const <String>{'viewer_update'},
+      cancellable: false,
+      originalWriteId: request.requestId,
+      localMutation: request.requestId == null,
     );
   }
 
@@ -500,6 +698,276 @@ class ViewerCliClient
     }
   }
 
+  void _requireNoPendingReceipt() {
+    if (_pendingReceipts.isNotEmpty) {
+      throw ViewerPendingReceiptFailure(_pendingReceipts.first.requestId);
+    }
+  }
+
+  static bool _isTerminalRefusal(ViewerCliErrorFailure error) =>
+      error.exitCode == 2 || error.exitCode == 3 || error.exitCode == 4;
+
+  Future<void> _settleRemoteWriteError(
+    String requestId,
+    ViewerCliErrorFailure error,
+  ) async {
+    // The CLI exited. Its local receipt distinguishes a preflight outage from
+    // a dispatched write; the next request does not contact the service.
+    try {
+      await _refreshPendingReceipts();
+    } on ViewerFailure catch (failure) {
+      throw ViewerPendingReceiptFailure(requestId, failure.message);
+    }
+    final pending = _pendingReceipts
+        .where((item) => item.requestId == requestId)
+        .firstOrNull;
+    if (pending == null) {
+      if (error.code == 'unparsed_error') {
+        throw ViewerCliErrorFailure(
+          code: 'write_not_dispatched',
+          message:
+              'The CLI exited without retaining a request. The draft is preserved: ${error.message}',
+          exitCode: error.exitCode,
+        );
+      }
+      return;
+    }
+    if (_isTerminalRefusal(error) && pending.outcomeKnown) {
+      await _acknowledge(requestId);
+      return;
+    }
+    throw ViewerPendingReceiptFailure(requestId, error.message);
+  }
+
+  Future<void> _refreshPendingReceipts() async {
+    final envelope = await _runViewerCommand(
+      scopeKey: 'receipt-recovery',
+      arguments: <String>[
+        '--data-root',
+        _requireDataRoot('checking pending changes'),
+        '--format',
+        'json',
+        'viewer',
+        'recovery',
+      ],
+      request: null,
+      expectedCommands: const <String>{'viewer_recovery'},
+    );
+    final items = envelope.data['items'];
+    if (items is! List<Object?>) {
+      throw const ViewerMalformedResponseFailure('viewer recovery needs items');
+    }
+    final parsed = <ViewerPendingReceipt>[];
+    for (final item in items) {
+      if (item is! Map<String, Object?>) {
+        throw const ViewerMalformedResponseFailure(
+          'invalid viewer recovery item',
+        );
+      }
+      parsed.add(ViewerPendingReceipt.fromJson(item));
+    }
+    _pendingReceipts
+      ..clear()
+      ..addAll(parsed);
+  }
+
+  Future<void> _acknowledge(String requestId) async {
+    try {
+      final envelope = await _runViewerCommand(
+        scopeKey: 'receipt-acknowledge',
+        arguments: <String>[
+          '--data-root',
+          _requireDataRoot('acknowledging a change'),
+          '--format',
+          'json',
+          'viewer',
+          'acknowledge',
+          requestId,
+        ],
+        request: null,
+        expectedCommands: const <String>{'viewer_acknowledge'},
+        cancellable: false,
+      );
+      if (envelope.data['request_id'] != requestId ||
+          envelope.data['acknowledged'] != true) {
+        throw const ViewerMalformedResponseFailure('invalid acknowledgement');
+      }
+      _pendingReceipts.removeWhere((item) => item.requestId == requestId);
+    } on ViewerFailure catch (error) {
+      // The original result was already validated. Lost cleanup stdout needs
+      // a local receipt check, never a resend of the original mutation.
+      try {
+        await _refreshPendingReceipts();
+        if (!_pendingReceipts.any((item) => item.requestId == requestId)) {
+          return;
+        }
+      } on ViewerFailure {
+        // Retain the known result and its cleanup uncertainty.
+      }
+      throw ViewerPendingReceiptFailure(
+        requestId,
+        'The result was confirmed, but its receipt could not be cleared: ${error.message}',
+      );
+    }
+  }
+
+  /// Checks exactly the stored remote request, then clears its confirmed receipt.
+  @override
+  Future<ViewerUpdateResult> reconcileTaskWrite(
+    String projectId,
+    int taskId,
+  ) async {
+    final cacheKey = '${projectId.toLowerCase()}:$taskId';
+    final matching = _pendingReceipts
+        .where(
+          (item) =>
+              item.projectId?.toLowerCase() == projectId.toLowerCase() &&
+              item.taskId == taskId &&
+              item.operation == 'viewer_update',
+        )
+        .toList();
+    if (matching.length != 1) {
+      final confirmed = _confirmedTaskResults[cacheKey];
+      if (matching.isEmpty && confirmed != null) return confirmed;
+      throw const ViewerMalformedResponseFailure(
+        'expected one pending update receipt for this task',
+      );
+    }
+    final receipt = matching.single;
+    await _checkOriginalWriteState(receipt.requestId);
+    try {
+      final envelope = await _runViewerCommand(
+        scopeKey: 'receipt-reconcile',
+        arguments: <String>[
+          '--data-root',
+          _requireDataRoot('checking a pending change'),
+          '--format',
+          'json',
+          'viewer',
+          'reconcile',
+          receipt.requestId,
+        ],
+        request: null,
+        expectedCommands: const <String>{'viewer_update'},
+        cancellable: false,
+      );
+      _requireProjectEcho(envelope, projectId);
+      final result = ViewerUpdateResult.fromJson(envelope.data);
+      if (result.id != taskId) {
+        throw const ViewerMalformedResponseFailure(
+          'reconciled task ID differs',
+        );
+      }
+      _confirmedTaskResults
+        ..clear()
+        ..[cacheKey] = result;
+      await _acknowledge(receipt.requestId);
+      return result;
+    } on ViewerCliErrorFailure catch (error) {
+      if (_isTerminalRefusal(error)) {
+        await _acknowledge(receipt.requestId);
+        rethrow;
+      }
+      throw ViewerPendingReceiptFailure(receipt.requestId, error.message);
+    }
+  }
+
+  /// Explicit recovery action for a pending archive or another CLI receipt.
+  Future<void> checkPendingChange(String requestId) async {
+    final receipt = _pendingReceipts
+        .where((item) => item.requestId == requestId)
+        .firstOrNull;
+    if (receipt == null) {
+      throw const ViewerMalformedResponseFailure(
+        'pending receipt was not found',
+      );
+    }
+    await _checkOriginalWriteState(requestId);
+    try {
+      final envelope = await _runViewerCommand(
+        scopeKey: 'receipt-reconcile',
+        arguments: <String>[
+          '--data-root',
+          _requireDataRoot('checking a pending change'),
+          '--format',
+          'json',
+          'viewer',
+          'reconcile',
+          requestId,
+        ],
+        request: null,
+        expectedCommands: <String>{
+          receipt.operation == 'archive' ? 'viewer_archive' : receipt.operation,
+        },
+        cancellable: false,
+      );
+      if (receipt.projectId != null) {
+        _requireProjectEcho(envelope, receipt.projectId!);
+      }
+      if (receipt.operation == 'viewer_update') {
+        final result = ViewerUpdateResult.fromJson(envelope.data);
+        if (result.id != receipt.taskId) {
+          throw const ViewerMalformedResponseFailure(
+            'reconciled task ID differs',
+          );
+        }
+      } else if (receipt.operation == 'archive') {
+        final archivedAt = envelope.data['archived_at_ms'];
+        if (archivedAt != null && archivedAt is! int) {
+          throw const ViewerMalformedResponseFailure('invalid archive result');
+        }
+        if (receipt.archived != null &&
+            (receipt.archived! ? archivedAt == null : archivedAt != null)) {
+          throw const ViewerMalformedResponseFailure(
+            'reconciled archive state differs from the request',
+          );
+        }
+      }
+      await _acknowledge(requestId);
+    } on ViewerCliErrorFailure catch (error) {
+      if (_isTerminalRefusal(error)) {
+        await _acknowledge(requestId);
+        rethrow;
+      }
+      throw ViewerPendingReceiptFailure(requestId, error.message);
+    }
+  }
+
+  static String _newRequestId() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    final hex = bytes
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+  }
+
+  Future<void> _checkOriginalWriteState(String requestId) async {
+    if (!_timedOutWrites.contains(requestId)) return;
+    if (_originalWriteExited[requestId] != true) {
+      throw ViewerPendingReceiptFailure(
+        requestId,
+        'The original CLI is still running. Wait for it to exit before checking this change.',
+      );
+    }
+    // Only an exited original process can establish that no request was saved.
+    // This is a local receipt query, not a second service mutation.
+    await _refreshPendingReceipts();
+    _timedOutWrites.remove(requestId);
+    _originalWriteExited.remove(requestId);
+    if (!_pendingReceipts.any((item) => item.requestId == requestId)) {
+      throw const ViewerCliErrorFailure(
+        code: 'write_not_dispatched',
+        message:
+            'The original CLI exited without retaining a request. The draft is preserved.',
+        exitCode: 6,
+      );
+    }
+  }
+
   /// Runs an arbitrary `viewer` subcommand; slice 4 and 5 build on it.
   Future<ViewerEnvelope> runViewerCommand({
     required String scopeKey,
@@ -527,12 +995,47 @@ class ViewerCliClient
     _activeReads[scopeKey]?.cancel();
   }
 
+  // A WAL read can still see the old version while our timed-out writer runs.
+  // Wait for its exit before reconciliation or dispatching another local write.
+  Future<void> _waitForLocalWriter(Duration timeout, _ActiveRead active) async {
+    final exit = _localWriterExit;
+    if (exit == null) return;
+    try {
+      await Future.any<int>(<Future<int>>[
+        exit.timeout(timeout),
+        active.cancellation.future.then<int>(
+          (_) => throw const ViewerCancelledFailure(),
+        ),
+      ]);
+    } on TimeoutException {
+      throw ViewerTimeoutFailure(readTimeout);
+    } on ViewerCancelledFailure {
+      rethrow;
+    } on Object catch (error) {
+      throw ViewerMalformedResponseFailure(
+        'could not observe the local writer exit: $error',
+      );
+    }
+  }
+
+  void _finishLocalWriter(Completer<int>? reservation, int code) {
+    if (reservation == null) return;
+    if (!reservation.isCompleted) reservation.complete(code);
+    if (identical(_localWriterExit, reservation.future)) {
+      _localWriterExit = null;
+    }
+  }
+
   Future<ViewerEnvelope> _runViewerCommand({
     required String scopeKey,
     required List<String> arguments,
     required Map<String, Object?>? request,
     required Set<String>? expectedCommands,
     List<int>? rawStdin,
+    bool cancellable = true,
+    String? originalWriteId,
+    bool localMutation = false,
+    bool waitForLocalWriter = false,
   }) async {
     final resolution = resolveExecutable();
     final executable = resolution.executable;
@@ -554,23 +1057,69 @@ class ViewerCliClient
       );
     }
 
-    _activeReads[scopeKey]?.cancel();
     final active = _ActiveRead();
-    _activeReads[scopeKey] = active;
+    if (cancellable) {
+      _activeReads[scopeKey]?.cancel();
+      _activeReads[scopeKey] = active;
+    }
+    final budget = readTimeout;
+    final elapsed = Stopwatch()..start();
+    Duration remainingBudget() {
+      final remaining = budget - elapsed.elapsed;
+      return remaining.isNegative ? Duration.zero : remaining;
+    }
+
+    Completer<int>? localReservation;
+    try {
+      if (waitForLocalWriter || localMutation) {
+        while (_localWriterExit != null) {
+          await _waitForLocalWriter(remainingBudget(), active);
+        }
+      }
+      if (active.cancelled) throw const ViewerCancelledFailure();
+      if (localMutation) {
+        // Reserve before process launch yields, so another mutation cannot pass
+        // the exit wait while this process is still being created.
+        localReservation = Completer<int>();
+        _localWriterExit = localReservation.future;
+      }
+    } on Object {
+      _release(scopeKey, active);
+      rethrow;
+    }
 
     final ViewerProcessHandle handle;
     try {
       handle = await _launcher.start(executable, arguments);
     } on ProcessException catch (error) {
+      _finishLocalWriter(localReservation, -1);
       _release(scopeKey, active);
       throw ViewerProcessStartFailure(
         'Could not start "$executable": ${error.message}',
       );
     } on Object catch (error) {
+      _finishLocalWriter(localReservation, -1);
       _release(scopeKey, active);
       throw ViewerProcessStartFailure('Could not start "$executable": $error');
     }
     active.handle = handle;
+    if (localMutation) {
+      unawaited(
+        handle.exitCode.then<void>((code) {
+          _finishLocalWriter(localReservation, code);
+        }, onError: (Object _) {}),
+      );
+    }
+    if (originalWriteId != null) {
+      _originalWriteExited[originalWriteId] = false;
+      unawaited(
+        handle.exitCode.then<void>((_) {
+          if (_originalWriteExited.containsKey(originalWriteId)) {
+            _originalWriteExited[originalWriteId] = true;
+          }
+        }, onError: (Object _) {}),
+      );
+    }
     if (active.cancelled) {
       handle.kill();
       throw const ViewerCancelledFailure();
@@ -593,16 +1142,17 @@ class ViewerCliClient
     ]);
     final List<Object?> results;
     try {
-      results = await drained.timeout(readTimeout);
+      results = await drained.timeout(remainingBudget());
     } on TimeoutException {
-      active.cancelled = true;
+      if (originalWriteId != null) _timedOutWrites.add(originalWriteId);
+      active.cancelled = cancellable;
       _abandon(drained);
-      handle.kill();
+      if (cancellable) handle.kill();
       _release(scopeKey, active);
       throw ViewerTimeoutFailure(readTimeout);
     } on Object catch (error) {
       _abandon(drained);
-      handle.kill();
+      if (cancellable) handle.kill();
       _release(scopeKey, active);
       throw ViewerMalformedResponseFailure(
         'could not read the tasks CLI output: $error',
@@ -672,12 +1222,14 @@ typedef ViewerSettingsDraftSource = ViewerSettingsDraft Function();
 class _ActiveRead {
   ViewerProcessHandle? handle;
   bool cancelled = false;
+  final cancellation = Completer<void>();
 
   void cancel() {
     if (cancelled) {
       return;
     }
     cancelled = true;
+    cancellation.complete();
     handle?.kill();
   }
 }

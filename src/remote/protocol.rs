@@ -73,6 +73,35 @@ pub enum ReadRequest {
     Titles {
         references: Vec<String>,
     },
+    ViewerTasks {
+        request: Value,
+    },
+    ViewerShow {
+        id: String,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerProjectsRequest {
+    pub request: Value,
+    pub root_matches: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerUpdate {
+    pub request: Value,
+    #[serde(default)]
+    pub attribution: Attribution,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetArchive {
+    pub archived: bool,
+    #[serde(default)]
+    pub attribution: Attribution,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

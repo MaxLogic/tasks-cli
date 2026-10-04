@@ -383,8 +383,11 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
         children: <Widget>[
           Expanded(
             child: Text(
-              'The last save outcome is unknown until the task is read again. '
-              'Save stays disabled.',
+              editor.usesRemoteReceipts
+                  ? 'The last save outcome is unknown. Save stays disabled '
+                        'until the pending change is checked.'
+                  : 'The last save outcome is unknown until the task is read '
+                        'again. Save stays disabled.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.error,
               ),
@@ -393,7 +396,9 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
           const SizedBox(width: 8),
           TextButton(
             onPressed: () => unawaited(widget.onRetryReconciliation()),
-            child: const Text('Retry'),
+            child: Text(
+              editor.usesRemoteReceipts ? 'Check pending change' : 'Retry',
+            ),
           ),
         ],
       ),

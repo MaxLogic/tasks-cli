@@ -6,7 +6,7 @@ use super::{
     protocol::*,
 };
 use crate::{
-    cli::{Cli, Command, OutputFormat, RemoteCommand, RulesCommand},
+    cli::{Cli, Command, OutputFormat, RemoteCommand, RulesCommand, ViewerCommand},
     model::{TaskStatus, TaskUpdate},
     output::{CommandPayload, Envelope},
     registry, AppError,
@@ -191,6 +191,9 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         return Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None });
     }
     let client = RemoteClient::new(profile)?;
+    if let Command::Viewer(command) = &cli.command {
+        return execute_viewer(cli, root, &client, command);
+    }
     if let Command::Init {
         root: workspace,
         key,
@@ -467,6 +470,185 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
                     .into(),
                 request_id: None,
             })
+        }
+    };
+    print(output, cli.format);
+    Ok(())
+}
+
+fn viewer_output(data: serde_json::Value) -> ApiOutput {
+    ApiOutput {
+        output: json!({"schema_version":1,"project_id":null,"id_key":null,"data":data}),
+        text: String::new(),
+        catalog_name: None,
+    }
+}
+fn execute_viewer(
+    cli: &Cli,
+    root: &Path,
+    client: &RemoteClient,
+    command: &ViewerCommand,
+) -> Result<(), AppError> {
+    let output = match command {
+        ViewerCommand::Info => api_output(client.read(Method::GET, "/v1/viewer/info", b"")?)?,
+        ViewerCommand::Recovery => {
+            let store = PendingStore::new(root)?;
+            let _lock = store.lock()?;
+            let items=store.list()?.into_iter().map(|id| {
+                let pending=store.load(id)?;
+                pending.check_destination(client.server_id,client.credential_id)?;
+                let parts=pending.target.split('/').collect::<Vec<_>>();
+                let project_id=parts.get(3).filter(|s| Uuid::parse_str(s).is_ok()).copied()
+                    .or_else(||pending.payload.get("project_id").and_then(serde_json::Value::as_str));
+                let operation=if pending.target.ends_with("/viewer/update") {"viewer_update"} else if pending.target.ends_with("/archive") {"archive"}
+                    else if pending.target == "/v1/projects" {"init"} else if pending.method == "PATCH" {"update"}
+                    else if pending.target.ends_with("/tasks") {"create"} else if pending.target.ends_with("/rules") {"rules_set"} else {"project_key"};
+                Ok(json!({"request_id":id,"project_id":project_id,"operation":operation,
+                    "task_id":pending.payload.get("request").and_then(|request|request.get("id")),
+                    "archived":pending.payload.get("archived"),"outcome_known":store.confirmation(&pending)?.is_some()}))
+            }).collect::<Result<Vec<_>,AppError>>()?;
+            viewer_output(json!({"command":"viewer_recovery","protocol_version":1,"items":items}))
+        }
+        ViewerCommand::Reconcile { request_id } => client.reconcile_retained(root, *request_id)?,
+        ViewerCommand::Acknowledge { request_id } => {
+            client.acknowledge(root, *request_id)?;
+            viewer_output(
+                json!({"command":"viewer_acknowledge","request_id":request_id,"acknowledged":true}),
+            )
+        }
+        ViewerCommand::Projects { request_file } => {
+            let mut request = crate::viewer::read_request_document(request_file)?;
+            let bindings = registry::list_bindings(root)?.bindings;
+            let mut roots = std::collections::BTreeMap::<String, Vec<String>>::new();
+            for binding in bindings {
+                roots
+                    .entry(binding.project_id)
+                    .or_default()
+                    .push(binding.root);
+            }
+            for values in roots.values_mut() {
+                values.sort();
+                values.dedup();
+            }
+            let registry_digest = crate::markdown::sha256(&serde_json::to_vec(&roots)?);
+            if let Some(token) = request.get("snapshot").and_then(serde_json::Value::as_str) {
+                let token: serde_json::Value =
+                    serde_json::from_str(token.strip_prefix("remote:").ok_or_else(|| {
+                        AppError::StaleSnapshot(
+                            "invalid remote project snapshot; reload from offset 0".into(),
+                        )
+                    })?)
+                    .map_err(|_| {
+                        AppError::StaleSnapshot(
+                            "invalid remote project snapshot; reload from offset 0".into(),
+                        )
+                    })?;
+                if token["bindings"] != registry_digest || !token["server"].is_string() {
+                    return Err(AppError::StaleSnapshot(
+                        "local workspace bindings changed; reload from offset 0".into(),
+                    ));
+                }
+                request["snapshot"] = token["server"].clone();
+            }
+            let search = request
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let root_matches = if search.is_empty() {
+                vec![]
+            } else {
+                roots
+                    .iter()
+                    .filter(|(_, paths)| {
+                        paths
+                            .iter()
+                            .any(|path| path.to_ascii_lowercase().contains(&search))
+                    })
+                    .map(|(id, _)| {
+                        Uuid::parse_str(id).map_err(|_| {
+                            AppError::Validation("invalid registry project UUID".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, AppError>>()?
+            };
+            let mut output = api_output(client.read(
+                Method::POST,
+                "/v1/viewer/projects",
+                &serde_json::to_vec(&ViewerProjectsRequest {
+                    request,
+                    root_matches,
+                })?,
+            )?)?;
+            if let Some(items) = output.output["data"]["items"].as_array_mut() {
+                for item in items {
+                    let paths = item["project_id"]
+                        .as_str()
+                        .and_then(|id| roots.get(id))
+                        .cloned()
+                        .unwrap_or_default();
+                    item["roots"] = json!(paths);
+                }
+            }
+            if let Some(token) = output.output["data"]["snapshot"].as_str() {
+                output.output["data"]["snapshot"] = json!(format!(
+                    "remote:{}",
+                    json!({"server":token,"bindings":registry_digest})
+                ));
+            }
+            output
+        }
+        ViewerCommand::Tasks { request_file } => query(
+            client,
+            &project(cli, root)?,
+            ReadRequest::ViewerTasks {
+                request: crate::viewer::read_request_document(request_file)?,
+            },
+        )?,
+        ViewerCommand::Show { id } => query(
+            client,
+            &project(cli, root)?,
+            ReadRequest::ViewerShow { id: id.clone() },
+        )?,
+        ViewerCommand::Update { request_file } => {
+            let id = project(cli, root)?;
+            let mut request = crate::viewer::read_request_document(request_file)?;
+            let request_id = request
+                .as_object_mut()
+                .ok_or_else(|| AppError::Usage("viewer update must be an object".into()))?
+                .remove("request_id")
+                .map(|value| {
+                    serde_json::from_value::<Uuid>(value)
+                        .map_err(|_| AppError::Usage("request_id must be a UUID".into()))
+                })
+                .transpose()?
+                .unwrap_or_else(Uuid::new_v4);
+            client.write_retained(
+                root,
+                Method::PATCH,
+                &format!("/v1/projects/{id}/viewer/update"),
+                serde_json::to_value(ViewerUpdate {
+                    request,
+                    attribution: crate::attribution::current(),
+                })?,
+                request_id,
+            )?
+        }
+        ViewerCommand::Archive {
+            unarchive,
+            request_id,
+        } => {
+            let id = project(cli, root)?;
+            client.write_retained(
+                root,
+                Method::PUT,
+                &format!("/v1/projects/{id}/archive"),
+                serde_json::to_value(SetArchive {
+                    archived: !unarchive,
+                    attribution: crate::attribution::current(),
+                })?,
+                request_id.unwrap_or_else(Uuid::new_v4),
+            )?
         }
     };
     print(output, cli.format);

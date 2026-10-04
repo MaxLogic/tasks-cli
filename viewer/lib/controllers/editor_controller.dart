@@ -291,6 +291,9 @@ class ViewerEditorController extends ChangeNotifier {
 
   /// True while a write may have landed without a usable answer.
   bool get isAwaitingReconciliation => _awaitingReconciliation;
+  bool get usesRemoteReceipts =>
+      _writer is TaskWriteReconciler &&
+      (_writer as TaskWriteReconciler).usesRemoteReceipts;
 
   EditorConflict? get conflict => _conflict;
 
@@ -951,6 +954,72 @@ class ViewerEditorController extends ChangeNotifier {
         message: 'There is no unresolved save to reconcile.',
       );
     }
+    final TaskWriteReconciler? writer = _writer is TaskWriteReconciler
+        ? _writer as TaskWriteReconciler
+        : null;
+    if (writer?.usesRemoteReceipts == true) {
+      final projectId = _projectId;
+      final taskId = _taskId;
+      if (projectId == null || taskId == null) {
+        return const EditorSaveResult(
+          EditorSaveOutcome.failed,
+          message: 'The pending task is no longer selected.',
+        );
+      }
+      try {
+        final confirmed = await writer!.reconcileTaskWrite(projectId, taskId);
+        return _reconcile(
+          intended,
+          changes,
+          confirmedVersion: confirmed.version,
+        );
+      } on ViewerCliErrorFailure catch (failure) {
+        _awaitingReconciliation = false;
+        _intendedFields = null;
+        _intendedChanges = null;
+        if (failure.code == 'version_conflict') {
+          return _enterConflict(failure.message);
+        }
+        final reader = _detailReader;
+        if (reader != null) {
+          try {
+            final fresh = await reader.fetchTaskDetail(projectId, taskId);
+            observeProjectKey(fresh.projectKey, projectId: projectId);
+            if (fresh.version != _base?.version) {
+              final conflict = _buildConflict(fresh);
+              _conflict = conflict;
+              _notify();
+              return EditorSaveResult(
+                EditorSaveOutcome.conflict,
+                message:
+                    'The pending change was refused: ${failure.message}. '
+                    'The task also changed in the store.',
+                conflict: conflict,
+              );
+            }
+          } on ViewerFailure catch (readFailure) {
+            _notify();
+            return EditorSaveResult(
+              EditorSaveOutcome.failed,
+              message:
+                  'The pending change was refused: ${failure.message}. '
+                  'Could not read the current task: ${readFailure.message}',
+            );
+          }
+        }
+        _notify();
+        return EditorSaveResult(
+          EditorSaveOutcome.failed,
+          message: 'The pending change was refused: ${failure.message}',
+        );
+      } on ViewerFailure catch (failure) {
+        _notify();
+        return EditorSaveResult(
+          EditorSaveOutcome.failed,
+          message: 'Could not check the pending change: ${failure.message}',
+        );
+      }
+    }
     return _reconcile(intended, changes);
   }
 
@@ -1048,6 +1117,23 @@ class ViewerEditorController extends ChangeNotifier {
     } on ViewerMalformedResponseFailure catch (failure) {
       _saving = false;
       return _outcomeUnknown(failure.message, intended, changes);
+    } on ViewerPendingReceiptFailure catch (failure) {
+      _saving = false;
+      final TaskWriteReconciler? writer = _writer is TaskWriteReconciler
+          ? _writer as TaskWriteReconciler
+          : null;
+      if (writer != null) {
+        // A receipt from a different task blocks this write before it starts.
+        final own = writer.hasPendingTask(projectId, taskId);
+        if (!own) {
+          _notify();
+          return EditorSaveResult(
+            EditorSaveOutcome.failed,
+            message: failure.message,
+          );
+        }
+      }
+      return _outcomeUnknown(failure.message, intended, changes);
     } on ViewerFailure catch (failure) {
       // Resolution, probe and size failures happen before any write, so they
       // are clean failures that leave the draft untouched.
@@ -1070,6 +1156,17 @@ class ViewerEditorController extends ChangeNotifier {
     _intendedFields = intended;
     _intendedChanges = changes;
     _notify();
+    final TaskWriteReconciler? writer = _writer is TaskWriteReconciler
+        ? _writer as TaskWriteReconciler
+        : null;
+    if (writer?.usesRemoteReceipts == true) {
+      return EditorSaveResult(
+        EditorSaveOutcome.failed,
+        message:
+            'The save outcome is unknown: $message. The draft is preserved. '
+            'Use Check pending change to reconcile its exact remote receipt.',
+      );
+    }
     final reconciled = await _reconcile(intended, changes);
     if (reconciled.outcome == EditorSaveOutcome.reconciled ||
         reconciled.outcome == EditorSaveOutcome.conflict ||
@@ -1089,8 +1186,9 @@ class ViewerEditorController extends ChangeNotifier {
   /// Reconciliation never mutates the store and never resends the update.
   Future<EditorSaveResult> _reconcile(
     TaskEditFields intended,
-    EditorFieldChanges changes,
-  ) async {
+    EditorFieldChanges changes, {
+    int? confirmedVersion,
+  }) async {
     final reader = _detailReader;
     final projectId = _projectId;
     final taskId = _taskId;
@@ -1115,7 +1213,8 @@ class ViewerEditorController extends ChangeNotifier {
     _awaitingReconciliation = false;
     _intendedFields = null;
     _intendedChanges = null;
-    if (_matchesIntended(fresh, intended, changes)) {
+    if ((confirmedVersion == null || fresh.version == confirmedVersion) &&
+        _matchesIntended(fresh, intended, changes)) {
       _base = fresh;
       _baseFields = TaskEditFields.fromDetail(fresh);
       _closeEditor();
@@ -1130,7 +1229,9 @@ class ViewerEditorController extends ChangeNotifier {
       );
     }
     final baseVersion = _base?.version;
-    if (baseVersion != null && fresh.version == baseVersion) {
+    if (confirmedVersion == null &&
+        baseVersion != null &&
+        fresh.version == baseVersion) {
       _notify();
       return EditorSaveResult(
         EditorSaveOutcome.unsaved,

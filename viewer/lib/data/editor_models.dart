@@ -371,16 +371,19 @@ final class ViewerUpdateRequest {
     required this.id,
     required this.expectVersion,
     required this.changes,
+    this.requestId,
   });
 
   final int id;
   final int expectVersion;
   final EditorFieldChanges changes;
+  final String? requestId;
 
   Map<String, Object?> toJson() => <String, Object?>{
     'id': id,
     'expect_version': expectVersion,
     'changes': changes.toJson(),
+    if (requestId != null) 'request_id': requestId,
   };
 }
 
@@ -394,6 +397,13 @@ abstract interface class TaskUpdateWriter {
     String projectId,
     ViewerUpdateRequest request,
   );
+}
+
+/// Exact receipt recovery for an update whose remote answer was lost.
+abstract interface class TaskWriteReconciler {
+  bool get usesRemoteReceipts;
+  bool hasPendingTask(String projectId, int taskId);
+  Future<ViewerUpdateResult> reconcileTaskWrite(String projectId, int taskId);
 }
 
 /// The confirmed result of one `viewer update`.
@@ -421,14 +431,19 @@ final class ViewerUpdateResult {
     final id = json['id'];
     final status = json['status'];
     final version = json['version'];
-    if (id is! int || status is! String || version is! int) {
+    if (id is! int ||
+        id <= 0 ||
+        status is! String ||
+        !viewerTaskStatuses.contains(status) ||
+        version is! int ||
+        version <= 0) {
       throw const ViewerMalformedResponseFailure(
         'a viewer_update payload needs an integer id and version plus a '
         'status string',
       );
     }
     final eventId = json['event_id'];
-    if (eventId is! int?) {
+    if (eventId is! int? || (eventId != null && eventId <= 0)) {
       throw const ViewerMalformedResponseFailure(
         'event_id must be an integer or null',
       );

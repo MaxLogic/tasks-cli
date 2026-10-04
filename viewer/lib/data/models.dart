@@ -96,6 +96,19 @@ final class ViewerCliErrorFailure extends ViewerFailure {
       code == 'not_found';
 }
 
+/// The CLI still holds a remote receipt whose outcome needs explicit checking.
+final class ViewerPendingReceiptFailure extends ViewerFailure {
+  const ViewerPendingReceiptFailure(this.requestId, [this.detail]);
+
+  final String requestId;
+  final String? detail;
+
+  @override
+  String get message =>
+      'Pending remote change $requestId. Check pending change before another '
+      'write.${detail == null ? '' : ' $detail'}';
+}
+
 /// One prerequisite that is neither done nor cancelled, from the structured
 /// `open_prerequisites` detail of the store's completion-guard refusal.
 final class ViewerOpenPrerequisite {
@@ -667,6 +680,8 @@ final class ViewerInfo {
     required this.priorities,
     required this.editableFields,
     required this.editableFieldLimits,
+    this.backend = 'local',
+    this.receiptRecovery = false,
   });
 
   final int protocolVersion;
@@ -675,6 +690,10 @@ final class ViewerInfo {
   final List<String> priorities;
   final List<String> editableFields;
   final ViewerEditableFieldLimits editableFieldLimits;
+  final String backend;
+  final bool receiptRecovery;
+
+  bool get isRemote => backend == 'remote';
 
   factory ViewerInfo.fromJson(
     Map<String, Object?> json, {
@@ -693,6 +712,12 @@ final class ViewerInfo {
         ),
         path: '$path.editable_field_limits',
       ),
+      backend: json['backend'] == null
+          ? 'local'
+          : _requireString(json, 'backend', path),
+      receiptRecovery: json['receipt_recovery'] == null
+          ? false
+          : _requireBool(json, 'receipt_recovery', path),
     );
   }
 }
@@ -1577,6 +1602,162 @@ final class TaskDetail {
   }
 }
 
+/// Client-reported context recorded with a history mutation.
+final class HistoryAttribution {
+  const HistoryAttribution({
+    this.schemaVersion,
+    this.actorId,
+    this.actorName,
+    this.actorAuthority,
+    this.machineId,
+    this.machineName,
+    this.registeredMachineName,
+    this.harness,
+    this.harnessVersion,
+    this.sessionId,
+    this.harnessSessionId,
+    this.sessionName,
+    this.model,
+    this.agentId,
+    this.requestId,
+    this.callerExecutable,
+    this.harnessExecutable,
+    this.originPlatform,
+    this.contextSource = const <String, String>{},
+  });
+
+  final int? schemaVersion;
+  final String? actorId;
+  final String? actorName;
+  final String? actorAuthority;
+  final String? machineId;
+  final String? machineName;
+  final String? registeredMachineName;
+  final String? harness;
+  final String? harnessVersion;
+  final String? sessionId;
+  final String? harnessSessionId;
+  final String? sessionName;
+  final String? model;
+  final String? agentId;
+  final String? requestId;
+  final String? callerExecutable;
+  final String? harnessExecutable;
+  final String? originPlatform;
+  final Map<String, String> contextSource;
+
+  factory HistoryAttribution.fromJson(
+    Map<String, Object?> json,
+    String path,
+  ) => HistoryAttribution(
+    schemaVersion: json['schema_version'] is int
+        ? json['schema_version'] as int
+        : null,
+    actorId: _optionalAttributionString(json, 'actor_id', path),
+    actorName: _optionalAttributionString(json, 'actor_name', path),
+    actorAuthority: _optionalAttributionString(json, 'actor_authority', path),
+    machineId: _optionalAttributionString(json, 'machine_id', path),
+    machineName: _optionalAttributionString(json, 'machine_name', path),
+    registeredMachineName: _optionalAttributionString(
+      json,
+      'registered_machine_name',
+      path,
+    ),
+    harness: _optionalAttributionString(json, 'harness', path),
+    harnessVersion: _optionalAttributionString(json, 'harness_version', path),
+    sessionId: _optionalAttributionString(json, 'session_id', path),
+    harnessSessionId: _optionalAttributionString(
+      json,
+      'harness_session_id',
+      path,
+    ),
+    sessionName: _optionalAttributionString(json, 'session_name', path),
+    model: _optionalAttributionString(json, 'model', path),
+    agentId: _optionalAttributionString(json, 'agent_id', path),
+    requestId: _optionalAttributionString(json, 'request_id', path),
+    callerExecutable: _optionalAttributionString(
+      json,
+      'caller_executable',
+      path,
+    ),
+    harnessExecutable: _optionalAttributionString(
+      json,
+      'harness_executable',
+      path,
+    ),
+    originPlatform: _optionalAttributionString(json, 'origin_platform', path),
+    contextSource: _attributionSources(json['context_source'], path),
+  );
+
+  String get summary => [
+    if (actorName != null)
+      'Actor $actorName'
+    else if (actorId != null)
+      'Actor $actorId',
+    if (machineName != null)
+      'Machine $machineName'
+    else if (machineId != null)
+      'Installation $machineId',
+    if (harness != null) 'Harness $harness',
+    if (sessionName != null)
+      'Session $sessionName'
+    else if (sessionId != null)
+      'Session $sessionId',
+    if (model != null) 'Model $model',
+  ].join(', ');
+
+  String get detailText => [
+    if (actorName != null) 'Actor: $actorName',
+    if (actorId != null) 'Actor ID: $actorId',
+    if (actorAuthority != null) 'Actor authority: $actorAuthority',
+    if (machineName != null) 'Machine: $machineName',
+    if (registeredMachineName != null)
+      'Registered machine: $registeredMachineName',
+    if (machineId != null) 'Installation ID: $machineId',
+    if (harness != null) 'Harness: $harness',
+    if (harnessVersion != null) 'Harness version: $harnessVersion',
+    if (sessionName != null) 'Session: $sessionName',
+    if (sessionId != null) 'Session ID: $sessionId',
+    if (harnessSessionId != null) 'Harness session ID: $harnessSessionId',
+    if (model != null) 'Model: $model',
+    if (agentId != null) 'Agent ID: $agentId',
+    if (callerExecutable != null) 'Caller executable: $callerExecutable',
+    if (harnessExecutable != null) 'Harness executable: $harnessExecutable',
+    if (originPlatform != null) 'Origin platform: $originPlatform',
+    if (requestId != null) 'Request ID: $requestId',
+    for (final source in contextSource.entries)
+      '${source.key} source: ${source.value}',
+  ].join('\n');
+}
+
+Map<String, String> _attributionSources(Object? value, String path) {
+  if (value == null) return const <String, String>{};
+  final object = _requireObject(value, '$path.context_source');
+  return Map<String, String>.unmodifiable(<String, String>{
+    for (final entry in object.entries)
+      entry.key:
+          _optionalAttributionString(
+            object,
+            entry.key,
+            '$path.context_source',
+          ) ??
+          'unavailable',
+  });
+}
+
+String? _optionalAttributionString(
+  Map<String, Object?> json,
+  String key,
+  String path,
+) {
+  final value = json[key];
+  if (value == null) return null;
+  if (value is String) return value;
+  throw ViewerMalformedResponseFailure(
+    'field "$path.$key" must be a string or null',
+  );
+}
+
 /// One append-only history event from the existing `history` command.
 ///
 /// The CLI omits `task_id` and `entity_type` (the page names the task) and
@@ -1593,6 +1774,7 @@ final class HistoryEvent {
     required this.createdMs,
     required this.snapshotJson,
     this.changedFields,
+    this.attribution,
   });
 
   final int eventId;
@@ -1608,6 +1790,7 @@ final class HistoryEvent {
   /// Snapshot fields changed since the previous event, when the CLI reports
   /// them; null for a create or an event without a comparable predecessor.
   final List<String>? changedFields;
+  final HistoryAttribution? attribution;
 
   factory HistoryEvent.fromJson(
     Map<String, Object?> json, {
@@ -1628,6 +1811,12 @@ final class HistoryEvent {
       changedFields: json['changed_fields'] == null
           ? null
           : _requireStringList(json, 'changed_fields', path),
+      attribution: json['attribution'] == null
+          ? null
+          : HistoryAttribution.fromJson(
+              _requireObject(json['attribution'], '$path.attribution'),
+              '$path.attribution',
+            ),
     );
   }
 }

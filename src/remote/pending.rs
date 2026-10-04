@@ -53,7 +53,7 @@ impl PendingWrite {
                 canonical
                     && matches!(
                         (method, *resource),
-                        ("POST", "tasks") | ("PUT", "rules") | ("PUT", "key")
+                        ("POST", "tasks") | ("PUT", "rules") | ("PUT", "key") | ("PUT", "archive")
                     )
             }
             ("PATCH", ["", "v1", "projects", project, "tasks", task]) => {
@@ -61,6 +61,9 @@ impl PendingWrite {
                     && task
                         .parse::<u64>()
                         .is_ok_and(|id| id > 0 && id <= i64::MAX as u64 && id.to_string() == *task)
+            }
+            ("PATCH", ["", "v1", "projects", project, "viewer", "update"]) => {
+                Uuid::parse_str(project).is_ok_and(|id| !id.is_nil() && id.to_string() == *project)
             }
             _ => false,
         };
@@ -90,6 +93,14 @@ impl PendingWrite {
 pub struct PendingStore {
     root: PathBuf,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmationRecord {
+    format_version: u32,
+    server_id: Uuid,
+    credential_id: Uuid,
+    receipt: super::protocol::RequestReceipt,
+}
 impl PendingStore {
     pub fn lock(&self) -> Result<crate::storage::ExclusiveLock, AppError> {
         crate::storage::acquire_exclusive_lock(
@@ -108,6 +119,14 @@ impl PendingStore {
     }
     pub fn save(&self, request: &PendingWrite) -> Result<(), AppError> {
         request.validate()?;
+        if std::fs::symlink_metadata(self.root.join(format!("{}.confirmed", request.request_id)))
+            .is_ok()
+        {
+            return Err(AppError::Usage(
+                "this request UUID already has confirmation evidence; choose a fresh request UUID"
+                    .into(),
+            ));
+        }
         let bytes = serde_json::to_vec(request)?;
         if bytes.len() > MAX_BYTES as usize + 16_384 {
             return Err(invalid());
@@ -176,6 +195,96 @@ impl PendingStore {
             Ok(())
         })
     }
+
+    /// Persist terminal transport evidence before the frontend can see stdout.
+    /// It does not authorize another request or contain a task body.
+    pub fn confirm(
+        &self,
+        request: &PendingWrite,
+        receipt: &super::protocol::RequestReceipt,
+    ) -> Result<(), AppError> {
+        validate_confirmation(request, receipt)?;
+        let path = self.root.join(format!("{}.confirmed", request.request_id));
+        if path.try_exists()? {
+            if self.confirmation(request)?.as_ref() == Some(receipt) {
+                return Ok(());
+            }
+            return Err(invalid());
+        }
+        let bytes = serde_json::to_vec(&ConfirmationRecord {
+            format_version: 1,
+            server_id: request.server_id,
+            credential_id: request.credential_id,
+            receipt: receipt.clone(),
+        })?;
+        let temporary = self.root.join(format!(".confirmed-{}.tmp", Uuid::new_v4()));
+        let result = (|| {
+            let mut file = private_fs::create_file(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            atomicwrites::move_atomic(&temporary, &path)?;
+            #[cfg(unix)]
+            {
+                std::fs::hard_link(&temporary, &path)?;
+                std::fs::remove_file(&temporary)?;
+                std::fs::File::open(&self.root)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        result
+    }
+    pub fn confirmation(
+        &self,
+        request: &PendingWrite,
+    ) -> Result<Option<super::protocol::RequestReceipt>, AppError> {
+        let path = self.root.join(format!("{}.confirmed", request.request_id));
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+            Ok(_) => (),
+        }
+        let mut bytes = Vec::new();
+        private_fs::open_file(&path)?
+            .take(16_385)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 16_384 {
+            return Err(invalid());
+        }
+        let record: ConfirmationRecord = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if record.format_version != 1
+            || record.server_id != request.server_id
+            || record.credential_id != request.credential_id
+        {
+            return Err(invalid());
+        }
+        validate_confirmation(request, &record.receipt)?;
+        Ok(Some(record.receipt))
+    }
+    pub fn acknowledge(&self, request: &PendingWrite) -> Result<(), AppError> {
+        if self.confirmation(request)?.is_none() {
+            return Err(AppError::Remote {code:"unknown_write_outcome", message:"the original request has no confirmed outcome; check the pending change before acknowledging it".into(), request_id:Some(request.request_id)});
+        }
+        self.remove(request.request_id)?;
+        let _ = std::fs::remove_file(self.root.join(format!("{}.confirmed", request.request_id)));
+        Ok(())
+    }
+}
+fn validate_confirmation(
+    request: &PendingWrite,
+    receipt: &super::protocol::RequestReceipt,
+) -> Result<(), AppError> {
+    request.validate()?;
+    if receipt.request_id != request.request_id
+        || receipt.route != format!("{} {}", request.method, request.target)
+        || receipt.payload_sha256 != crate::markdown::sha256(&request.bytes()?)
+        || !matches!(receipt.status, 200 | 400 | 404 | 409 | 413)
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 fn remove_completed(
     path: &Path,
@@ -191,6 +300,32 @@ fn remove_completed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmation_cannot_acknowledge_the_same_payload_on_another_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let store = PendingStore::new(root.path()).unwrap();
+        let mut request = PendingWrite::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "POST",
+            "/v1/projects",
+            serde_json::json!({"project_id":Uuid::new_v4()}),
+        )
+        .unwrap();
+        store.save(&request).unwrap();
+        let receipt = super::super::protocol::RequestReceipt {
+            request_id: request.request_id,
+            route: "POST /v1/projects".into(),
+            payload_sha256: crate::markdown::sha256(&request.bytes().unwrap()),
+            status: 200,
+        };
+        store.confirm(&request, &receipt).unwrap();
+        assert!(store.confirmation(&request).unwrap().is_some());
+        request.server_id = Uuid::new_v4();
+        assert!(store.confirmation(&request).is_err());
+        assert!(store.acknowledge(&request).is_err());
+        assert_eq!(store.list().unwrap(), vec![request.request_id]);
+    }
     #[test]
     fn post_unlink_sync_failure_does_not_report_an_unknown_outcome_without_evidence() {
         let root = tempfile::tempdir().unwrap();

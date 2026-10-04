@@ -1,139 +1,9 @@
 #![cfg(feature = "server")]
 mod support;
 use serde_json::{json, Value};
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Output},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
-use support::https::{HttpBackend, Reply, TlsFixture};
-use tasks_cli::{
-    remote::pending::PendingStore,
-    server::{transport::ServiceState, OwnedServer, Registration},
-};
-use uuid::Uuid;
-
-fn run(root: &Path, args: &[&str]) -> Output {
-    command(root, args).output().unwrap()
-}
-fn command(root: &Path, args: &[&str]) -> Command {
-    let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks"));
-    command
-        .args(["--data-root", root.to_str().unwrap(), "--format", "json"])
-        .args(args)
-        .env_remove("TASKS_WINDOWS_EXE")
-        .env_remove("TASKS_PROJECT")
-        .env_remove("TASKS_DELEGATED")
-        .env_remove("TASKS_ORIGIN_CONTEXT")
-        .env("TASKS_CLIENT_DIR", root.join("client"));
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    command
-}
-fn ok(output: Output) -> Value {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-struct Fixture {
-    root: tempfile::TempDir,
-    clients: [PathBuf; 2],
-    _backend: HttpBackend,
-    gateway: TlsFixture,
-    drop_write: Arc<AtomicBool>,
-    truncate_export: Arc<AtomicBool>,
-    substitute_write: Arc<AtomicBool>,
-}
-impl Fixture {
-    fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let clients = [root.path().join("client-a"), root.path().join("client-b")];
-        let server = OwnedServer::initialize(&root.path().join("server")).unwrap();
-        let server_id = server.server_id();
-        let mut credentials = vec![];
-        for client in &clients {
-            std::fs::create_dir(client).unwrap();
-            let keydir = client.join("client");
-            let public = ok(run(
-                client,
-                &["remote", "keygen", "--directory", keydir.to_str().unwrap()],
-            ));
-            let registration: Registration = serde_json::from_value(public).unwrap();
-            credentials.push(server.register(&registration).unwrap());
-        }
-        let backend = HttpBackend::new(ServiceState::new(server));
-        let drop_write = Arc::new(AtomicBool::new(false));
-        let truncate_export = Arc::new(AtomicBool::new(false));
-        let substitute_write = Arc::new(AtomicBool::new(false));
-        let gateway = TlsFixture::new(
-            "localhost",
-            false,
-            Reply::ProxyWithLoss {
-                address: backend.address,
-                drop_next_mutation: drop_write.clone(),
-                truncate_next_export: truncate_export.clone(),
-                substitute_next_mutation: substitute_write.clone(),
-            },
-        );
-        for (client, credential) in clients.iter().zip(credentials) {
-            ok(run(
-                client,
-                &[
-                    "remote",
-                    "configure",
-                    "--server-url",
-                    &gateway.url(),
-                    "--server-id",
-                    &server_id.to_string(),
-                    "--credential-id",
-                    &credential.to_string(),
-                    "--credential-file",
-                    client.join("client/signing-key.pem").to_str().unwrap(),
-                    "--private-ca",
-                    gateway.options().private_ca.unwrap().to_str().unwrap(),
-                ],
-            ));
-        }
-        Self {
-            root,
-            clients,
-            _backend: backend,
-            gateway,
-            drop_write,
-            truncate_export,
-            substitute_write,
-        }
-    }
-    fn project(&self) -> Uuid {
-        let workspace = self.root.path().join("workspace");
-        std::fs::create_dir(&workspace).unwrap();
-        let response = ok(run(
-            &self.clients[0],
-            &[
-                "init",
-                "--root",
-                workspace.to_str().unwrap(),
-                "--key",
-                "FIX",
-            ],
-        ));
-        Uuid::parse_str(response["project_id"].as_str().unwrap()).unwrap()
-    }
-    fn body(&self, body: &str) -> PathBuf {
-        let path = self.root.path().join("body.txt");
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-}
+use std::sync::atomic::Ordering;
+use support::remote_fixture::{command, ok, run, Fixture};
+use tasks_cli::remote::pending::PendingStore;
 
 #[test]
 fn intermediary_json_error_after_commit_keeps_the_original_recovery_request() {
@@ -202,7 +72,7 @@ fn two_clients_share_state_versions_errors_and_registered_attribution() {
         ],
     ));
     assert_eq!(registry_only["project_id"], id);
-    let body = f.body("complete Ω\r\nbody");
+    let body = f.body("complete ĂŽÂ©\r\nbody");
     let created = ok(run(
         &f.clients[0],
         &[
@@ -219,7 +89,7 @@ fn two_clients_share_state_versions_errors_and_registered_attribution() {
     ));
     assert_eq!(created["data"]["display_id"], "FIX-001");
     let shown = ok(run(&f.clients[1], &["--project", &id, "show", "FIX-001"]));
-    assert_eq!(shown["data"]["body"], "complete Ω\r\nbody");
+    assert_eq!(shown["data"]["body"], "complete ĂŽÂ©\r\nbody");
     let routed = ok(
         command(&f.clients[1], &["--project", &id, "show", "FIX-001"])
             .env("TASKS_WINDOWS_EXE", "deliberately-missing-backend.exe")
@@ -528,7 +398,7 @@ fn enrichment_uses_batched_remote_titles_and_preserves_local_text_rules() {
             &id,
             "create",
             "--title",
-            "Title Ω",
+            "Title ĂŽÂ©",
             "--body-file",
             body.to_str().unwrap(),
         ],
@@ -576,7 +446,7 @@ fn enrichment_uses_batched_remote_titles_and_preserves_local_text_rules() {
     ));
     assert_eq!(
         result["data"]["text"],
-        "FIX-001 (Title Ω) T-1 (Title Ω) FIX-999 OTH-001 (Foreign) OTH-999 UTF-8 https://example.test/FIX-001\r\n"
+        "FIX-001 (Title ĂŽÂ©) T-1 (Title ĂŽÂ©) FIX-999 OTH-001 (Foreign) OTH-999 UTF-8 https://example.test/FIX-001\r\n"
     );
     assert_eq!(
         result["data"]["unknown_refs"],

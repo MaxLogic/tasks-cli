@@ -148,6 +148,27 @@ impl RemoteClient {
         target: &str,
         payload: Value,
     ) -> Result<ApiOutput, AppError> {
+        self.write_inner(root, method, target, payload, None, false)
+    }
+    pub fn write_retained(
+        &self,
+        root: &Path,
+        method: Method,
+        target: &str,
+        payload: Value,
+        request_id: Uuid,
+    ) -> Result<ApiOutput, AppError> {
+        self.write_inner(root, method, target, payload, Some(request_id), true)
+    }
+    fn write_inner(
+        &self,
+        root: &Path,
+        method: Method,
+        target: &str,
+        payload: Value,
+        request_id: Option<Uuid>,
+        retain: bool,
+    ) -> Result<ApiOutput, AppError> {
         // Online preflight avoids collecting unsent work during a known outage.
         self.info()?;
         let store = PendingStore::new(root)?;
@@ -155,27 +176,45 @@ impl RemoteClient {
         if !store.list()?.is_empty() {
             return Err(AppError::Remote { code:"pending_write", message:"a previous write needs reconciliation; run tasks remote pending before another mutation".into(), request_id:None });
         }
-        let request = PendingWrite::new(
+        let mut request = PendingWrite::new(
             self.server_id,
             self.credential_id,
             method.as_str(),
             target,
             payload,
         )?;
+        if let Some(id) = request_id {
+            request.request_id = id;
+        }
         store.save(&request)?;
-        self.send_pending(&store, &request)
+        self.send_pending(&store, &request, retain)
     }
     pub fn reconcile(&self, root: &Path, id: Uuid) -> Result<ApiOutput, AppError> {
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         let request = store.load(id)?;
         request.check_destination(self.server_id, self.credential_id)?;
-        self.send_pending(&store, &request)
+        self.send_pending(&store, &request, false)
+    }
+    pub fn reconcile_retained(&self, root: &Path, id: Uuid) -> Result<ApiOutput, AppError> {
+        let store = PendingStore::new(root)?;
+        let _lock = store.lock()?;
+        let request = store.load(id)?;
+        request.check_destination(self.server_id, self.credential_id)?;
+        self.send_pending(&store, &request, true)
+    }
+    pub fn acknowledge(&self, root: &Path, id: Uuid) -> Result<(), AppError> {
+        let store = PendingStore::new(root)?;
+        let _lock = store.lock()?;
+        let request = store.load(id)?;
+        request.check_destination(self.server_id, self.credential_id)?;
+        store.acknowledge(&request)
     }
     fn send_pending(
         &self,
         store: &PendingStore,
         request: &PendingWrite,
+        retain: bool,
     ) -> Result<ApiOutput, AppError> {
         request.check_destination(self.server_id, self.credential_id)?;
         let unknown = || {
@@ -206,11 +245,19 @@ impl RemoteClient {
         match parse_value(reply.status, value) {
             Ok(value) => {
                 let output = api_output(value).map_err(|_| unknown())?;
-                store.remove(request.request_id).map_err(|_| unknown())?;
+                if retain {
+                    store.confirm(request, &receipt).map_err(|_| unknown())?;
+                } else {
+                    store.remove(request.request_id).map_err(|_| unknown())?;
+                }
                 Ok(output)
             }
             Err(error @ AppError::RemoteReply { .. }) => {
-                store.remove(request.request_id).map_err(|_| unknown())?;
+                if retain {
+                    store.confirm(request, &receipt).map_err(|_| unknown())?;
+                } else {
+                    store.remove(request.request_id).map_err(|_| unknown())?;
+                }
                 Err(error)
             }
             Err(_) => Err(unknown()),

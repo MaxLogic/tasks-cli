@@ -19,6 +19,7 @@ import '../controllers/editor_controller.dart';
 import '../controllers/project_controller.dart';
 import '../controllers/task_controller.dart';
 import '../data/editor_models.dart';
+import '../data/cli_client.dart';
 import '../data/models.dart';
 import '../data/project_archive.dart';
 import '../data/settings_store.dart';
@@ -150,6 +151,33 @@ class ViewerWorkspaceModel extends ChangeNotifier {
 
   bool get canArchiveProjects => readers.projectArchive != null;
 
+  List<ViewerPendingReceipt> get pendingRemoteChanges {
+    final writer = readers.update;
+    return writer is ViewerCliClient ? writer.pendingReceipts : const [];
+  }
+
+  Future<void> checkPendingRemoteChange(String requestId) async {
+    final writer = readers.update;
+    if (writer is! ViewerCliClient) return;
+    final receipt = writer.pendingReceipts
+        .where((item) => item.requestId == requestId)
+        .firstOrNull;
+    if (receipt != null &&
+        receipt.operation == 'viewer_update' &&
+        editor.isAwaitingReconciliation &&
+        editor.projectId == receipt.projectId &&
+        editor.taskId == receipt.taskId) {
+      throw ViewerPendingReceiptFailure(
+        requestId,
+        'Use Check pending change in the open editor to keep its draft and '
+        'show any conflict.',
+      );
+    }
+    await writer.checkPendingChange(requestId);
+    _notify();
+    await refresh();
+  }
+
   Future<bool> setProjectArchived(
     ProjectItem project, {
     required bool archived,
@@ -167,7 +195,11 @@ class ViewerWorkspaceModel extends ChangeNotifier {
         !await requestLeave(EditorLeaveReason.projectSwitch)) {
       return false;
     }
-    await writer.setProjectArchived(project.projectId, archived: archived);
+    try {
+      await writer.setProjectArchived(project.projectId, archived: archived);
+    } finally {
+      _notify();
+    }
     if (selectionWillDisappear && selectedProjectId == project.projectId) {
       editor.exitEdit();
       projectList.selectProjectId(null);

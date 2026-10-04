@@ -134,7 +134,7 @@ pub struct ProjectError {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectStats {
     pub total: u64,
     pub open: u64,
@@ -251,8 +251,13 @@ fn read_request_bytes(path: &Path) -> Result<Vec<u8>, AppError> {
             .map_err(|error| AppError::io_op("read the viewer request from stdin", error))?;
         bytes
     } else {
-        std::fs::read(path)
-            .map_err(|error| AppError::io_path("read the viewer request file", path, error))?
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|error| AppError::io_path("open the viewer request file", path, error))?
+            .take(REQUEST_MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| AppError::io_path("read the viewer request file", path, error))?;
+        bytes
     };
     if bytes.len() > REQUEST_MAX_BYTES {
         return Err(AppError::Usage(format!(
@@ -279,6 +284,10 @@ fn parse_request(bytes: &[u8]) -> Result<Value, AppError> {
         ))
     })?;
     Ok(value.0)
+}
+
+pub fn read_request_document(path: &Path) -> Result<Value, AppError> {
+    parse_request(&read_request_bytes(path)?)
 }
 
 /// A `serde_json::Value` that rejects duplicated object keys at every level.
@@ -1051,6 +1060,104 @@ pub fn projects(data_root: &Path, request_file: &Path) -> Result<ViewerProjectsP
     })
 }
 
+/// Server-owned catalog rows. No workspace paths enter the response or token.
+pub fn projects_in_store(
+    data_root: &Path,
+    request: Value,
+    catalog: Vec<(Uuid, String)>,
+    root_matches: &[Uuid],
+) -> Result<ViewerProjectsPayload, AppError> {
+    if catalog.len() > 10_000 {
+        return Err(AppError::ResponseLimit(
+            "viewer catalog exceeds 10000 projects".into(),
+        ));
+    }
+    let query = project_request(request)?;
+    let mut records = Vec::with_capacity(catalog.len());
+    for (id, name) in catalog {
+        let project_id = id.to_string();
+        let sampled = sample_project_snapshot(
+            &data_root_project_path(data_root, &project_id),
+            &project_id,
+            true,
+        );
+        let (availability, error, stats, archived_at_ms) = match sampled {
+            Ok((stats, archived)) => (Availability::Available, None, Some(stats), archived),
+            Err(_) => {
+                let missing = !data_root_project_path(data_root, &project_id).is_file();
+                (if missing {Availability::Missing} else {Availability::Error},
+                    Some(ProjectError {code:if missing {"missing_store"} else {"unavailable_store"}.into(),
+                        message:format!("server project {project_id} is unavailable; ask the server administrator to inspect its store")}),None,None)
+            }
+        };
+        records.push(ProjectRecord {
+            project_id,
+            name,
+            roots: Vec::new(),
+            availability,
+            error,
+            sampled_at_ms: now_ms(),
+            archived_at_ms,
+            stats,
+        });
+    }
+    let mut catalog_digest = catalog_hash(&records);
+    let mut matched_ids = root_matches.iter().map(Uuid::to_string).collect::<Vec<_>>();
+    matched_ids.sort();
+    matched_ids.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(catalog_digest.as_bytes());
+    for id in &matched_ids {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\n");
+    }
+    catalog_digest = format!("{:x}", hasher.finalize());
+    if let Some(token) = query.snapshot.as_deref() {
+        validate_projects_token(token, &query, &catalog_digest)?;
+    }
+    let mut filtered = records
+        .into_iter()
+        .filter(|record| {
+            if query.query.is_empty() || matched_ids.binary_search(&record.project_id).is_err() {
+                return matches_project_query(record, &query);
+            }
+            let mut matched = ProjectRecord {
+                project_id: record.project_id.clone(),
+                name: record.name.clone(),
+                roots: vec![query.query.clone()],
+                availability: record.availability,
+                error: None,
+                sampled_at_ms: record.sampled_at_ms,
+                archived_at_ms: record.archived_at_ms,
+                stats: record.stats.clone(),
+            };
+            let result = matches_project_query(&matched, &query);
+            matched.roots.clear();
+            result
+        })
+        .collect::<Vec<_>>();
+    sort_projects(&mut filtered, &query);
+    let total_count = filtered.len() as u64;
+    let items = filtered
+        .into_iter()
+        .skip(query.offset as usize)
+        .take(query.limit as usize)
+        .map(ProjectItem::from)
+        .collect::<Vec<_>>();
+    let has_more = query.offset.saturating_add(items.len() as u64) < total_count;
+    let next_offset = has_more.then_some(query.offset + items.len() as u64);
+    Ok(ViewerProjectsPayload {
+        protocol_version: PROTOCOL_VERSION,
+        items,
+        total_count,
+        offset: query.offset,
+        limit: query.limit,
+        has_more,
+        next_offset,
+        snapshot: projects_token(&query, &catalog_digest),
+    })
+}
+
 /// One existing `project_cache` row, read once per [`enumerate_projects`]
 /// call instead of once per project, so deciding reuse never costs a
 /// per-project round trip.
@@ -1235,12 +1342,20 @@ const SAMPLE_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
 /// Open one project database with a short busy timeout, read its aggregate
 /// statistics and close it before the caller opens the next database.
 fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats, AppError> {
+    sample_project_snapshot(db_path, project_id, false).map(|(stats, _)| stats)
+}
+fn sample_project_snapshot(
+    db_path: &Path,
+    project_id: &str,
+    archive: bool,
+) -> Result<(ProjectStats, Option<i64>), AppError> {
     validate_storage_path(db_path)?;
     let conn = crate::store::open_for_reading(db_path, rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    let stats = (|| -> Result<ProjectStats, AppError> {
+    let stats = (|| -> Result<(ProjectStats, Option<i64>), AppError> {
         // Short, not zero: a CLI read that closes last briefly locks the
         // database while it removes its -wal/-shm (store::open_for_reading).
         conn.busy_timeout(SAMPLE_BUSY_TIMEOUT)?;
+        let tx = conn.unchecked_transaction()?;
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != CURRENT_SCHEMA_VERSION {
             return Err(AppError::Database(format!(
@@ -1296,7 +1411,7 @@ fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats
         } else {
             Some(100.0 * done as f64 / remaining as f64)
         };
-        Ok(ProjectStats {
+        let stats = ProjectStats {
             project_key: crate::keys::read_key(&conn)?,
             total,
             open,
@@ -1306,7 +1421,14 @@ fn sample_project_inner(db_path: &Path, project_id: &str) -> Result<ProjectStats
             started_ms,
             last_write_ms,
             progress_percent,
-        })
+        };
+        let archived = if archive {
+            crate::store::effective_archive_from(&tx)?
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok((stats, archived))
     })();
     drop(conn);
     stats
@@ -1703,14 +1825,27 @@ pub fn tasks(
     project: &str,
     request_file: &Path,
 ) -> Result<ViewerTasksPayload, AppError> {
-    let request = parse_request(&read_request_bytes(request_file)?)?;
-    let query = task_request(request)?;
+    let request = read_request_document(request_file)?;
     let project_id = canonical_project(project)?;
     let data_root = validate_storage_root(data_root)?;
     let db_path = data_root_project_path(&data_root, &project_id);
     validate_storage_path(&db_path)?;
     let identity_before = fingerprint::file_identity(&db_path);
     let store = Store::open_readonly(&data_root, &project_id)?;
+    let result = tasks_in_store(&store, request)?;
+    if fingerprint::file_identity(&db_path) != identity_before {
+        return Err(stale_snapshot(
+            "the project database was replaced while the page was being read",
+        ));
+    }
+    Ok(result)
+}
+
+pub fn tasks_in_store(store: &Store, request: Value) -> Result<ViewerTasksPayload, AppError> {
+    let query = task_request(request)?;
+    let project_id = store.project_id.to_string();
+    let db_path = &store.db_path;
+    let identity_before = fingerprint::file_identity(db_path);
     let tx = store.conn.unchecked_transaction()?;
     let max_event_id: i64 =
         tx.query_row("SELECT COALESCE(MAX(event_id), 0) FROM events", [], |row| {
@@ -1734,13 +1869,9 @@ pub fn tasks(
             (total_count, snapshot)
         }
     };
+    preflight_tasks_budget(&tx, &query, store.project_key.as_deref())?;
     let items = select_task_page(&tx, &query, store.project_key.as_deref())?;
     tx.commit()?;
-    if fingerprint::file_identity(&db_path) != identity_before {
-        return Err(stale_snapshot(
-            "the project database was replaced while the page was being read",
-        ));
-    }
     let has_more = (query.offset + items.len() as u64) < total_count;
     let next_offset = has_more.then_some(query.offset + items.len() as u64);
     Ok(ViewerTasksPayload {
@@ -1754,6 +1885,30 @@ pub fn tasks(
         next_offset,
         snapshot,
     })
+}
+
+fn preflight_tasks_budget(
+    conn: &Connection,
+    query: &TaskQuery,
+    key: Option<&str>,
+) -> Result<(), AppError> {
+    let (where_sql, mut values) = task_filter_sql(query, key);
+    let order = task_order_by(query.sort, query.direction);
+    let sql = format!("WITH selected AS (SELECT t.id,t.title FROM tasks t WHERE {where_sql} ORDER BY {order} LIMIT ? OFFSET ?)
+        SELECT COALESCE(SUM(length(CAST(title AS BLOB))),0)
+         + COALESCE((SELECT SUM(length(CAST(label AS BLOB))) FROM task_labels WHERE task_id IN (SELECT id FROM selected)),0)
+         FROM selected");
+    values.push(SqlValue::Integer(query.limit as i64));
+    values.push(SqlValue::Integer(query.offset as i64));
+    let bytes: i64 = conn.query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+        row.get(0)
+    })?;
+    if bytes > 4 * 1024 * 1024 {
+        return Err(AppError::ResponseLimit(
+            "viewer task page source text exceeds 4 MiB; request a smaller page".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The WHERE clause and its bound values for one task query. The only
@@ -2017,16 +2172,23 @@ pub fn show(data_root: &Path, project: &str, raw_id: &str) -> Result<ViewerShowP
     validate_storage_path(&db_path)?;
     let identity_before = fingerprint::file_identity(&db_path);
     let store = Store::open_readonly(&data_root, &project_id)?;
-    let id = store.resolve_ref(raw_id)?;
-    let key = store.project_key.as_deref();
-    let tx = store.conn.unchecked_transaction()?;
-    let (task, created_ms, updated_ms) = read_task_detail(&tx, &project_id, id, key)?;
-    tx.commit()?;
+    let result = show_in_store(&store, raw_id)?;
     if fingerprint::file_identity(&db_path) != identity_before {
         return Err(stale_snapshot(
             "the project database was replaced while the task was being read",
         ));
     }
+    Ok(result)
+}
+
+pub fn show_in_store(store: &Store, raw_id: &str) -> Result<ViewerShowPayload, AppError> {
+    let id = store.resolve_ref(raw_id)?;
+    let key = store.project_key.as_deref();
+    let tx = store.conn.unchecked_transaction()?;
+    preflight_show_budget(&tx, id)?;
+    let (task, created_ms, updated_ms) =
+        read_task_detail(&tx, &store.project_id.to_string(), id, key)?;
+    tx.commit()?;
     Ok(ViewerShowPayload {
         protocol_version: PROTOCOL_VERSION,
         project_key: store.project_key.clone(),
@@ -2034,6 +2196,22 @@ pub fn show(data_root: &Path, project: &str, raw_id: &str) -> Result<ViewerShowP
         created_ms,
         updated_ms,
     })
+}
+
+fn preflight_show_budget(conn: &Connection, id: u64) -> Result<(), AppError> {
+    let bytes: i64 = conn.query_row(
+        "SELECT COALESCE((SELECT length(CAST(title AS BLOB))+length(CAST(body AS BLOB)) FROM tasks WHERE id=?1),0)
+          + COALESCE((SELECT length(CAST(rules_markdown AS BLOB)) FROM project LIMIT 1),0)
+          + COALESCE((SELECT SUM(length(CAST(title AS BLOB))) FROM tasks WHERE id IN
+              (SELECT depends_on_id FROM dependencies WHERE task_id=?1)),0)
+          + COALESCE((SELECT SUM(length(CAST(label AS BLOB))) FROM task_labels WHERE task_id=?1),0)",
+        [id as i64], |row| row.get(0))?;
+    if bytes > 4 * 1024 * 1024 {
+        return Err(AppError::ResponseLimit(
+            "viewer show source text exceeds 4 MiB; reduce the task text or rules".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn read_task_detail(
@@ -2160,10 +2338,15 @@ pub fn update(
     project: &str,
     request_file: &Path,
 ) -> Result<ViewerUpdatePayload, AppError> {
-    let request = update_request(parse_request(&read_request_bytes(request_file)?)?)?;
+    let request = read_request_document(request_file)?;
     let project_id = canonical_project(project)?;
     let data_root = validate_storage_root(data_root)?;
     let mut store = Store::open_rw(&data_root, &project_id)?;
+    update_in_store(&mut store, request)
+}
+
+pub fn update_in_store(store: &mut Store, request: Value) -> Result<ViewerUpdatePayload, AppError> {
+    let request = update_request(request)?;
     let changes = &request.changes;
     if changes.title.is_none()
         && changes.body.is_none()

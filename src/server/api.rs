@@ -50,10 +50,14 @@ pub(crate) fn bounded_json(value: &impl Serialize) -> Result<Vec<u8>, AppError> 
     Ok(out.bytes)
 }
 fn output(store: &Store, data: CommandPayload) -> Result<Value, AppError> {
+    output_with_project(Some(store), data)
+}
+
+fn output_with_project(store: Option<&Store>, data: CommandPayload) -> Result<Value, AppError> {
     let envelope = Envelope {
         schema_version: 1,
-        project_id: Some(store.project_id.to_string()),
-        id_key: store.project_key.clone(),
+        project_id: store.map(|store| store.project_id.to_string()),
+        id_key: store.and_then(|store| store.project_key.clone()),
         data,
     };
     let json = bounded_json(&envelope)?;
@@ -324,6 +328,12 @@ fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Resul
             titles.sort_by(|a, b| (&a.key, a.id).cmp(&(&b.key, b.id)));
             return Ok(serde_json::to_value(TitlesResult { titles, known_keys })?);
         }
+        ReadRequest::ViewerTasks { request } => {
+            CommandPayload::ViewerTasks(crate::viewer::tasks_in_store(store, request)?)
+        }
+        ReadRequest::ViewerShow { id } => {
+            CommandPayload::ViewerShow(crate::viewer::show_in_store(store, &id)?)
+        }
     };
     output(store, data)
 }
@@ -333,6 +343,8 @@ enum Mutation {
     Update(u64, UpdateTask),
     Rules(SetRules),
     Key(SetKey),
+    ViewerUpdate(ViewerUpdate),
+    Archive(SetArchive),
 }
 impl Mutation {
     fn attribution(&self) -> &Attribution {
@@ -341,6 +353,8 @@ impl Mutation {
             Self::Update(_, v) => &v.attribution,
             Self::Rules(v) => &v.attribution,
             Self::Key(v) => &v.attribution,
+            Self::ViewerUpdate(v) => &v.attribution,
+            Self::Archive(v) => &v.attribution,
         }
     }
     fn apply(self, store: &mut Store, server: &OwnedServer) -> Result<Value, AppError> {
@@ -401,6 +415,15 @@ impl Mutation {
                     project_key: Some(key),
                     previous_key: Some(previous_key),
                 }
+            }
+            Self::ViewerUpdate(v) => {
+                CommandPayload::ViewerUpdate(crate::viewer::update_in_store(store, v.request)?)
+            }
+            Self::Archive(v) => {
+                CommandPayload::ViewerArchive(crate::viewer::ViewerArchivePayload {
+                    protocol_version: crate::viewer::PROTOCOL_VERSION,
+                    archived_at_ms: store.set_archive(v.archived)?,
+                })
             }
         };
         output(store, data)
@@ -555,6 +578,37 @@ fn projects(server: &OwnedServer, uri: &Uri) -> Result<ReceiptResponse, ServiceE
     })
 }
 
+fn viewer_projects(server: &OwnedServer, bytes: &[u8]) -> Result<ReceiptResponse, ServiceError> {
+    let input: ViewerProjectsRequest = match parse(bytes) {
+        Ok(input) => input,
+        Err(error) => return response(Err(error)),
+    };
+    if input.root_matches.len() > 10_000 {
+        return response(Err(AppError::validation("too many root matches")));
+    }
+    let conn = server.connect()?;
+    let mut statement =
+        conn.prepare("SELECT project_id,name FROM projects ORDER BY project_id LIMIT 10001")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut catalog = Vec::new();
+    for row in rows {
+        let (id, name) = row?;
+        let id = Uuid::parse_str(&id)
+            .map_err(|_| ServiceError::Validation("invalid server catalog project UUID"))?;
+        catalog.push((id, name));
+    }
+    let result = crate::viewer::projects_in_store(
+        server.data_root(),
+        input.request,
+        catalog,
+        &input.root_matches,
+    )
+    .and_then(|payload| output_with_project(None, CommandPayload::ViewerProjects(payload)));
+    response(result)
+}
+
 /// Called only after signature verification, nonce admission and body digest.
 pub fn handle(
     server: &OwnedServer,
@@ -574,6 +628,23 @@ pub fn handle(
             status: 200,
             body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":["typed-task-api","project-catalog","atomic-receipts","request-bound-receipts","ed25519-signatures","persistent-replay-protection"]}),
         });
+    }
+    if *method == Method::GET && uri.path() == "/v1/viewer/info" {
+        if uri.query().is_some() {
+            return response(Err(AppError::validation(
+                "viewer info does not accept query parameters",
+            )));
+        }
+        let result = output_with_project(None, CommandPayload::ViewerInfo(crate::viewer::info()))
+            .map(|mut value| {
+                value["output"]["data"]["backend"] = json!("remote");
+                value["output"]["data"]["receipt_recovery"] = json!(true);
+                value
+            });
+        return response(result);
+    }
+    if *method == Method::POST && uri.path() == "/v1/viewer/projects" && uri.query().is_none() {
+        return viewer_projects(server, bytes);
     }
     if uri.path() == "/v1/projects" {
         if *method == Method::GET {
@@ -650,6 +721,8 @@ pub fn handle(
         },
         ("PUT", 5, "rules") => parse(bytes).map(Mutation::Rules),
         ("PUT", 5, "key") => parse(bytes).map(Mutation::Key),
+        ("PATCH", 6, "viewer") if parts[5] == "update" => parse(bytes).map(Mutation::ViewerUpdate),
+        ("PUT", 5, "archive") => parse(bytes).map(Mutation::Archive),
         _ => return response(Err(AppError::NotFound("unknown API route".into()))),
     };
     let attribution = prepared

@@ -1302,7 +1302,16 @@ fn projects_query_matches_literal_characters_and_case() {
     assert_eq!(matched("100%"), sorted(vec![percent]));
     assert_eq!(matched("100"), sorted(vec![percent, plain]));
     assert_eq!(matched("%"), sorted(vec![percent]), "% stays literal");
-    assert_eq!(matched("_"), sorted(vec![underscore]), "_ stays literal");
+    // Root paths participate in project search too. A caller-provided TMP
+    // directory may contain an underscore shared by every binding.
+    let underscore_matches = if data_root.path().to_string_lossy().contains('_') {
+        vec![
+            percent, plain, upper, lower, unicode, underscore, plain_b, quote,
+        ]
+    } else {
+        vec![underscore]
+    };
+    assert_eq!(matched("_"), sorted(underscore_matches), "_ stays literal");
     assert_eq!(matched("a_b"), sorted(vec![underscore]), "_ stays literal");
     assert_eq!(matched("axb"), sorted(vec![plain_b]));
     assert_eq!(matched("ALPHA"), sorted(vec![upper, lower]));
