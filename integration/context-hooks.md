@@ -43,8 +43,9 @@ Code 2.1.287.
 No metadata arguments are needed. The CLI obtains machine/account names from
 the OS and exported session IDs from its environment. Linux walks at most eight
 process ancestors within a 100 ms collection deadline. Windows executable
-ancestry is currently unavailable because no safe selective native wrapper was
-established under the repository's no-unsafe rule. A generic node/python parent
+ancestry remains unavailable by the user's accepted decision on 2026-10-05;
+no native wrapper exception to the repository's no-unsafe rule is required.
+A generic node/python parent
 does not identify a harness. Unknown origins and unavailable fields stay empty.
 
 Codex uses `CODEX_THREAD_ID` when present, then `CODEX_SESSION_ID`. If both
@@ -97,9 +98,9 @@ probes remain separate: ambiguous prompt punctuation added a CLI argument;
 quoted dotted Codex override keys were ignored. Neither was accepted as a
 successful adapter run.
 
-Remaining: select the Windows executable ancestry behavior. Linux bounded
-ancestry, Windows nullable fallback and permission/security fixtures are already
-verified. A standalone Claude PowerShell tool was not claimed: the tested native
+The user accepted nullable Windows executable ancestry on 2026-10-05. Linux
+bounded ancestry, Windows nullable fallback and permission/security fixtures
+are verified. A standalone Claude PowerShell tool was not claimed: the tested native
 PowerShell child inherited the documented Bash environment channel.
 
 Private hook directory/file creation and reads now use native permission checks

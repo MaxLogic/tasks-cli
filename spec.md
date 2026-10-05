@@ -1524,6 +1524,10 @@ Detection rules:
    enough to identify a harness. Permissions/timeouts yield unavailable fields
    and never block a valid mutation. No WMI subprocess, full process inventory,
    executable arguments, environment dump or transcript scan per call.
+   Accepted Windows behavior (2026-10-05): leave `caller_executable` and
+   `harness_executable` null; do not add a native wrapper exception to the
+   no-unsafe rule. Linux retains the bounded ancestor walk. Environment and
+   matching hook context still supply the Windows harness/session fields.
 7. If metadata cannot be obtained, retain null values and `unknown` harness
    when origin is inconclusive. `manual` requires a direct known terminal/GUI
    context, not merely absent session variables. Do not use a global configured
