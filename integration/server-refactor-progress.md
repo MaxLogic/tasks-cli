@@ -5,12 +5,14 @@
 Approved contract: spec.md, Rust server and automatic attribution extension.
 Ledger: TSK-021 through TSK-027, corresponding to implementation slices 1-7.
 Focused proof per slice; broad Windows/native Linux gate after TSK-025, final
-after TSK-027. Do not install candidates or migrate live stores during this work.
+after TSK-027. Candidate workstation installs and live project migrations require
+their separate authorization; NAS deployment was authorized on 2026-10-05.
 
 LAN HTTPS is owned by the user's other thread. Reuse its Caddy gateway; QTS
 keeps NAS administration. Stale Audiobookshelf rule removal was verified by SSH
-on 2026-10-03. Docker stays at the current version. NAS deployment proof remains
-pending, including strict TLS and final backend isolation checks.
+on 2026-10-03. Docker stays at the current version. Actual NAS deployment,
+strict LAN/public TLS and physical backend isolation passed on 2026-10-05;
+see the dated deployment record below.
 
 ## TSK-021: persisted mutation attribution
 
@@ -492,3 +494,24 @@ under the current no-unsafe/selective-process-access constraints, or a narrowly
 scoped native wrapper exception is approved. TSK-022 remains to-verify; TSK-025's
 implementation and final gates pass but it cannot become done ahead of that
 prerequisite. No model attribution is inferred from a shared concurrent session.
+
+## Accepted Windows decision and actual NAS deployment, 2026-10-05
+
+The user accepted nullable Windows caller/harness executable fields under the
+no-unsafe rule. Existing native ACL, Linux ancestry and real harness proof applies;
+TSK-022 and then TSK-025 are done. Decision commit: d92e6d7.
+
+The user authorized NAS deployment and tasks.maxlogic.app on the existing
+Cloudflare tunnel and LAN DNS. The reviewed image is now running on actual
+QNAP Docker27; 16 distinct deployment checks pass with isolated synthetic data,
+then a permanent empty authority and one enrolled alternate workstation profile.
+Trusted LAN/public signed CLI routes, physical Pi isolation, replay/conflict,
+revocation, lost-response restart recovery, exact backup/restore and existing
+app/admin route regression are recorded in deployment-2026-10-05.md. The temporary
+setup token is revoked and all temporary relay/validator containers are removed.
+No installed workstation binary or live project store was replaced/migrated.
+
+TSK-027's actual deployment criteria pass. It remains to-verify while its
+TSK-026 prerequisite awaits the packaged NVDA walkthrough. Certificate renewal,
+full NAS reboot and offsite machine checks are explicitly unobserved. Evidence:
+target/evidence/nas-deploy-20261005/deployment-proof.json and final-regression.json.

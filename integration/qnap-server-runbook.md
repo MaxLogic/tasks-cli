@@ -1,9 +1,14 @@
 # QNAP tasks-server deployment and recovery
 
-This runbook describes a future deployment. The local Docker driver proves a
-synthetic service on the operator's Docker host. It does not establish QNAP
-runtime support, LAN isolation on Docker 27, public DNS, or trusted production
-TLS. No live project is moved by the local proof.
+The reviewed server is deployed on the QNAP as of 2026-10-05 at
+`https://tasks.maxlogic.app`. LAN DNS selects NAS 443; public DNS selects the
+existing Cloudflare Tunnel. Both routes enforce server-side request signing.
+The permanent authority is empty; no live project was moved. See
+[the deployment record](deployment-2026-10-05.md) and
+[NAS operations](../../qnap-nas-maintenance/docs/tasks-server-deployment.md).
+
+The local Docker driver below remains an isolated rehearsal. Actual NAS proof
+is separately recorded under `target/evidence/nas-deploy-20261005/`.
 
 ## Inputs and boundaries
 
@@ -142,8 +147,9 @@ any server write, rollback can restore the prior client profile. After a server
 write, stop the server and take its current verified backup before selecting
 the authority for recovery; an older local snapshot omits the remote writes.
 Never run local and remote writable authorities for the same project UUID.
-Actual NAS deployment, physical LAN isolation, DNS/TLS provisioning and live
-migration remain pending until their separate operator evidence is recorded.
+Actual NAS deployment, physical LAN isolation and DNS/TLS provisioning passed
+on 2026-10-05. Packaged viewer/NVDA acceptance and any selected live migration
+remain separate gates. Installed workstation binaries were not replaced.
 
 References: [Docker multistage builds](https://docs.docker.com/build/building/multi-stage/),
 [Compose service keys](https://docs.docker.com/reference/compose-file/services/),
