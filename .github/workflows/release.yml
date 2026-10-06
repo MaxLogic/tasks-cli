@@ -51,9 +51,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo clippy --locked --all-targets --features server
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --locked --jobs 2
+          cargo test --locked --no-fail-fast --jobs 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --locked --features server,test-hooks --jobs 2
+          cargo test --locked --features server,test-hooks --no-fail-fast --jobs 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build --release --locked --bin tasks --jobs 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -83,6 +83,7 @@ jobs:
           python-version: '3.13'
       - name: Install pinned toolchains
         run: |
+          git config core.autocrlf true
           $channel = (Get-Content rust-toolchain.toml | Select-String '^channel = "(.*)"$').Matches.Groups[1].Value
           rustup toolchain install $channel --profile minimal
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -100,9 +101,9 @@ jobs:
           # Golden fixtures render local timestamps in the maintainer's Warsaw zone.
           Set-TimeZone -Id 'Central European Standard Time'
           Get-TimeZone
-          pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
+          pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -GoldenBaseline windows-server-2022 -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git diff --exit-code -- viewer/pubspec.lock
+          git diff --exit-code
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package and smoke-test extracted viewer CLI
         run: python release/package.py --component viewer --platform windows --input target/public-viewer --commit $env:GITHUB_SHA
