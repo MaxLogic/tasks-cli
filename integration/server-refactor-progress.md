@@ -1,5 +1,12 @@
 # Server refactor progress
 
+Chronological implementation and acceptance record. Earlier pending statements
+describe their dated milestone and can be superseded by later entries. Current
+cutover is recorded in [deployment-2026-10-06.md](deployment-2026-10-06.md).
+The owner confirmed NVDA use on 2026-10-06; see the
+[viewer verification record](../viewer/verification-report.md). That report
+does not itself change task lifecycle state or replace specialized gate evidence.
+
 ## Scope and gates
 
 Approved contract: spec.md, Rust server and automatic attribution extension.

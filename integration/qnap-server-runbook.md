@@ -3,8 +3,9 @@
 The reviewed server is deployed on the QNAP as of 2026-10-05 at
 `https://tasks.maxlogic.app`. LAN DNS selects NAS 443; public DNS selects the
 existing Cloudflare Tunnel. Both routes enforce server-side request signing.
-The permanent authority is empty; no live project was moved. See
-[the deployment record](deployment-2026-10-05.md) and
+The permanent authority received 55 project backlogs on 2026-10-06. See
+[the production cutover](deployment-2026-10-06.md),
+[the initial deployment record](deployment-2026-10-05.md) and
 [NAS operations](../../qnap-nas-maintenance/docs/tasks-server-deployment.md).
 
 The local Docker driver below remains an isolated rehearsal. Actual NAS proof
@@ -58,7 +59,7 @@ records. The server must be initialized and clients registered before `serve`
 takes the ownership lock. Run every admin command only while the service is
 stopped.
 
-For each fresh client installation, use the candidate CLI and an explicit
+For each fresh client installation, use a remote-capable CLI and an explicit
 private data root:
 
 ```text

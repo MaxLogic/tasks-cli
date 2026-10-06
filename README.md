@@ -1,6 +1,6 @@
 # tasks-cli
 
-A backlog that lives next to your project instead of inside it.
+A shared task backlog for coding agents and the architect coordinating them.
 
 `tasks` keeps one SQLite task list per project, stored outside the working tree
 and keyed by a project UUID. Switch branches, add a worktree, or wipe and
@@ -20,6 +20,48 @@ publishes without overwriting a competing file.
 The bundled engine is SQLite 3.53.2 through rusqlite 0.40.2. This is the engine
 in the current crate, not a claim to bundle the latest upstream SQLite patch.
 
+## Why use it
+
+- Keep one backlog across sessions, branches and Git worktrees. Task data lives
+  outside the checkout; a small `.tasks.json` selects the project.
+- Coordinate workers through one architect. The architect defines scope, assigns
+  tasks, records worker results and accepts verified work. Workers share the
+  same task records without maintaining competing TODO files.
+- Reject stale edits. Updates require the version that was read; a conflicting
+  update fails instead of silently overwriting another writer's changes.
+- Read only the context you need. Lists and searches return bounded summaries;
+  `show` retrieves complete selected tasks and optional project rules.
+- Inspect how work changed. Task history retains revisions and mutation context;
+  server credentials establish actor and installation identity. Unavailable
+  session or model fields stay empty rather than being guessed.
+- Separate implementation from acceptance. `to-verify` records work awaiting a
+  verification gate; `needs-human` identifies decisions that need user input.
+- Review and edit through the Windows viewer. It provides keyboard navigation,
+  full task text, conflict handling and saved drafts. The project owner tested
+  the viewer with NVDA and confirmed screen-reader use on 2026-10-06.
+- Start locally without an account or server. For shared access across machines,
+  configure the optional self-hosted HTTPS server. Remote writes retain request
+  receipts so a lost reply can be reconciled without inventing a new mutation.
+
+The CLI stores and queries work; it does not call an LLM or execute task bodies.
+The accompanying [skills](integration/README.md) define the agent workflow.
+Version checks protect task edits, while the architect prevents duplicate work
+by assigning bounded tasks. There is no built-in assignee or task lease.
+
+## Installation and platform support
+
+The CLI targets Windows x64 and Linux x64. Native Linux verification uses Ubuntu
+in WSL, with Linux-owned storage. The viewer targets Windows 11 x64. macOS has
+not been built or tested; there is currently no macOS machine available.
+
+Public binary downloads are not available yet. See [installation](installation.md)
+for source builds, PATH setup and a first-run example. A local CLI needs no Rust,
+Python, Node.js or separately installed SQLite at runtime. The viewer bundle
+includes its Flutter runtime and matching CLI.
+
+The project source is licensed under [MIT](LICENSE). Dependencies and bundled
+audio retain their own terms; audio provenance is recorded in the viewer assets.
+
 ## Repository status
 
 Checked on 2026-10-06 with Git and the authenticated GitHub CLI (`gh`): this
@@ -36,9 +78,14 @@ To check again, run `git remote -v`, `git branch -vv`, and
 
 ```text
 tasks init --root "D:\Work\Project" --key APP
+cd "D:\Work\Project"
 tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
+
+Create `notes.md` with the task description first. Use your own absolute project
+path; the Linux CLI accepts native Linux paths. For an isolated trial and an
+architect supervising two worktrees, see [the walkthrough](integration/architect-workflow.md).
 
 That gives you a project, a task, and a backlog you can read at a glance:
 
@@ -97,6 +144,11 @@ on Linux. The registry is `registry.json`, and each database is
 `projects/<UUID>/TASKS.sqlite`. Pass `--data-root PATH` when you want an
 isolated root, which is what the tests do.
 
+Local maintenance commands (`import`, `bulk-import`, `backup`, `migrate` and
+`doctor`) require local storage. A configured remote CLI refuses them;
+use [server administration](integration/server-core.md) and
+[server backup/recovery](integration/server-cutover.md) for a remote authority.
+
 ## Everyday commands
 
 ```text
@@ -140,12 +192,13 @@ leaves the rules out.
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
 
-The server candidate uses schema 8 for mutation attribution and atomic request receipts. `history` includes
-the stored context; `project-history` pages through project creation, key changes
-and import provenance. Legacy history retains null attribution. This candidate
-requires an explicit migration from schema 6; older installed binaries cannot
-read a migrated store. Development verification uses temporary stores and does
-not migrate existing backlogs. Automatic context collection is the next slice.
+Current project databases use schema 8, including mutation attribution and
+atomic request receipts. `history` includes stored context; `project-history`
+pages through project creation, key changes and import provenance. Legacy
+history retains null attribution. Context collection is implemented, with
+optional [harness hooks](integration/context-hooks.md) for supplied session
+metadata. Project schema, server schema and the JSON envelope version are
+separate contracts.
 
 ## Labels and ranked search
 
@@ -160,10 +213,11 @@ tasks search "cach lat" --ranked --prefix --limit 20 --offset 20
 ```
 
 Labels are trimmed, lowercased, sorted and deduplicated. Each task may have up to
-32 labels, each 1–64 ASCII letters, digits or `-_.:` characters. `--labels` replaces
+32 labels, each 1-64 ASCII letters, digits or `-_.:` characters. `--labels` replaces
 the complete set; omission preserves it. Label changes use the same version check
-and history transaction as other task edits. `needs-human` is a workflow convention,
-not a special state. Use `draft` for ideas needing brainstorming.
+and history transaction as other task edits. `needs-human` is a label rather
+than a status, and the default runnable query excludes it. Use `draft` for
+ideas needing brainstorming.
 
 Plain `search` already supports literal title/body substrings. `--ranked` adds
 SQLite FTS5 word search: all query terms must match; title matches receive more
@@ -182,12 +236,13 @@ queue. Explicit `--status` bypasses readiness. Every page is internally
 consistent; changes between requests can move ranked results, so restart
 pagination after relevant edits.
 
-Existing databases require explicit `tasks migrate`: schema 5 adds the
-`to-verify` status by rebuilding the tasks table; schema 4 adds priority; schema
-3 adds labels and builds the search index after a validated backup. Schema 1
-states become `draft`/`todo`; existing history snapshots remain unchanged. New
-databases start at schema 5. Older binaries refuse a schema 5 database. No live
-project is migrated automatically.
+New databases start at schema 8. Existing databases require explicit
+`tasks migrate` after a validated backup: schema 3 added labels and ranked
+search, 4 priority, 5 `to-verify`, 6 project keys, 7 attribution and project
+history, and 8 mutation receipts. Earlier state names become `draft`/`todo`;
+existing history snapshots remain unchanged. Older binaries refuse databases
+newer than they support. Remote migration requires server administration;
+network requests never migrate a project implicitly.
 
 ## Priority and selecting work
 
@@ -200,8 +255,11 @@ tasks list --needs-human
 tasks unlocks --limit 20
 ```
 
-P0 is most urgent, P3 least; P2 is the default. Default list requires every
-prerequisite to be done; cancelled prerequisites remain unresolved. Results are
+P0 is most urgent, P3 least; P2 is the default. Default list accepts prerequisites
+in `done` or `to-verify`; cancelled prerequisites still withhold readiness.
+Completion is a separate rule: a transition to `done` accepts only `done` or
+`cancelled` prerequisites. A `to-verify` prerequisite permits starting work but
+still prevents marking the dependent done. Results are
 ordered by priority then ID. Pass the returned `next_after` string unchanged,
 for example `--after P1:T-012`. Search/history retain their existing pagination.
 `unlocks` shows direct open dependent counts and how many become runnable if a
@@ -256,8 +314,8 @@ Exit codes are stable and worth scripting against:
 | 0 | Success, including an empty list |
 | 2 | Usage or validation error |
 | 3 | Project or task not found |
-| 4 | Version conflict |
-| 5 | Lock timeout or busy database |
+| 4 | Version conflict or another conflict, including a stale viewer snapshot |
+| 5 | Lock timeout, busy database or remote service failure |
 | 6 | I/O, database, or schema failure |
 
 Errors name a recovery action and go to stderr. Mutations commit before anything
@@ -421,11 +479,11 @@ the right one. You also need a C compiler suitable for the bundled SQLite build.
 
 ```text
 cargo fmt --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo clippy --locked --all-targets --features server
 cargo test --locked
+cargo test --locked --features server
 cargo test --locked --features test-hooks --test bulk_rollback
-cargo build --release --locked
-tasks --version
+cargo build --release --locked --bin tasks --target-dir target/public-build
 ```
 
 `tasks --version` reports the package version and the short Git commit embedded
@@ -433,15 +491,16 @@ at build time, for example `tasks 0.1.0 (commit 0123456789ab)`. Release packagin
 may set `TASKS_BUILD_COMMIT`; builds without that override read the current Git
 commit and fall back to `unknown` only when Git metadata is unavailable.
 
-The executable lands at `target/release/tasks.exe` on Windows and
-`target/release/tasks` on Linux. Copy it to a directory on `PATH` or invoke it
-by absolute path, and do not replace an executable that is currently in use.
-Build the two platforms into separate Cargo target directories; a Windows build
-is not Linux proof.
+The example builds `target/public-build/release/tasks.exe` on Windows. On
+Linux, use a Linux-owned target directory as described in [installation](installation.md).
+The separate target avoids replacing the maintainer's installed release build.
+Copy the executable to a directory on `PATH` or invoke it by absolute path.
+Add `--features server --bin tasks-server` to a separate server build. Windows and
+Linux require separate native proof; a cross-compile alone is insufficient.
 
 ## Tests
 
-The 2026-09-22 verification ran 214 tests on Windows and 218 on Ubuntu/WSL
+The historical 2026-09-22 verification ran 214 tests on Windows and 218 on Ubuntu/WSL
 with `cargo test --locked --no-fail-fast`. The separate feature-enabled bulk rollback regression
 also passed on both platforms (`cargo test --locked --features test-hooks
 --test bulk_rollback`). See [verification-report.md](verification-report.md) for
@@ -450,7 +509,11 @@ selective reads, transactional mutations, Markdown preservation, migration and
 backup recovery, history, dependencies, output contracts, and WSL interop, using
 real temporary SQLite stores and real subprocesses for contention, exit codes,
 stdin, backup recovery, and crash rollback. Live legacy Markdown ledgers are
-never modified by the suite.
+never modified by the suite. Those counts describe that candidate, not current
+HEAD. Later CLI/server proof is recorded in
+[server progress](integration/server-refactor-progress.md), and viewer proof in
+[viewer verification](viewer/verification-report.md). Each result identifies
+its own candidate and environment.
 
 ## What v1 deliberately does not do
 
@@ -464,11 +527,14 @@ never modified by the suite.
   delegation for a shared Windows backlog.
 
 `spec.md` is the normative contract when you need the exact rule behind any of
-this.
+this. The separate [QNAP backup job](integration/qnap-daily-backups.md) has its
+own seven-day retention policy; it is not an automatic CLI feature.
 
 States, labels, ranked search, priority, readiness selection, unlock queries,
 direct `.tasks.json` routing, identity creation during `init`, and build-identified
 `--version` output are implemented. The product-owned
 skills and deployment contract are in [integration/README.md](integration/README.md).
-The reviewed 2026-09-21 migration imported and verified 51 project backlogs;
-the canonical set and exclusions are in [migration/README.md](migration/README.md).
+The historical 2026-09-21 migration imported 51 project backlogs; its set and
+exclusions are in [migration/README.md](migration/README.md). The 2026-10-06
+production cutover moved 55 backlogs to the self-hosted server, as recorded in
+[the deployment record](integration/deployment-2026-10-06.md).

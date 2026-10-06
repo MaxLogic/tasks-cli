@@ -1,7 +1,7 @@
 # Viewer through the remote CLI
 
 The viewer uses the same CLI JSON protocol for local and remote profiles. It
-does not connect to HTTP itself. Configure the candidate CLI once using
+does not connect to HTTP itself. Configure the remote-capable CLI once using
 [remote-cli.md](remote-cli.md), then select that executable and the matching
 client data root in the viewer. Do not switch a live project to remote storage
 until its server copy and cutover have been verified.
@@ -55,6 +55,9 @@ oversized responses fail explicitly rather than silently truncating results.
 
 Rust acceptance uses actual CLI processes, HTTPS gateways and separate client
 installations. Flutter acceptance uses headless process and widget fixtures.
-Portable package verification launches only the startup opt-out and argument
-error paths. Spoken outage feedback, stable focus and restored-service recovery
-in a real packaged viewer with NVDA remain a workstation availability gate.
+The cited portable package check launched the startup opt-out and argument
+error paths; it did not exercise every interactive flow. On 2026-10-06 the owner
+reported testing the viewer with NVDA and confirmed screen-reader use. That is
+human runtime evidence. No detailed outage/focus/retry transcript was supplied,
+so this report does not turn that confirmation into proof of every specialized
+scenario in the original verification plan.

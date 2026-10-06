@@ -1,9 +1,10 @@
-# Proposed AI task workflow
+# AI task workflow
 
 Status: states, labels, priority, selection, unlock queries and ranked search are
 implemented. Direct worktree identity discovery and the shared SQLite skills are
-implemented in `integration/`; live deployment is handled as one migration
-cutover. `spec.md` remains the current implementation contract.
+implemented in `integration/`. The 2026-10-06 production cutover is recorded in
+[the deployment record](integration/deployment-2026-10-06.md). `spec.md` remains
+the implementation contract. This guide was reconciled with source on 2026-10-06.
 
 ## Keep the SQLite CLI
 
@@ -28,7 +29,7 @@ research reports are retained under `target/evidence/tool-landscape-20260918/`.
 
 ## States, labels and priority
 
-The approved six states are implemented. Explicit schema migration replaces
+The seven states are implemented. Explicit schema migration replaces
 `backlog`/`ready` with `draft`/`todo` while preserving existing history.
 
 | State | Meaning |
@@ -36,6 +37,7 @@ The approved six states are implemented. Explicit schema migration replaces
 | `draft` | Placeholder or idea that still needs brainstorming or definition |
 | `todo` | Defined work, subject to dependency readiness |
 | `in-progress` | Work the coordinator has started |
+| `to-verify` | Implemented and focused-tested; awaiting the verification gate |
 | `blocked` | Work cannot currently proceed for a non-dependency reason |
 | `done` | Completed and verified |
 | `cancelled` | Intentionally abandoned |
@@ -66,14 +68,15 @@ tasks unlocks
 ```
 
 Default `list` returns `todo` and `in-progress` tasks whose prerequisites
-are all done, excluding `needs-human`. Order by priority and then stable task ID.
+are done or to-verify, excluding `needs-human`. Order by priority and then stable task ID.
 Keep bounded results and pagination in SQL. `--open` explicitly includes every
 nonterminal state; `--needs-human` explicitly includes nonterminal drafts and
 blocked tasks awaiting input. Label filtering should combine with either scope.
 
-A cancelled prerequisite should not silently count as completed. The coordinator
-must remove the dependency with an explanation or explicitly decide that its
-requirement has been met. Dependency blockage is calculated from the graph;
+A cancelled prerequisite withholds default readiness. The explicit transition
+to done accepts done or cancelled prerequisites, while to-verify still prevents
+completion. The architect reviews cancelled scope before accepting a dependent.
+Dependency blockage is calculated from the graph;
 avoid requiring agents to maintain a second, manually synchronized blocked flag.
 
 `unlocks` reports open prerequisites, their direct open dependent count,
@@ -106,7 +109,7 @@ needed for this model. WSL workers use the Windows backend for a Windows backlog
 
 ## Skills and handoffs
 
-Use “Task Ledger” as a possible system name, keep the short `tasks` command,
+Use "Task Ledger" as a possible system name, keep the short `tasks` command,
 and put backend mechanics in a shared `task-ledger` skill. Naming is a proposal.
 `create-task` retains task formulation and ledger-edit ownership; `resolve-task`
 retains execution, acceptance checks and verification. Both reference the shared
@@ -132,8 +135,13 @@ matching for identifiers and exact fragments. Priority queries are implemented. 
 ranking and tokenization, but is not semantic similarity or general typo
 correction. See the [SQLite FTS5 documentation](https://www.sqlite.org/fts5.html).
 
-Use task labels and a small, explicit synonym list if queries like “speed” should
-find “performance.” Add typo tolerance only after recording missed queries.
+Use task labels and a small, explicit synonym list if queries like "speed" should
+find "performance." Add typo tolerance only after recording missed queries.
 Defer embeddings, model downloads, a vector store and index-version coordination
 until lexical search demonstrably fails useful retrieval cases. Search results
 should remain bounded summaries with explicit access to the full task.
+
+The [architect-led example](integration/architect-workflow.md) demonstrates
+shared worktree routing, a stale-result refusal and ordered verification.
+[Feature proposals](feature-proposals.md) assess assignees, claims, leases,
+goals, milestones and structured criteria without adding them to this contract.

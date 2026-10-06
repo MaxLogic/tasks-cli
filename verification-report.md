@@ -1,5 +1,11 @@
 # tasks-cli verification report
 
+This report retains dated candidate evidence. Counts and environment gaps apply
+to their named runs, not automatically to current HEAD. Later schema-8
+CLI/server gates are recorded in [server progress](integration/server-refactor-progress.md),
+production cutover in [deployment-2026-10-06.md](integration/deployment-2026-10-06.md),
+and viewer/NVDA evidence in [viewer verification](viewer/verification-report.md).
+
 ## Token-efficient output, skills 1.1/4.1/6.2 and install — 2026-09-26
 
 `e60aaab` makes JSON compact and omits rules from `show` unless `--rules` is

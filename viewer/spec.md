@@ -1,6 +1,10 @@
 # Tasks Viewer specification
 
-Status: Ready for implementation. All implementation and runtime verification below are planned, not completed.
+Status: implemented contract, reviewed 2026-10-06. Verification requirements
+below remain acceptance criteria; dated proof is recorded in
+[verification-report.md](verification-report.md) and integration deployment records.
+The owner confirmed NVDA use on 2026-10-06. Linux/macOS viewer builds remain
+outside the support scope.
 
 Date: 2026-09-21
 
@@ -8,13 +12,26 @@ Date: 2026-09-21
 
 Build a local Flutter/Dart Windows x64 application for reviewing the existing shared tasks-cli backlogs. The primary user uses NVDA. Project discovery, searching, comparison, keyboard navigation and safe editing must work without sight or a mouse.
 
-This document is the viewer's functional and implementation contract. [design.md](design.md) defines presentation, focus and interaction. [../spec.md](../spec.md) remains authoritative for storage ownership, task invariants, migrations, backups and existing CLI behavior. Additive commands specified here are new work; do not pretend they already exist. If source changes after this specification, reconcile the affected contract before implementation.
+This document is the viewer's functional and implementation contract.
+[design.md](design.md) defines presentation, focus and interaction.
+[../spec.md](../spec.md) remains authoritative for storage ownership, task
+invariants, migrations, backups and existing CLI behavior. The additive viewer
+commands are implemented. Reconcile future changes with the affected contract.
 
 The new viewer command group deliberately adds timestamp fields, exact initial query counts and offset navigation. These are scoped extensions to the root spec's minimal list/search output and no-count-per-page rule. Legacy list/search/show output remains unchanged. This document does not authorize changing storage ownership or migration rules.
 
-The requested deliverables for this authoring task are these documents and [goal.md](goal.md). Executing the goal later authorizes implementation. Do not start implementation merely because these files exist.
+The original authoring deliverables were this contract, the design and
+[goal.md](goal.md). That goal is retained as the original implementation brief,
+not a current instruction to repeat completed work.
 
-### Verified repository baseline
+### Original repository baseline, 2026-09-21
+
+The observations below describe the source used to write the initial contract.
+The additive `viewer` commands now exist. The remote extension in
+[../spec.md](../spec.md#rust-server-and-automatic-attribution) and
+[remote-viewer.md](../integration/remote-viewer.md) permits a remote-capable CLI
+without adding HTTP, enrollment or synchronization to Dart. Its server catalog
+supersedes registry-only project enumeration for a remote profile.
 
 - `src/cli.rs`: `list`, `search`, `show`, `update`, `history`, `rules show`, `enrich` and `enrich-clipboard` exist. Global options include `--data-root`, `--project` and `--format json`.
 - `src/registry.rs`: `registry.json` contains root-to-project UUID bindings. Multiple roots can identify one project. The Windows default data root is `%LOCALAPPDATA%\MaxLogic\tasks-cli`. There is no project-list CLI command.
@@ -27,7 +44,11 @@ The requested deliverables for this authoring task are these documents and [goal
 
 Required: discover registered projects; show project statistics; filter, search and sort both collections; virtualize both lists; select and read complete task details; edit existing tasks; mark a task done with Ctrl+D; inspect dependencies, history and project rules; enrich clipboard text in the selected project's context with its button or Ctrl+E; remember navigation preferences; use the full ultrawide monitor with maximized startup; start with Windows by default with a Settings opt-out; bundle ElevenLabs Bella static announcement audio; provide a portable Windows release and reproducible tests.
 
-Excluded: creating/deleting tasks or projects, bulk edits, import/migration UI, rule editing, cloud services, accounts, synchronization, Linux/macOS viewer builds, automatic updates and automatic AI execution. The Rust CLI still requires native Windows and Linux verification when changed.
+Excluded: creating/deleting tasks or projects, bulk edits, import/migration UI,
+rule editing, viewer-owned HTTP/cloud services, enrollment/account UI, offline
+synchronization, Linux/macOS viewer builds, automatic updates and automatic AI
+execution. A configured CLI may access the optional server. The Rust CLI still
+requires native Windows and Linux verification when changed.
 
 | Decision | Required implementation | Reason |
 | --- | --- | --- |
@@ -219,7 +240,16 @@ New `viewer update` request:
 
 On conflict, retain base version/base fields, the draft and the freshly read current record. Open an accessible conflict dialog listing changed fields with Base, Mine and Current values. Default action is "Return to editor". "Reload current and discard draft" requires explicit choice. "Review against current" rebases the form only after the user chooses Mine or Current for each conflicting field; treat body, labels and dependencies as whole fields, without an automatic text merge. Retain user's nonconflicting changes and current values for fields they did not change. Require a separate Save with the newly read version. Another intervening write produces another conflict, never a force save.
 
-If a write process exits without a valid success/error response, mark the outcome unknown and disable Save until a `show` reconciliation succeeds. If the record equals all intended normalized values, report "Current task matches your changes; save acknowledgement was lost". If it remains at the base version, return to unsaved state with explicit Retry. Otherwise enter the conflict workflow. Do not infer failure from timeout or resend a mutation automatically. Reconciliation itself must not mutate the store.
+For a local write that exits without a valid response, mark the outcome unknown
+and disable Save until reconciliation succeeds. Wait for the owned writer to
+exit before reading; reserve its process slot before asynchronous launch.
+The local reconciliation checks the observed version and intended normalized
+values under its existing conflict contract. An unchanged base version returns
+to unsaved state with explicit Retry; a conflicting version enters the conflict
+workflow. Do not infer failure from timeout or automatically resend the write.
+For remote operation, reconcile the exact retained request receipt as specified
+in [remote-viewer.md](../integration/remote-viewer.md). Matching field text alone
+does not prove the original remote mutation succeeded.
 
 Switching task/project, closing the window, changing the store or leaving edit mode with dirty fields prompts Save, Discard, Cancel. Cancel is default and restores initiating focus. Save continues navigation only after confirmed save/reconciliation and successful refresh. Discard affects the draft only. While a save is running, closing offers "Keep waiting" by default; never claim it cancels an atomic store write.
 
@@ -425,4 +455,10 @@ Focused proof for slice 7: run `flutter test test/platform test/announcements te
 
 Review: the author performed a bounded consistency review and a separate read-only contract reviewer checked the repository boundary. Corrections adopted: scoped timestamp/count extensions, count reuse within query tokens, explicit platform file identity, immediate locked-project error rows, presence-aware JSON parsing, explicit SQL sort expressions, catalog-page invalidation and honest clipboard race limits. No material review finding remains deferred. No implementation tests were run for this documentation change.
 
-Execution handoff: canonical artifact is `viewer/spec.md`; readiness is Ready for implementation, with runtime prerequisites above. Build/test commands and proof schedule are in section 11; work packages are in [Implementation slices](#12-implementation-slices). Use project-local rust-engineering/rust-testing for Rust work, UX/accessibility guidance for Flutter controls and scoped Git operations for the required local milestone commits. No live backlog migration, push, publication or replacement of an in-use executable is authorized. Deferred features are exactly the exclusions in section 2.
+Maintenance handoff: canonical artifact is `viewer/spec.md`. The viewer is
+implemented; build/test commands and proof schedule remain in section 11, and
+the original work packages are in [Implementation slices](#12-implementation-slices).
+Use project-local Rust guidance for Rust changes, UX/accessibility guidance for
+controls and scoped Git operations for local commits. This document grants no
+new live migration, push, publication or installation authority. Deferred
+features remain the exclusions in section 2.

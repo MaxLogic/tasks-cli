@@ -1,14 +1,16 @@
 # Remote CLI setup and recovery
 
-Candidate implementation for TSK-025. Build into an isolated target directory
-until installation is authorized. No live backlog is migrated by profile setup.
+Remote access is implemented. The maintained Windows and native WSL clients
+were installed for the QNAP authority on 2026-10-06; see
+[the deployment record](deployment-2026-10-06.md). For another installation,
+configure its own profile and credentials. Profile setup does not migrate data.
 The default build includes the HTTPS client; `--features server` also builds the
 server. `--no-default-features` is a local-only binary and refuses any existing
 profile instead of treating it as an unconfigured local root.
 
 ## Configure once per installation
 
-Use the candidate `tasks` executable in these commands. Supply a fresh absolute
+Use a remote-capable `tasks` executable in these commands. Supply a fresh absolute
 personal directory and an explicit client data root. The private key is generated
 locally; stdout contains only the public registration document.
 
@@ -92,8 +94,10 @@ complete bodies are never silently truncated. Title enrichment batches at most
 Import, bulk-import, backup, migration and doctor require server-local
 administration; the remote CLI refuses them before opening local SQLite/input.
 Remote viewer operations and retained receipt recovery are described in
-[remote-viewer.md](remote-viewer.md). Real NAS deployment,
-LAN/public DNS/certificate provisioning and installation remain separate gates.
+[remote-viewer.md](remote-viewer.md). NAS deployment and LAN/public routes have
+dated proof in [deployment-2026-10-05.md](deployment-2026-10-05.md); production
+cutover is recorded separately. A new deployment still needs its own TLS,
+network-isolation, recovery and installation checks.
 
 Dependency notes: the selected TOML parser is `toml 0.9.12+spec-1.1.0`
 (MIT/Apache-2.0, declared Rust 1.76), and the Windows publication wrapper is

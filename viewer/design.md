@@ -1,6 +1,9 @@
 # Tasks Viewer UI and UX design
 
-Status: Ready for implementation alongside [spec.md](spec.md). This describes required behavior; no screen-reader or usability test has been executed yet.
+Status: implemented interaction contract alongside [spec.md](spec.md), reviewed
+2026-10-06. The project owner tested the viewer with NVDA and confirmed
+screen-reader use. Dated automated checks and walkthrough evidence are recorded
+in [verification-report.md](verification-report.md).
 
 ## 1. Purpose and organization
 
@@ -8,7 +11,15 @@ The main workflow is: find a project, narrow its tasks, read a task, edit it if 
 
 Use a standard resizable Windows window titled "Tasks Viewer", maximized by default on every launch, including launch at Windows sign-in. Use the full work area of the selected monitor, retaining the Windows taskbar and window controls. When a task is selected append its ID and project name. Prefix "Unsaved changes" while editing dirty fields. Start in the last selected project if it still exists. Initially focus its Projects row; otherwise focus the empty Projects list region. Do not open a task automatically on a first launch.
 
-The application is local. Do not show sign-in, sync indicators, cloud configuration or AI controls. Settings contains the CLI path, data root, text size, theme, pane widths, Reset layout, Start with Windows (enabled by default), announcement mode, Bella volume and Test voice. Help contains a keyboard reference and the statistic definitions from spec.md. ElevenLabs credentials are used by the development-time asset generator, never requested by the installed application.
+The desktop application routes storage through the CLI, including a configured
+remote profile. Do not show sign-in, sync indicators, cloud enrollment or AI
+controls. Remote pending-change recovery is defined in
+[remote-viewer.md](../integration/remote-viewer.md). Settings contains the CLI
+path, data root, text size, theme, pane widths, Reset layout, Start with Windows
+(enabled by default), announcement mode, Bella volume and Test voice. Help
+contains a keyboard reference and the statistic definitions from spec.md.
+ElevenLabs credentials are used by the development-time asset generator, never
+requested by the installed application.
 
 ## 2. Window layout and adaptation
 

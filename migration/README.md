@@ -1,5 +1,10 @@
 # 2026-09-21 project migration manifest
 
+Historical local-store migration record. The subsequent 2026-10-06 cutover
+moved 55 backlogs to the QNAP authority; see
+[the production deployment](../integration/deployment-2026-10-06.md). Paths,
+schemas and counts below describe September's migration, not the current store.
+
 `projects-20260921.csv` is the reviewed canonical set for the one-time migration
 of task ledgers under `F:\projects`. It contains 51 independent project
 identities and 5,597 imported tasks. The corresponding strict dry run completed
@@ -10,8 +15,8 @@ The strict rehearsal evidence is retained under
 `target/evidence/migration-20260921-final-dry/`. The matching live apply evidence
 is under `target/evidence/migration-20260921-live-apply/`: all 51 projects were
 applied and verified, with zero failures. The migration used
-`sections-20260921.json`, stores live data in `F:\projects\.tasks-cli-data`, and
-keeps the Markdown ledgers as read-only migration snapshots. A post-apply
+`sections-20260921.json`, stored data in `F:\projects\.tasks-cli-data`, and
+kept the Markdown ledgers as read-only migration snapshots. A post-apply
 `doctor` run resolved every tracked `.tasks.json` to its expected UUID and schema
 4 database.
 

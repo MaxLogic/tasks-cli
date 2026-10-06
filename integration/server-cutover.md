@@ -20,7 +20,10 @@ For rehearsal, use only synthetic or copied project databases. Compare selected 
 
 At real cutover, stop all local writers, take the final verified local project backups, import copies, take and verify a complete server backup, then configure remote clients. Before server writes, rollback may restore the old client profile. After server writes, quiesce the server and take its current verified backup before choosing an authority; reverting directly to an older local snapshot would lose those writes. Never keep the same project UUID writable in local and remote stores.
 
-Container packaging, QNAP runtime checks, Caddy/Cloudflare TLS routes, LAN backend isolation and NAS smoke proof remain separate deployment gates in spec.md.
+Container packaging, QNAP runtime checks, Caddy/Cloudflare TLS routes and LAN
+backend isolation require separate deployment proof. The initial QNAP checks
+are recorded in [deployment-2026-10-05.md](deployment-2026-10-05.md); a new
+environment must repeat its applicable checks.
 
 ## Completed production cutover
 

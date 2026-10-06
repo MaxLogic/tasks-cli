@@ -1,5 +1,18 @@
 # Tasks Viewer verification report
 
+This report retains dated candidate evidence. Older failures, unavailable rows
+and test counts describe their named run. Later deployment proof is in
+[integration/deployment-2026-10-06.md](../integration/deployment-2026-10-06.md).
+
+## Owner NVDA verification, 2026-10-06
+
+The owner reported: "I checked it with NVDA, so the viewer is working with
+screenreaders." This establishes owner-tested NVDA use of the viewer, separate
+from UIA inspection and Flutter semantic tests. No exact executable hash,
+walkthrough transcript or list of scenarios was supplied. This confirmation
+does not rewrite historical failures as passes or establish every specialized
+scenario. Task lifecycle updates remain separate from this documentation record.
+
 ## 2026-09-27: verification no longer rebuilds the installed CLI
 
 `F:\CliTools\tasks.exe` links to `target\release\tasks.exe`. Before this change,

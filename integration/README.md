@@ -14,7 +14,7 @@ state.
 Setup is a separate authorized operation. For an existing project, obtain and
 verify its UUID from the existing tasks registry/CLI output. For a genuinely new
 project, run authorized
-`tasks init --root <absolute-project-root>` and retain the
+`tasks init --root <absolute-project-root> --key KEY` and retain the
 returned project UUID. Do not generate a UUID independently.
 
 The command creates root `.tasks.json` with only
@@ -60,3 +60,9 @@ the test worktree through Git. They do not use the user's default store.
 
 See [evaluation.md](evaluation.md) for provenance, strengths retained and the
 limits of the workflow evaluation.
+
+For a first run, see [installation](../installation.md) and the
+[architect-led worktree example](architect-workflow.md). The architect owns
+assignment and lifecycle transitions; workers return changes and evidence.
+The three skills express that workflow through the CLI. CLI operation does not
+require installing the skills or an MCP server.

@@ -1,5 +1,9 @@
 # Skill evaluation and deployment readiness
 
+Historical evaluation and deployment record from September 2026. Suite sizes,
+entrypoint lengths and deployment observations below apply to that candidate.
+Current access/setup instructions are in [README.md](README.md).
+
 Scope: product-owned SQLite task skills and direct CLI project identity. The
 shared access skill is `task-ledger`.
 

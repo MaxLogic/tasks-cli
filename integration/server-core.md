@@ -1,12 +1,12 @@
-# Server API candidate
+# Server API and administration
 
-This candidate includes authenticated task operations, catalog recovery and
-atomic request receipts (TSK-023/TSK-024). `/v1/info` advertises `ready: true`
-for the typed API; remote CLI profile routing and deployment proof remain open. Keep it on a
-synthetic local data root. No installed binary, live backlog, harness settings
-or NAS configuration was changed.
+The server implements authenticated task operations, catalog recovery and
+atomic request receipts. `/v1/info` advertises `ready: true` for the typed API.
+Remote CLI routing and QNAP deployment are implemented; see
+[the production cutover](deployment-2026-10-06.md). Use synthetic roots for
+verification. Administration of a live authority requires its writers to stop.
 
-## Candidate build and administration
+## Isolated build and administration
 
 ```powershell
 cargo build --release --locked --features server --bin tasks --bin tasks-server --target-dir target/server-candidate
@@ -107,7 +107,8 @@ path/query bytes are checked against the transmitted URL before signing. Bodies
 are bounded at 8 MiB; ordinary responses at 16 MiB, including replies without
 Content-Length. Complete exports use the separately bounded streaming protocol.
 Errors contain fixed diagnostic categories, never raw URLs, headers or bodies.
-Remote CLI profile selection and pending mutation receipt handling are TSK-025.
+Remote CLI profile selection and pending mutation receipt handling are described
+in [remote-cli.md](remote-cli.md).
 
 Explicit key generation produces an OS-random Ed25519 key in PKCS#8 PEM and
 returns only its public key. Existing keys are never overwritten. Load requires
@@ -116,7 +117,7 @@ insecure files are refused. Unix requires owner identity and exact 0700/0600
 permissions; linked files are refused. Windows uses protected ACLs restricted
 to the filesystem owner, SYSTEM and Administrators, with reparse points refused.
 Use a trusted personal data root, never a shared writable directory. Key setup
-is a library building block until the explicit remote CLI configuration slice.
+is exposed through the explicit `remote keygen` and `remote configure` commands.
 
 Per-session hook files share this protection. Windows protects an empty unique
 directory before publishing its name, so simultaneous hooks cannot encounter a
@@ -134,8 +135,9 @@ application outcomes.
 
 ## Deployment and dependent proof
 
-Synthetic TLS gateway proof reaches the actual authenticated private Rust HTTP
-listener and preserves signed metadata/body. This does not certify the NAS Caddy
-or Cloudflare route. Actual NAS TLS/network isolation waits for the user's gateway
-thread and TSK-027. Local/API readiness does not certify container isolation,
-remote CLI/viewer compatibility, a live NAS route or a migrated project.
+Synthetic TLS gateway proof reaches the authenticated private Rust HTTP listener
+and preserves signed metadata/body. Actual NAS TLS and network-isolation checks
+are recorded in [deployment-2026-10-05.md](deployment-2026-10-05.md), and the
+55-project cutover in [deployment-2026-10-06.md](deployment-2026-10-06.md).
+Each record establishes its named environment and candidate; local API tests
+alone do not establish live routing or physical network isolation.

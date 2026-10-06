@@ -1,13 +1,16 @@
 # Spec: shared local task backlog CLI
 
-Status: implementation contract and verification basis, updated 2026-09-15.
+Status: implementation contract and verification basis, reviewed 2026-10-06.
 The behavioral requirements below remain normative; implementation and
 performance results are recorded separately in verification-report.md.
 
 The [Rust server and automatic attribution extension](#rust-server-and-automatic-attribution)
-was specified on 2026-10-02 from the user's accepted direction. Its behavior is
-planned, not installed or verified. It supersedes the local-only restrictions
-for explicitly configured remote profiles; existing local behavior remains normative.
+was specified on 2026-10-02 and is implemented. Project databases use schema 8;
+the server catalog uses schema 2. Native Windows/Linux clients and the QNAP
+server deployment are recorded in [integration/deployment-2026-10-06.md](integration/deployment-2026-10-06.md).
+The extension supersedes local-only restrictions for configured remote profiles;
+local behavior remains normative. Dated measurements and acceptance records
+describe their named candidates, not every later commit.
 
 ## Context and goals
 
@@ -79,10 +82,11 @@ matching identity and refuses malformed or conflicting content without
 overwriting it. When `--project` is omitted, a valid identity already at the
 exact root supplies the UUID for this explicit initialization operation.
 
-`tasks init --root <absolute-path>` creates a project, binding and portable
+`tasks init --root <absolute-path> --key KEY` creates a project, binding and portable
 identity. `tasks bind
 --root <absolute-path> --project <uuid>` associates another worktree with an
-existing project. Neither requires Git nor modifies the project directory.
+existing project. Neither requires Git. `init` creates or verifies the root
+`.tasks.json`; `bind` changes only the registry binding.
 Initialization of an already bound root reports its existing identity, without
 creating another database. Bind refuses to reassign an existing binding.
 
@@ -194,7 +198,7 @@ one-line `--help` description.
 | `project-history [--after N] [--limit N]` | Bounded project creation, key and import audit events with mutation context |
 | `rules show` / `rules set --body-file PATH --expect-version N` | Retrieve/update shared project Markdown rules |
 | `import --file PATH... [--apply --expect-sha256 HASH]... [--map-file PATH] [--source-schema NAME]` | Preview by default; one apply can commit several sources into the same empty project |
-| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME] [--key-map FILE]` | Dry-run corpus migration: scan, group, classify and preview Markdown ledgers; only `--apply` initializes projects, imports and verifies; apply is all-or-nothing unless `--allow-partial` is passed; only `--quarantine-dir` moves sources |
+| `bulk-import --scan-root PATH --map-file FILE --report-dir DIR [--exclude GLOB]... [--apply] [--allow-partial] [--quarantine-dir DIR] [--delete-quarantined] [--source-schema NAME] [--key-map FILE]` | Preview corpus migration; strict preflight refuses the whole set unless `--allow-partial` is passed; each eligible project commits independently, with no cross-project transaction; only `--quarantine-dir` moves sources |
 | `export --out PATH` | Deterministic readable Markdown snapshot; refuse existing destination |
 | `backup --out PATH` | Consistent SQLite backup; refuse existing destination |
 | `migrate` | Explicit schema upgrade, with verified pre-upgrade backup |
@@ -240,7 +244,8 @@ Normalize by trimming, ASCII lowercasing, sorting and deduplicating; allow at
 most 32 labels of 1–64 ASCII letters, digits or `-_.:`. Labels appear in show,
 summary rows, history snapshots, import previews and optional canonical metadata.
 Exact normalized `--label` filtering is available for list and both search modes.
-No reserved-label behavior is enforced by the CLI.
+Labels do not change status or priority. The exact `needs-human` label is
+excluded from the default runnable query and selected by `--needs-human`.
 
 `search TEXT --ranked [--prefix] [--label LABEL] [--offset N] [--limit N]`
 uses FTS5 BM25, title weight 10/body weight 1, then numeric ID to break ties.
@@ -327,9 +332,10 @@ that key; dependencies stay within one project.
 
 Default list selects only todo/in-progress tasks without `needs-human`, and all
 prerequisites must be done or to-verify. A to-verify prerequisite counts as
-satisfied only for this readiness and for `unlocks`; completion (the done guard)
-and every other rule still require done. Cancelled prerequisites remain
-unsatisfied. Default list never shows to-verify tasks themselves, since they are
+satisfied only for this readiness and for `unlocks`. The done-transition guard
+accepts done or cancelled prerequisites and rejects every nonterminal status,
+including to-verify. Cancelled prerequisites still withhold default readiness.
+Default list never shows to-verify tasks themselves, since they are
 not runnable work; `--open` and `--status to-verify` do. `--open`
 selects every nonterminal task. `--needs-human` selects nonterminal tasks with
 that label. These flags conflict; explicit `--status` bypasses default readiness,
@@ -1121,9 +1127,11 @@ Do not recreate the full backlog in AGENTS.md, a second spec, or CLI help text.
 
 ## Rust server and automatic attribution
 
-Status: Ready for implementation, 2026-10-03. Deployment prerequisites below
-remain pending.
-Verification below is planned.
+Status: implemented and deployed; reviewed 2026-10-06. The sections below define
+the required behavior and verification plan. Completed candidate checks and
+remaining environment-specific gates are recorded in
+[server progress](integration/server-refactor-progress.md) and dated deployment
+records. Infrastructure observations below retain their original observation dates.
 The user selected a Rust server in Docker on a QNAP NAS, online-only remote
 operation, HTTPS and authentication. The viewer continues to access tasks
 through the CLI. Routine implementation choices below were selected locally.
@@ -1718,17 +1726,18 @@ writable copies after cutover; project creation spans catalog and project storag
 and a shared current-session/model file would mix concurrent sessions or agents.
 The contracts above address each, including nullable model attribution when the
 execution identity cannot be matched. Server transport/auth and application
-transactions are separate slices with distinct focused proof. No independent
-review or implementation proof is claimed.
+transactions are separate slices with distinct focused proof. The original
+design review did not establish implementation proof; subsequent source reviews
+and executable gates are recorded in integration/server-refactor-progress.md.
 
-Canonical artifact: spec.md, this section. Readiness: Ready for implementation.
-The user accepted application-level key authentication on both access routes.
-NAS architecture and existing reverse proxy are verified;
-dual-route DNS/TLS provisioning, backend isolation and client registration remain
-execution prerequisites. Exact crate versions remain
-implementation selections. Begin with
-the [implementation slices](#implementation-slices), using rust-engineering,
-rust-testing and resolve-task when slices have durable task records. Offline
+Canonical artifact: spec.md, this section. Implementation and the initial NAS
+deployment are complete; dated proof and remaining environment-specific checks
+are in integration/server-refactor-progress.md and the deployment records.
+Application-level key authentication is used on both access routes. New
+installations must verify their own DNS/TLS, isolation and enrollment.
+Cargo.toml and Cargo.lock record the selected crate versions. The
+[implementation slices](#implementation-slices) retain the original work breakdown.
+Use rust-engineering, rust-testing and resolve-task for future selected changes. Offline
 writes, remote bulk import and richer access policies remain excluded. Deployment
 and live-project migration require their own concrete rollout authorization.
 

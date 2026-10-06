@@ -1,5 +1,9 @@
 # Implement Tasks Viewer
 
+Historical implementation brief from 2026-09-21. The viewer is implemented;
+this prompt is retained for provenance, not as an instruction to repeat it.
+Current behavior is documented in [README.md](README.md) and the specifications.
+
 Copy the following command into Codex from `F:\projects\MaxLogic\tasks-cli`. This file does not start a goal by itself.
 
 ```text

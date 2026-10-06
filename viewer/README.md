@@ -1,8 +1,14 @@
 # Tasks Viewer
 
 A Windows desktop front end for the `tasks` CLI. It reads one shared SQLite
-backlog per project through the CLI's `viewer` command group, so the viewer
-never opens a task database itself and never replaces an in-use executable.
+backlog per project through the CLI's `viewer` command group. Local stores and
+configured remote profiles use the same interface; the viewer never opens a
+task database itself.
+
+The project owner tested the viewer with NVDA and confirmed screen-reader use
+on 2026-10-06. Keyboard navigation, full-text reading and editing are part of
+the application workflow. See [verification-report.md](verification-report.md)
+for the owner report and dated automated checks.
 
 The viewer talks to the store only through `tasks.exe`. Reads use the CLI's
 `viewer projects`, `viewer tasks`, `viewer show` and `viewer info` commands.
@@ -17,8 +23,8 @@ under the selected task data root. Preserve this file when moving the store.
 - Windows 11 x64.
 - No Flutter/Dart SDK on the user's machine. The packaged bundle in
   `target/viewer-release/` contains the release engine and the matching CLI.
-- NVDA for screen-reader use. The interface is built from native semantic
-  controls, so it also works with the inspector and keyboard alone.
+- NVDA is the tested screen reader. Flutter semantics are exposed through the
+  native Windows accessibility bridge; the viewer also supports keyboard use.
 
 ## Bundle layout
 
@@ -144,8 +150,9 @@ The current scope and filters still apply.
 - **NVDA only** leaves those fixed outcomes to NVDA and never plays audio.
 - **Off** disables both clip playback and app-generated speech.
 
-Dynamic text such as task titles, counts and error prose is always spoken by
-NVDA through the semantic tree, never by a generated clip. The clips are
+Dynamic text such as task titles, counts and error prose is exposed through
+the semantic tree, never a generated clip. Off suppresses app-generated live
+announcements, not NVDA's ordinary navigation of controls. The clips are
 bundled, so playback needs no network access and no credentials. Their
 provenance manifest travels with them in
 `data/flutter_assets/assets/announcements/manifest.json`; `catalog.json` and
@@ -163,9 +170,12 @@ viewer starts from defaults instead of discarding it silently.
 
 Saving is version-checked. A conflicting write from another process keeps the
 typed values, reports the conflict and offers to reload the current task; the
-viewer never retries a conflicting write by itself. If a save acknowledgement
-is lost, the outcome is reconciled by re-reading the task rather than
-replaying the write. A missing data root shows "No task store found" with the
+viewer never retries a conflicting write by itself. For a lost local save
+acknowledgement, reconciliation waits for the owned writer and re-reads the task.
+Remote writes retain their original request receipt; **Check pending change**
+reconciles that request rather than creating a replacement write. Drafts survive
+service failures and restarts. See [remote recovery](../integration/remote-viewer.md).
+A missing data root shows "No task store found" with the
 resolved path, and an unavailable or malformed project database produces its
 own error row without hiding the healthy projects.
 
@@ -178,7 +188,7 @@ statistics are never shown as zero.
 | Field | Meaning |
 | --- | --- |
 | `total` | All stored tasks, including cancelled |
-| `open` | draft, todo, in-progress and blocked |
+| `open` | draft, todo, in-progress, to-verify and blocked |
 | `blocked` | Explicit blocked status; waiting on a dependency alone does not count |
 | `done` / `cancelled` | Counts of those exact statuses |
 | Started | `MIN(created_ms)`, shown as "Started (first recorded task)" |
@@ -226,5 +236,6 @@ windowed test build. `measure.ps1` seeds deterministic
 release fixtures with a recorded seed and times the release CLI round trips.
 Each script retains logs under `viewer/target/evidence/viewer/<run-id>/` and
 receives explicit temporary data and settings roots; none of them touch a real
-backlog. Current results, unresolved limitations and the deliberately
-unavailable manual rows are recorded in `viewer/verification-report.md`.
+backlog. Dated results and environment-specific limitations are recorded in
+`viewer/verification-report.md` and integration deployment records. Their counts
+and unavailable rows describe the named run, not every later build.
