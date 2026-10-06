@@ -201,6 +201,11 @@ Pinned toolchain: Flutter 3.44.1 stable with Dart 3.12.1 on Windows x64
 (`viewer/pubspec.lock` is committed). The Windows host that produced the
 current evidence also runs Rust 1.98.1.
 
+The committed screenshot fixtures use Windows Segoe UI fonts and the Warsaw
+timezone (`Central European Standard Time`, including its daylight-saving
+rules). Match that reference environment when running golden tests. CI sets
+the zone on its disposable Windows runner; it retains image diffs on failure.
+
 From `viewer/`:
 
 ```text
