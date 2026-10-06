@@ -139,6 +139,12 @@ Keep a private copy of the verified backup outside the container volume and
 record which store is authoritative. The backup includes sensitive task and
 credential data.
 
+Daily production backups are installed at 02:00 NAS local CET/CEST. Each verified
+TGZ contains the catalog, all project databases and manifest. Retention keeps
+today and six previous calendar dates under `/share/Container/tasks-server/backups/`.
+See [daily backup operations](qnap-daily-backups.md) for the cron row, installed
+script, first archive proof, manual execution and restore procedure.
+
 For a real cutover, first stop local writers and take final verified local
 backups. Import only copies selected for migration and check exact history and
 identity against those copies. Start one remote authority, configure clients,

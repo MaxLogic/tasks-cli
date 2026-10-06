@@ -528,6 +528,9 @@ read-only, with private local/remote backups and rollback binaries retained. Fin
 backup includes the cutover note (9,695 events) and both installations' mutation
 receipts. See deployment-2026-10-06.md for paths, hashes and exact proof.
 
-TSK-027 remains to-verify behind TSK-026 packaged NVDA acceptance. Recurring backup
-cadence/retention is a separate follow-up. The updated viewer is ready to reopen
-when the workstation is available; no foreground/NVDA proof is claimed.
+TSK-027 remains to-verify behind TSK-026 packaged NVDA acceptance. Daily 02:00 NAS
+snapshots with seven calendar days of timestamped TGZ archives are installed and
+the first 56-database archive verified; see qnap-daily-backups.md. The named old
+cutover snapshot directory was deleted after verification. The updated viewer
+is ready to reopen when the workstation is available; no foreground/NVDA proof
+is claimed.

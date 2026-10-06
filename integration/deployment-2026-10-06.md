@@ -97,11 +97,13 @@ ACLs (`local-projects-acl.txt`), old Windows/viewer binaries/settings, import an
 server snapshots. Old native WSL CLI is also retained as
 `~/.local/share/tasks-cli/tasks-pre-cutover-20261006`.
 
-Final NAS backup:
+Cutover NAS backup (deleted later on 2026-10-06 after a fresh daily archive was
+verified):
 `/share/Container/tasks-server/backups/cutover-final-20261006-2fc1fa50ef924b84b23571cce16ab7ef`.
 Off-NAS copy: the workstation root's `final-server-snapshot/`; its manifest verifies
 all 56 standalone databases, including catalog, public credentials, nonces and receipts.
-Both backup trees contain private task data. Originals are retained, not deleted.
+The off-NAS backup and local originals remain retained. Published daily archives
+now replace the named NAS cutover directory; see qnap-daily-backups.md.
 
 After remote mutations, recovery starts by stopping writers and taking a current
 verified server backup. Restore it to a new private NAS directory, verify identity,
@@ -110,7 +112,8 @@ old local store: it omits remote history. Remove the local write seal only durin
 explicit recovery that first stops the remote authority. Restore saved project ACLs
 relative to the original store root, and retain an owner-only client directory.
 
-Recurring backup schedule/retention remains a separate operational follow-up; this
-cutover created and verified off-NAS snapshots, not an unattended backup service.
+Later on 2026-10-06, the user authorized and received daily 02:00 NAS snapshots,
+timestamped TGZ archives and seven-calendar-day retention. The first archive was
+verified before removing the named cutover directory. See qnap-daily-backups.md.
 TSK-027 remains to-verify behind TSK-026's packaged NVDA gate. Renewal, full NAS reboot
 and an offsite-machine run remain unobserved. No push was performed.
