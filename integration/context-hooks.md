@@ -1,18 +1,20 @@
 # Optional invocation context hooks
 
-Candidate implementation for TSK-022. No global CLI or harness settings have
-been changed. Generate a preview with the candidate:
+Optional context collection is implemented. The CLI collects available OS and
+session context without hooks; adapters add only metadata actually supplied by
+the harness. The helper previews configuration and never installs hooks or
+changes harness settings. Generate a preview with your installed CLI:
 
 ```powershell
-target/server-candidate/debug/tasks.exe context-setup --harness codex
-target/server-candidate/debug/tasks.exe context-setup --harness claude-code
+tasks context-setup --harness codex
+tasks context-setup --harness claude-code
 ```
 
 `preview_only` and `harness` are explanatory fields. Merge only the `hooks`
 object into an isolated harness configuration for verification. Replace the
-preview's `tasks` command with the absolute candidate executable path; quote
-paths containing spaces using that harness's command shell. Do not point hooks
-at the installed CLI until that version is explicitly installed. Review existing
+preview's `tasks` command with the absolute executable path; quote
+paths containing spaces using that harness's command shell. Verify the selected
+CLI supports the adapter before installing a hook. Review existing
 hooks before merging. The helper never edits settings.
 
 ## Adapter behavior
@@ -66,7 +68,7 @@ The exported session alone does not establish a concurrent agent's model.
 Viewer mutations clear inherited AI session/model metadata. WSL delegation
 forwards a bounded typed context envelope to the Windows binary so the original
 Linux observation is preserved. None of this local context is authenticated;
-the future server replaces actor/installation identity from the credential.
+the server replaces actor/installation identity from the credential.
 
 ## Actual isolated harness acceptance, 2026-10-04
 
