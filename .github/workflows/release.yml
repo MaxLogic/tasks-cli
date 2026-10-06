@@ -97,6 +97,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify and build isolated viewer bundle
         run: |
+          # Golden fixtures render local timestamps in the maintainer's Warsaw zone.
+          Set-TimeZone -Id 'Central European Standard Time'
+          Get-TimeZone
           pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git diff --exit-code -- viewer/pubspec.lock
@@ -113,6 +116,12 @@ jobs:
         with:
           name: viewer-verification
           path: viewer/target/evidence/viewer/public-release/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: viewer-golden-failures
+          path: viewer/test/golden/failures/
           if-no-files-found: warn
 
   publish:

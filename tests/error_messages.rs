@@ -230,8 +230,10 @@ fn invalid_scan_root_names_the_flag_the_path_and_the_expectation() {
     assert_eq!(error_code(&output), "invalid_path");
     let message = error_message(&output);
     assert!(message.contains("--scan-root"), "{message}");
+    // Windows may resolve a differently cased or 8.3 temp path before reporting it.
+    let resolved_file = file.canonicalize().expect("resolved scan file");
     assert!(
-        message.contains(file.to_str().expect("UTF-8 file")),
+        message.contains(resolved_file.to_str().expect("UTF-8 file")),
         "{message}"
     );
     assert!(message.contains("not a directory"), "{message}");

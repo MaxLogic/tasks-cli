@@ -33,6 +33,10 @@ its matching CLI. `viewer/tool/package.ps1` checks clip hashes and runs packaged
 startup/argument checks; `verify-windows.ps1` adds real-store widget and UIA checks.
 CI does not prove audible playback or NVDA speech on a user's machine.
 
+The screenshot fixtures use installed Segoe UI fonts and local timestamps in
+the Warsaw timezone. CI sets the Windows reference zone before verification
+and retains image diffs on failure; it does not relax pixel comparisons.
+
 For local packaging, build into an isolated target, set `TASKS_BUILD_COMMIT`
 to the source commit, and invoke `release/package.py --help`. Do not replace
 the maintainer's installed default release target or viewer bundle. Pass
