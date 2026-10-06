@@ -66,6 +66,9 @@ param(
 
     [string]$PackageOutputRoot,
 
+    [ValidateSet('windows-11', 'windows-server-2022')]
+    [string]$GoldenBaseline = 'windows-11',
+
     [string]$UiaProbeToolPath,
 
     [int]$FixtureSeed = 20260922,
@@ -974,6 +977,9 @@ function Invoke-VerifyWindows {
 
         [string]$PackageOutputRoot,
 
+        [ValidateSet('windows-11', 'windows-server-2022')]
+        [string]$GoldenBaseline = 'windows-11',
+
         [string]$UiaProbeToolPath,
 
         [int]$FixtureSeed = 20260922,
@@ -1147,12 +1153,13 @@ function Invoke-VerifyWindows {
             -Command 'flutter pub get; flutter analyze --no-pub --fatal-infos' -Log $analyzeLog
 
         $fixtureDefine = "TASKS_VIEWER_E2E_FIXTURE=$($fixture.ManifestPath)"
+        $goldenDefine = "TASKS_VIEWER_GOLDEN_BASELINE=$GoldenBaseline"
         Write-VerifyMessage -Message 'verify: flutter test (full suite against the shipped CLI)'
         $fullResult = Invoke-FlutterCommand -Launcher $launcher `
-            -Arguments @('test', '--reporter', 'expanded', "--dart-define=$fixtureDefine", "--dart-define=$cliDefine") `
+            -Arguments @('test', '--reporter', 'expanded', "--dart-define=$fixtureDefine", "--dart-define=$cliDefine", "--dart-define=$goldenDefine") `
             -WorkingDirectory $viewerFull -TimeoutSeconds $GateTimeoutSeconds
         $fullLog = Write-GateLog -EvidenceRoot $evidence -Name '05-flutter-test-full.txt' `
-            -Text (Format-GateLog -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Result $fullResult)
+            -Text (Format-GateLog -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine" -Result $fullResult)
         $fullCounts = Get-FlutterTestCount -Text ($fullResult.StdOut + "`n" + $fullResult.StdErr)
         if ($fullResult.TimedOut) {
             throw "The full Flutter suite did not finish within $GateTimeoutSeconds s; see $fullLog"
@@ -1187,8 +1194,8 @@ function Invoke-VerifyWindows {
             throw "The full Flutter suite skipped $($fullCounts.Skipped) cases and only the documented test-hooks skip, plus the console-window skip when this run has no interactive console, is accepted here (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
         }
         Add-VerifyGate -Gates $gates -Id 'G05' -Name 'flutter test (full suite)' -Status 'passed' `
-            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine" -Log $fullLog `
-            -Detail "$fullDetail; console_window_proof: $consoleWindowProof"
+            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine" -Log $fullLog `
+            -Detail "$fullDetail; golden_baseline: $GoldenBaseline; console_window_proof: $consoleWindowProof"
 
         Write-VerifyMessage -Message "verify: $hookBuildCommand"
         $hookBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $hookBuildArgs `
@@ -1600,7 +1607,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         $toolResult = Invoke-VerifyWindows -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
             -EvidenceRoot $EvidenceRoot -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
-            -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath -PackageOutputRoot $PackageOutputRoot `
+            -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath -PackageOutputRoot $PackageOutputRoot -GoldenBaseline $GoldenBaseline `
             -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds `
             -FixtureSeed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
             -FixtureCommandTimeoutSeconds $FixtureCommandTimeoutSeconds -GateTimeoutSeconds $GateTimeoutSeconds `

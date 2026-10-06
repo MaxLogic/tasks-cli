@@ -203,8 +203,11 @@ current evidence also runs Rust 1.98.1.
 
 The committed screenshot fixtures use Windows Segoe UI fonts and the Warsaw
 timezone (`Central European Standard Time`, including its daylight-saving
-rules). Match that reference environment when running golden tests. CI sets
-the zone on its disposable Windows runner; it retains image diffs on failure.
+rules). Windows 11 is the default baseline. CI selects the reviewed Server 2022
+references with `-GoldenBaseline windows-server-2022` in the verifier and sets
+the zone on its disposable runner. Direct Flutter tests select that baseline
+with `--dart-define=TASKS_VIEWER_GOLDEN_BASELINE=windows-server-2022`.
+Both sets use exact pixel comparison; failures retain image diffs.
 
 From `viewer/`:
 

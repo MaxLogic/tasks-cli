@@ -34,6 +34,11 @@ const List<String> _segoeFiles = <String>[
 /// Fixed wall clock: 21 September 2026 16:13 UTC.
 const int _fixedNowMs = 1790007180000;
 
+const String _goldenBaseline = String.fromEnvironment(
+  'TASKS_VIEWER_GOLDEN_BASELINE',
+  defaultValue: 'windows-11',
+);
+
 bool get _hostHasFonts =>
     Platform.isWindows && _segoeFiles.every((path) => File(path).existsSync());
 
@@ -314,6 +319,11 @@ FakeWorkspaceReads _reads(_Scene scene) {
 }
 
 void main() {
+  final goldenDirectory = switch (_goldenBaseline) {
+    'windows-11' => 'goldens',
+    'windows-server-2022' => 'goldens/windows-server-2022',
+    _ => throw ArgumentError('Unknown golden baseline: $_goldenBaseline'),
+  };
   final skip = !_hostHasFonts;
 
   setUpAll(() async {
@@ -435,7 +445,7 @@ void main() {
             }
             await expectLater(
               find.byType(TasksViewerApp),
-              matchesGoldenFile('goldens/$name.png'),
+              matchesGoldenFile('$goldenDirectory/$name.png'),
             );
           },
           skip: skip,
