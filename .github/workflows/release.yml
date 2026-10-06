@@ -88,6 +88,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git clone --depth 1 --branch 3.44.1 https://github.com/flutter/flutter.git "$env:RUNNER_TEMP/flutter"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/flutter/bin/flutter.bat" --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/flutter/bin/flutter.bat" precache --windows
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "$env:RUNNER_TEMP/flutter/bin" >> $env:GITHUB_PATH
           choco install ffmpeg --no-progress -y
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
