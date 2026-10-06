@@ -1366,8 +1366,10 @@ function Invoke-VerifyWindows {
             '-ExpectedOpenCount', [string]$uiaFixture.AlphaOpen,
             '-ExpectedTotalCount', [string]$uiaFixture.AlphaTotal,
             '-TimeoutSeconds', [string]$UiaTimeoutSeconds)
+        # The probe can make two bounded attempts for its documented bare-FLUTTERVIEW
+        # startup failure. Allow both, plus process startup and cleanup time.
         $uiaResult = Invoke-CapturedProcess -FilePath $uiaCommand -Arguments $uiaArguments `
-            -WorkingDirectory $viewerFull -TimeoutSeconds ($UiaTimeoutSeconds + 15)
+            -WorkingDirectory $viewerFull -TimeoutSeconds (2 * $UiaTimeoutSeconds + 15)
         $uiaLog = Write-GateLog -EvidenceRoot $evidence -Name '12-release-uia.txt' `
             -Text (Format-GateLog -Command 'pwsh -NoProfile -File viewer/tool/verify-release-uia.ps1 (packaged release)' -Result $uiaResult)
         if ($uiaResult.TimedOut -or $uiaResult.ExitCode -ne 0) {

@@ -509,12 +509,16 @@ function Invoke-ReleaseUiaProbe {
         TimeoutSeconds = $TimeoutSeconds
     }
 
+    [Console]::Error.WriteLine("UIA attempt 1 starting; timeout ${TimeoutSeconds}s; session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId).")
     $first = & $AttemptFunction @attemptArgs
+    [Console]::Error.WriteLine("UIA attempt 1 finished: ok=$($first.Ok), nodes=$($first.NodeCount), elapsed=$($first.ElapsedSeconds)s, reason=$($first.Reason)")
     $attempt = $first
     $retried = $false
     if (-not $first.Ok -and $first.TimedOut -and (Test-ReleaseUiaBareFlutterViewSnapshot -Nodes $first.Nodes)) {
         $retried = $true
+        [Console]::Error.WriteLine('UIA attempt 2 starting after the bare-FLUTTERVIEW startup signature.')
         $attempt = & $AttemptFunction @attemptArgs
+        [Console]::Error.WriteLine("UIA attempt 2 finished: ok=$($attempt.Ok), nodes=$($attempt.NodeCount), elapsed=$($attempt.ElapsedSeconds)s, reason=$($attempt.Reason)")
     }
 
     if ($attempt.Ok) {
