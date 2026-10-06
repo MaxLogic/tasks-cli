@@ -64,6 +64,8 @@ param(
 
     [string]$PackageToolPath,
 
+    [string]$PackageOutputRoot,
+
     [string]$UiaProbeToolPath,
 
     [int]$FixtureSeed = 20260922,
@@ -970,6 +972,8 @@ function Invoke-VerifyWindows {
 
         [string]$PackageToolPath,
 
+        [string]$PackageOutputRoot,
+
         [string]$UiaProbeToolPath,
 
         [int]$FixtureSeed = 20260922,
@@ -1285,7 +1289,7 @@ function Invoke-VerifyWindows {
         if ($null -eq (Get-Command -Name 'Invoke-PackageTool' -ErrorAction SilentlyContinue)) {
             throw "The packaging tool '$PackageToolPath' does not define Invoke-PackageTool."
         }
-        $packageResult = Invoke-PackageTool -ViewerRoot $viewerFull -RepositoryRoot $repositoryFull `
+        $packageResult = Invoke-PackageTool -ViewerRoot $viewerFull -RepositoryRoot $repositoryFull -OutputRoot $PackageOutputRoot `
             -CliExecutable $packageCliExecutable -EvidenceRoot $evidence -WorkingRoot $packageWorkingRoot
         $packageHash = Assert-BundleHash -BundleRoot $packageResult.OutputRoot
         $packageFindings = @($packageResult.Findings)
@@ -1596,7 +1600,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         $toolResult = Invoke-VerifyWindows -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
             -EvidenceRoot $EvidenceRoot -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
-            -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath `
+            -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath -PackageOutputRoot $PackageOutputRoot `
             -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds `
             -FixtureSeed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
             -FixtureCommandTimeoutSeconds $FixtureCommandTimeoutSeconds -GateTimeoutSeconds $GateTimeoutSeconds `

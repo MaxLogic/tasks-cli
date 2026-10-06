@@ -54,25 +54,27 @@ The CLI targets Windows x64 and Linux x64. Native Linux verification uses Ubuntu
 in WSL, with Linux-owned storage. The viewer targets Windows 11 x64. macOS has
 not been built or tested; there is currently no macOS machine available.
 
-Public binary downloads are not available yet. See [installation](installation.md)
-for source builds, PATH setup and a first-run example. A local CLI needs no Rust,
+[Download portable packages](https://github.com/MaxLogic/tasks-cli/releases/latest)
+for the Windows CLI, Linux CLI or Windows viewer. See [installation](installation.md)
+for checksum checks, PATH setup, source builds and a first-run example. A local CLI needs no Rust,
 Python, Node.js or separately installed SQLite at runtime. The viewer bundle
 includes its Flutter runtime and matching CLI.
 
 The project source is licensed under [MIT](LICENSE). Dependencies and bundled
 audio retain their own terms; audio provenance is recorded in the viewer assets.
 
-## Repository status
+## Source and releases
 
-Checked on 2026-10-06 with Git and the authenticated GitHub CLI (`gh`): this
-checkout has no configured Git remotes, and `main` has no tracking upstream.
-No `tasks-cli` repository was found among the repositories visible to `gh`
-under `MaxLogic` or its organization `statuspro-mmt`. There is currently no
-verified GitHub upstream or clone URL for this project.
+The public repository is [MaxLogic/tasks-cli](https://github.com/MaxLogic/tasks-cli).
 
-To check again, run `git remote -v`, `git branch -vv`, and
-`gh repo list MaxLogic --limit 1000`. Once a remote is configured,
-`gh repo view --json nameWithOwner,url` reports the linked GitHub repository.
+```text
+git clone https://github.com/MaxLogic/tasks-cli.git
+```
+
+Native CI checks Windows and Ubuntu builds and prepares portable archives.
+Version tags publish all three packages and SHA-256 checksums after the build
+jobs pass. See [release maintenance](release/README.md) for the workflow and
+its verification scope.
 
 ## Sixty-second tour
 
