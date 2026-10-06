@@ -116,6 +116,7 @@ Global bindings:
 | `F10` | Hotkey help |
 | `Ctrl+F` | Focus the text filter of the focused Projects/Tasks region, otherwise the last focused list |
 | `Ctrl+H` | Find in body (literal text, Next/Previous, match count) |
+| `Ctrl+C` | In the task body reader: copy selected text, or the full body when nothing is selected; preserve stored line endings |
 | `Ctrl+D` | Mark the selected task done, using the dirty-draft guard when needed |
 | `Ctrl+E` | Enrich the clipboard, only while the Projects list itself has focus |
 | `Ctrl+V` | While the Projects or Tasks list itself has focus: replace that list's search with the trimmed clipboard text and apply it; focus stays in the list |
@@ -129,6 +130,11 @@ keep the focused control's normal behaviour (a search field pastes as usual). Ev
 AltGr combinations; F1/F2/F3, F4, F5, F6, F10, Ctrl+S, Ctrl+H and Ctrl+, keep
 their documented meaning while a text field has focus. Press F10 for the full
 scoped list, including the per-region `Alt` access keys.
+
+In the Tasks search field, a number such as `123` searches for that exact ticket
+using the selected project's prefix (`T-123` or `KEY-123`). Leading zeros and
+surrounding spaces are accepted. Other input searches titles and bodies as before.
+The current scope and filters still apply.
 
 ## Announcements
 
