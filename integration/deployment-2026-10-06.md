@@ -117,3 +117,37 @@ timestamped TGZ archives and seven-calendar-day retention. The first archive was
 verified before removing the named cutover directory. See qnap-daily-backups.md.
 TSK-027 remains to-verify behind TSK-026's packaged NVDA gate. Renewal, full NAS reboot
 and an offsite-machine run remain unobserved. No push was performed.
+
+## Viewer numeric search and body copy update
+
+Installed the Windows viewer from source commit
+`290307e3738dbf2f99228624bfcf0c6ae777a5b8` at 19:02 Europe/Warsaw.
+Numeric Tasks search input now submits an exact canonical ticket ID for the
+selected project, with leading zeros and surrounding spaces accepted. Scope
+and filters still apply. F3 focuses the read-only body; Ctrl+C copies the full
+stored body when nothing is selected, or the selected stored range otherwise.
+Both routes preserve stored line endings. The F3 help describes this behavior.
+
+Verification: the three new regression cases failed before implementation;
+the focused suites then passed 58 tests, and the Tasks, Details and selected
+shell regression suites passed 151 tests. Flutter analysis reported no issues.
+The final Windows release build passed. Packaging verified 40 files and
+20 announcement clips, including four successful launch checks.
+Clipboard assertions used a mocked platform channel. No live keyboard or
+screen-reader acceptance is claimed for this update.
+
+The previous viewer (PID 3648) closed gracefully. The repackaged viewer restarted
+with the same startup, settings-root, data-root and tasks-exe arguments; PID
+63000 had a Tasks Viewer window and reported Responding=true. Settings and user
+data were preserved. The bundled CLI hash matches the prior bundle; this update
+changed only viewer source and documentation.
+
+Viewer SHA-256:
+`603B3B7E1EDE6BB0B9A481C27E7AD1E8664D22FAFD511770AD2527920590F441`.
+Evidence: `viewer/target/evidence/viewer/search-copy-20261006-185628/`, including
+`red-behavior.log`, `green.log`, `regression.log`, `analyze.log`,
+`build-final.log`, `package.log`, `package/`, and both process snapshots.
+The prior bundle is retained there under `previous-bundle/`. Bundle metadata
+records the source commit above and source_dirty=true because unrelated
+untracked files were already present; they were preserved and excluded from
+the implementation commit.
