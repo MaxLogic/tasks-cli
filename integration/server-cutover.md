@@ -21,3 +21,20 @@ For rehearsal, use only synthetic or copied project databases. Compare selected 
 At real cutover, stop all local writers, take the final verified local project backups, import copies, take and verify a complete server backup, then configure remote clients. Before server writes, rollback may restore the old client profile. After server writes, quiesce the server and take its current verified backup before choosing an authority; reverting directly to an older local snapshot would lose those writes. Never keep the same project UUID writable in local and remote stores.
 
 Container packaging, QNAP runtime checks, Caddy/Cloudflare TLS routes, LAN backend isolation and NAS smoke proof remain separate deployment gates in spec.md.
+
+## Completed production cutover
+
+The user authorized QNAP cutover of all 55 projects and Windows/native WSL installs
+on 2026-10-06. See [deployment-2026-10-06.md](deployment-2026-10-06.md) for current
+authority, verified local/server snapshots, write sealing and recovery.
+
+The bounded helpers `cutover_snapshot.py` (Windows), `cutover_nas.py` (WSL) and
+`cutover_verify.py` (Windows) document that exact migration. They refuse already
+configured/nonempty authorities; do not rerun them against today's live server.
+Schema 6 migration runs only on copies. Before importing a closed copy on a
+read-only mount, checkpoint it and change only that copy to DELETE journal mode.
+Verify source rows against the locked original snapshot, then imported rows and
+complete catalog/credential identities against the stopped-server snapshot.
+A random release token binds writer release to its fresh state directory; invalid
+signals keep waiting. Seal old local writes before releasing source locks or
+starting the imported authority. No raw main-file copy of a live database is used.

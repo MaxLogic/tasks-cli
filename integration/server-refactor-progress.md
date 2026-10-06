@@ -515,3 +515,19 @@ TSK-027's actual deployment criteria pass. It remains to-verify while its
 TSK-026 prerequisite awaits the packaged NVDA walkthrough. Certificate renewal,
 full NAS reboot and offsite machine checks are explicitly unobserved. Evidence:
 target/evidence/nas-deploy-20261005/deployment-proof.json and final-regression.json.
+
+## Authorized live cutover, 2026-10-06
+
+All 55 live backlogs were imported into the permanent QNAP authority with 6,297 tasks,
+9,694 preserved historical events and 2 archived projects. The full stopped-server
+snapshot matched every locked-source legacy row and upgraded metadata/catalog row
+before restart. Default Windows/native WSL CLIs are installed and configured for
+signed HTTPS, and the viewer bundle contains the matching CLI. Both installed CLIs
+read all 55 projects; LAN and public catalogs pass. Original local stores remain
+read-only, with private local/remote backups and rollback binaries retained. Final
+backup includes the cutover note (9,695 events) and both installations' mutation
+receipts. See deployment-2026-10-06.md for paths, hashes and exact proof.
+
+TSK-027 remains to-verify behind TSK-026 packaged NVDA acceptance. Recurring backup
+cadence/retention is a separate follow-up. The updated viewer is ready to reopen
+when the workstation is available; no foreground/NVDA proof is claimed.

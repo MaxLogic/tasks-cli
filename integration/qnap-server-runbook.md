@@ -148,8 +148,9 @@ write, stop the server and take its current verified backup before selecting
 the authority for recovery; an older local snapshot omits the remote writes.
 Never run local and remote writable authorities for the same project UUID.
 Actual NAS deployment, physical LAN isolation and DNS/TLS provisioning passed
-on 2026-10-05. Packaged viewer/NVDA acceptance and any selected live migration
-remain separate gates. Installed workstation binaries were not replaced.
+on 2026-10-05. Migration of all 55 projects and Windows/native WSL installations
+passed on 2026-10-06; see deployment-2026-10-06.md. The old local stores remain read-only.
+Packaged viewer/NVDA acceptance remains a separate gate.
 
 References: [Docker multistage builds](https://docs.docker.com/build/building/multi-stage/),
 [Compose service keys](https://docs.docker.com/reference/compose-file/services/),
