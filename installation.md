@@ -137,8 +137,9 @@ provide an offline write queue.
 
 The [native release workflow](release/README.md) runs the CLI gates on Windows
 and Ubuntu, verifies the Windows viewer, and smoke-tests each archive after
-extraction with a temporary store. Successful version tags publish archives
-and SHA-256 checksums through GitHub Releases. Workflow artifacts from branch
+extraction with a temporary store. Successful version tags prepare draft archives
+and SHA-256 checksums. The maintainer verifies the downloaded Windows viewer's
+native accessibility tree before publishing through GitHub Releases. Workflow artifacts from branch
 builds are for evaluation; use Release assets for public downloads.
 
 Hosted tests do not replace a clean-machine trial or live NVDA/audio checks.

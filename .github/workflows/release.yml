@@ -101,7 +101,8 @@ jobs:
           # Golden fixtures render local timestamps in the maintainer's Warsaw zone.
           Set-TimeZone -Id 'Central European Standard Time'
           Get-TimeZone
-          pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -GoldenBaseline windows-server-2022 -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
+          # Hosted Server 2022 returns bare FLUTTERVIEW; desktop proof runs on Windows 11 before publication.
+          pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -GoldenBaseline windows-server-2022 -SkipReleaseUia -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git diff --exit-code
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -132,7 +133,7 @@ jobs:
           if-no-files-found: warn
 
   publish:
-    name: Publish tagged release
+    name: Prepare draft release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [cli, viewer]
     runs-on: ubuntu-22.04
@@ -164,7 +165,7 @@ jobs:
           PY
           cd target/dist
           sha256sum --check SHA256SUMS.txt
-      - name: Publish complete release
+      - name: Upload complete draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -172,4 +173,3 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" --verify-tag --draft --title "tasks-cli $RELEASE_TAG" --notes-file release/notes.md
           gh release upload "$RELEASE_TAG" target/dist/*
-          gh release edit "$RELEASE_TAG" --draft=false --latest

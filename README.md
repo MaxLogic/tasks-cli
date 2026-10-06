@@ -72,8 +72,9 @@ git clone https://github.com/MaxLogic/tasks-cli.git
 ```
 
 Native CI checks Windows and Ubuntu builds and prepares portable archives.
-Version tags publish all three packages and SHA-256 checksums after the build
-jobs pass. See [release maintenance](release/README.md) for the workflow and
+Version tags prepare all three packages and SHA-256 checksums in a draft after
+the build jobs pass. Publication follows the Windows 11 candidate check.
+See [release maintenance](release/README.md) for the workflow and
 its verification scope.
 
 ## Sixty-second tour
