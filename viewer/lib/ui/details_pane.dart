@@ -1727,13 +1727,13 @@ class _CopyStoredBodyIntent extends Intent {
   const _CopyStoredBodyIntent();
 }
 
-/// Copies the stored body text behind the body selection.
+/// Copies the selected stored body text, or the whole body without a selection.
 ///
 /// The reader lays out [ViewerBodyText.display], whose carriage returns are
 /// gone; a copy must still hand over the store's own characters, CRLF included
 /// (viewer/spec.md section 6 with the root spec's line-ending preservation).
-/// Ctrl+C keeps its ordinary meaning -- copy the current selection -- and every
-/// other text-editing key stays with the control.
+/// With a selection Ctrl+C copies that range; with only a caret it copies the
+/// whole body. Every other text-editing key stays with the control.
 class _StoredBodyCopy extends StatelessWidget {
   const _StoredBodyCopy({
     required this.body,
@@ -1771,13 +1771,9 @@ class _StoredBodyCopy extends StatelessWidget {
 
   void _copySelection() {
     final TextSelection selection = controller.selection;
-    if (!selection.isValid || selection.isCollapsed) {
-      return;
-    }
-    unawaited(
-      Clipboard.setData(
-        ClipboardData(text: body.storedRange(selection.start, selection.end)),
-      ),
-    );
+    final text = !selection.isValid || selection.isCollapsed
+        ? body.stored
+        : body.storedRange(selection.start, selection.end);
+    unawaited(Clipboard.setData(ClipboardData(text: text)));
   }
 }

@@ -307,7 +307,8 @@ final List<CommandSpec> commandRegistry = List<CommandSpec>.unmodifiable(
       description:
           'Reveal Task details and focus the description/body control '
           'directly, including the draft body while editing. F3 never stops '
-          'at a heading or a tab.',
+          'at a heading or a tab. In the read-only body, Ctrl+C copies selected '
+          'text, or the full body when nothing is selected.',
       activators: const <ShortcutActivator>[
         SingleActivator(LogicalKeyboardKey.f3, includeRepeats: false),
       ],

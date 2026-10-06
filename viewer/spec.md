@@ -166,6 +166,11 @@ On invalidation, retain the displayed list as stale, clear cached subsequent pag
 
 The exact layouts and keyboard contract are in design.md. Both lists must be virtual even for small datasets. Use `ListView.builder` or a sliver builder with stable UUID/task-ID keys and correct item indexes. A giant `Column`, eager `DataTable` or one widget per database task is not acceptable.
 
+In the Tasks search field, input consisting only of ASCII digits is an exact
+ticket-number search. Convert it to a canonical task ID for the selected project
+before submitting the query, accepting leading zeros and surrounding spaces.
+Keep the original text in the field and retain all scope and filter settings.
+
 Use 100-row pages, prefetch the next page when within 20 rows of its boundary, and retain at most five task pages plus the selected task detail/draft. Evict least recently used pages that do not contain the focused row. Keep at most five project pages; project aggregates can be recomputed by the CLI. Do not retain every visited row widget or FocusNode. Builder count represents total filtered rows; unloaded positions are placeholders with a loading label, never invented task IDs. Announce the actual row only after it is materialized.
 
 Arrow keys, Page Up/Down and Home/End operate on logical row indexes across pages. End requests the page containing the last result directly; it must not fetch all intervening pages. Fetch then scroll then focus the target keyed row. While loading, keep focus on the list and announce "Loading row N" only if it takes more than 500 ms. A stale snapshot cancels the pending jump.
@@ -178,7 +183,7 @@ Persist query settings, sort, selected UUID/ID, theme, text size and pane widths
 
 ## 6. Task reading
 
-Show the full title, ID, canonical status, priority, labels, timestamps and version. Render body Markdown as selectable plain source text in v1; preserve all whitespace and content, allow keyboard selection and copy, and provide Find in body. Do not execute embedded HTML or open URLs automatically. Full text must be available to NVDA line/word/character navigation, including a 1 MiB body. Do not merge an entire body into a single unstructured announcement.
+Show the full title, ID, canonical status, priority, labels, timestamps and version. Render body Markdown as selectable plain source text in v1; preserve all whitespace and content, allow keyboard selection and copy, and provide Find in body. In the read-only body control, Ctrl+C copies the selected stored text or the complete stored body when there is no selection, preserving line endings. Do not execute embedded HTML or open URLs automatically. Full text must be available to NVDA line/word/character navigation, including a 1 MiB body. Do not merge an entire body into a single unstructured announcement.
 
 Dependencies show ID, title, status and whether they prevent readiness, using `dependency_summaries`. Activating one opens its detail in the same project with Back restoring the previous ID, filter and focus, using the dirty-draft guard. Show all dependencies via a virtual list if necessary. Do not discard dependencies merely because their status is terminal.
 

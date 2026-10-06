@@ -671,6 +671,43 @@ void main() {
       expect(harness.focusedDebugLabel, 'details description');
     });
 
+    testWidgets(
+      'F3 then Ctrl+C copies the complete stored body without a selection',
+      (WidgetTester tester) async {
+        final copies = <String>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (MethodCall call) async {
+            if (call.method == 'Clipboard.setData') {
+              copies.add(
+                (call.arguments as Map<Object?, Object?>)['text']! as String,
+              );
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final harness = await pumpTaskDetails(tester, reads: crlfReads());
+        await pressKey(tester, LogicalKeyboardKey.f3);
+        expect(harness.focusedDebugLabel, 'details description');
+        expect(bodyField(tester).controller!.selection.isCollapsed, isTrue);
+        await pressControl(tester, LogicalKeyboardKey.keyC);
+        expect(copies, <String>[crlfBody]);
+
+        bodyField(tester).controller!.selection = const TextSelection.collapsed(
+          offset: 10,
+        );
+        await tester.pump();
+        await pressControl(tester, LogicalKeyboardKey.keyC);
+        expect(copies, <String>[crlfBody, crlfBody]);
+      },
+    );
+
     testWidgets('Ctrl+C copies the selection with the stored line endings', (
       WidgetTester tester,
     ) async {

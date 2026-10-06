@@ -176,6 +176,48 @@ void main() {
   );
 
   group('parameters', () {
+    for (final key in <String?>[null, 'ABC']) {
+      test('numeric search uses the project ticket ID with key $key', () async {
+        final reader = FakeTaskReader(
+          (projectId, query) async => TaskPage(
+            protocolVersion: 1,
+            projectKey: key,
+            items: const <TaskItem>[],
+            totalCount: 0,
+            offset: query.offset,
+            limit: query.limit,
+            hasMore: false,
+            nextOffset: null,
+            snapshot: 'token',
+          ),
+        );
+        final controller = buildTaskController(reader);
+        addTearDown(controller.dispose);
+        await controller.reload();
+
+        for (final input in <String>['123', '  00123  ', '7']) {
+          controller.setQuery(input);
+          await controller.submitQuery();
+          expect(
+            reader.lastRequest.query,
+            viewerCanonicalTaskId(int.parse(input.trim()), key),
+          );
+          expect(controller.query, input);
+        }
+
+        for (final input in <String>[
+          'release 123',
+          '12.3',
+          'ABC-123',
+          'T-123',
+        ]) {
+          controller.setQuery(input);
+          await controller.submitQuery();
+          expect(reader.lastRequest.query, input);
+        }
+      });
+    }
+
     test(
       'the first load uses open scope, priority ascending and one page',
       () async {

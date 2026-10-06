@@ -216,7 +216,7 @@ class TaskController extends ChangeNotifier {
   }
 
   TaskQuery buildQuery({required int offset}) => TaskQuery(
-    query: _query.trim(),
+    query: _searchQuery(),
     scope: _scope,
     statuses: _statuses.toList()..sort(),
     priorities: _priorities.toList()..sort(),
@@ -230,6 +230,17 @@ class TaskController extends ChangeNotifier {
     // page so a changed list becomes visible as stale_snapshot.
     snapshot: offset == 0 ? null : _snapshot,
   );
+
+  String _searchQuery() {
+    final text = _query.trim();
+    if (RegExp(r'^[0-9]+$').hasMatch(text)) {
+      final id = int.tryParse(text);
+      if (id != null) {
+        return viewerCanonicalTaskId(id, _projectKey);
+      }
+    }
+    return text;
+  }
 
   // -------------------------------------------------------------- controls
 
