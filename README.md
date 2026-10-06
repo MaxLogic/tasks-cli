@@ -20,6 +20,18 @@ publishes without overwriting a competing file.
 The bundled engine is SQLite 3.53.2 through rusqlite 0.40.2. This is the engine
 in the current crate, not a claim to bundle the latest upstream SQLite patch.
 
+## Repository status
+
+Checked on 2026-10-06 with Git and the authenticated GitHub CLI (`gh`): this
+checkout has no configured Git remotes, and `main` has no tracking upstream.
+No `tasks-cli` repository was found among the repositories visible to `gh`
+under `MaxLogic` or its organization `statuspro-mmt`. There is currently no
+verified GitHub upstream or clone URL for this project.
+
+To check again, run `git remote -v`, `git branch -vv`, and
+`gh repo list MaxLogic --limit 1000`. Once a remote is configured,
+`gh repo view --json nameWithOwner,url` reports the linked GitHub repository.
+
 ## Sixty-second tour
 
 ```text
