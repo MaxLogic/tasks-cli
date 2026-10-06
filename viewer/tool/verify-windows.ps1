@@ -83,6 +83,10 @@ param(
 
     [int]$UiaTimeoutSeconds = 45,
 
+    # Hosted Server 2022 cannot expose the Flutter accessibility tree reliably.
+    # This records G11 as unavailable; Windows 11 release proof is still required.
+    [switch]$SkipReleaseUia,
+
     [switch]$KeepFixtureRoot,
 
     [switch]$IncludeWindowedIntegration
@@ -994,6 +998,8 @@ function Invoke-VerifyWindows {
 
         [int]$UiaTimeoutSeconds = 45,
 
+        [switch]$SkipReleaseUia,
+
         [switch]$KeepFixtureRoot,
 
         [switch]$IncludeWindowedIntegration
@@ -1345,54 +1351,64 @@ function Invoke-VerifyWindows {
             -Command 'viewer/tool/package.ps1 (with the hash re-check)' -Log $packageLog `
             -Detail "$($packageResult.FileCount) files, $($packageResult.ClipCount) clips, $($packageHash.Checked) hash entries, launch test passed"
 
-        Write-VerifyMessage -Message 'verify: external UI Automation on the packaged Windows release'
-        $uiaFixture = Initialize-ViewerVerifyFixture -FixtureRoot $uiaFixtureResolved `
-            -CliExecutable (Join-Path -Path $packageResult.OutputRoot -ChildPath 'tasks.exe') `
-            -Seed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
-            -CommandTimeoutSeconds $FixtureCommandTimeoutSeconds
-        $fixtureManifest = Get-Content -LiteralPath $uiaFixture.ManifestPath -Raw | ConvertFrom-Json
-        $uiaAlphaProject = $fixtureManifest.projects[0]
-        # The Projects pane row renders ProjectItem.displayName ("name (KEY)"),
-        # per viewer/spec.md section 11 ("Project rows and the selected-project
-        # summary show the key next to the name"); match the same keyed label
-        # here rather than the bare name.
-        $uiaExpectedProjectName = "$($uiaAlphaProject.name) ($($uiaAlphaProject.project_key))"
-        $uiaCommand = (Get-Command -Name 'pwsh' -ErrorAction Stop).Source
-        $uiaArguments = @('-NoProfile', '-File', $UiaProbeToolPath,
-            '-BundleRoot', $packageResult.OutputRoot,
-            '-DataRoot', $uiaFixtureResolved,
-            '-SettingsRoot', $uiaFixture.SettingsRoot,
-            '-ExpectedProjectName', $uiaExpectedProjectName,
-            '-ExpectedOpenCount', [string]$uiaFixture.AlphaOpen,
-            '-ExpectedTotalCount', [string]$uiaFixture.AlphaTotal,
-            '-TimeoutSeconds', [string]$UiaTimeoutSeconds)
-        # The probe can make two bounded attempts for its documented bare-FLUTTERVIEW
-        # startup failure. Allow both, plus process startup and cleanup time.
-        $uiaResult = Invoke-CapturedProcess -FilePath $uiaCommand -Arguments $uiaArguments `
-            -WorkingDirectory $viewerFull -TimeoutSeconds (2 * $UiaTimeoutSeconds + 15)
-        $uiaLog = Write-GateLog -EvidenceRoot $evidence -Name '12-release-uia.txt' `
-            -Text (Format-GateLog -Command 'pwsh -NoProfile -File viewer/tool/verify-release-uia.ps1 (packaged release)' -Result $uiaResult)
-        if ($uiaResult.TimedOut -or $uiaResult.ExitCode -ne 0) {
-            $uiaStatus = 'failed'
-            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
-                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'External UIA probe failed'
-            throw "The packaged release UIA probe failed (exit $($uiaResult.ExitCode)); see $uiaLog"
+        if ($SkipReleaseUia) {
+            $uiaStatus = 'unavailable'
+            $uiaLog = Write-GateLog -EvidenceRoot $evidence -Name '12-release-uia.txt' `
+                -Text 'Not run: -SkipReleaseUia. Verify this packaged candidate on Windows 11 before publishing.'
+            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'unavailable' `
+                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog `
+                -Detail 'Not run; separate Windows 11 candidate proof required before publication'
         }
-        $uiaProof = $uiaResult.StdOut | ConvertFrom-Json
-        $builtAppImage = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release/data/app.so'
-        if (-not $uiaProof.Ok -or -not $uiaProof.SettingsChecks.Ok -or
-            $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
-            $uiaProof.CliSha256 -ne $packageResult.CliExeSha256 -or
-            $uiaProof.AppSha256 -ne (Get-FileSha256 -Path $builtAppImage)) {
-            $uiaStatus = 'failed'
-            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
-                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'Probe result or packaged hashes disagree'
-            throw "The release UIA probe did not verify the packaged candidate hashes and semantics; see $uiaLog"
+        else {
+            Write-VerifyMessage -Message 'verify: external UI Automation on the packaged Windows release'
+            $uiaFixture = Initialize-ViewerVerifyFixture -FixtureRoot $uiaFixtureResolved `
+                -CliExecutable (Join-Path -Path $packageResult.OutputRoot -ChildPath 'tasks.exe') `
+                -Seed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
+                -CommandTimeoutSeconds $FixtureCommandTimeoutSeconds
+            $fixtureManifest = Get-Content -LiteralPath $uiaFixture.ManifestPath -Raw | ConvertFrom-Json
+            $uiaAlphaProject = $fixtureManifest.projects[0]
+            # The Projects pane row renders ProjectItem.displayName ("name (KEY)"),
+            # per viewer/spec.md section 11 ("Project rows and the selected-project
+            # summary show the key next to the name"); match the same keyed label
+            # here rather than the bare name.
+            $uiaExpectedProjectName = "$($uiaAlphaProject.name) ($($uiaAlphaProject.project_key))"
+            $uiaCommand = (Get-Command -Name 'pwsh' -ErrorAction Stop).Source
+            $uiaArguments = @('-NoProfile', '-File', $UiaProbeToolPath,
+                '-BundleRoot', $packageResult.OutputRoot,
+                '-DataRoot', $uiaFixtureResolved,
+                '-SettingsRoot', $uiaFixture.SettingsRoot,
+                '-ExpectedProjectName', $uiaExpectedProjectName,
+                '-ExpectedOpenCount', [string]$uiaFixture.AlphaOpen,
+                '-ExpectedTotalCount', [string]$uiaFixture.AlphaTotal,
+                '-TimeoutSeconds', [string]$UiaTimeoutSeconds)
+            # The probe can make two bounded attempts for its documented bare-FLUTTERVIEW
+            # startup failure. Allow both, plus process startup and cleanup time.
+            $uiaResult = Invoke-CapturedProcess -FilePath $uiaCommand -Arguments $uiaArguments `
+                -WorkingDirectory $viewerFull -TimeoutSeconds (2 * $UiaTimeoutSeconds + 15)
+            $uiaLog = Write-GateLog -EvidenceRoot $evidence -Name '12-release-uia.txt' `
+                -Text (Format-GateLog -Command 'pwsh -NoProfile -File viewer/tool/verify-release-uia.ps1 (packaged release)' -Result $uiaResult)
+            if ($uiaResult.TimedOut -or $uiaResult.ExitCode -ne 0) {
+                $uiaStatus = 'failed'
+                Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
+                    -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'External UIA probe failed'
+                throw "The packaged release UIA probe failed (exit $($uiaResult.ExitCode)); see $uiaLog"
+            }
+            $uiaProof = $uiaResult.StdOut | ConvertFrom-Json
+            $builtAppImage = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release/data/app.so'
+            if (-not $uiaProof.Ok -or -not $uiaProof.SettingsChecks.Ok -or
+                $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
+                $uiaProof.CliSha256 -ne $packageResult.CliExeSha256 -or
+                $uiaProof.AppSha256 -ne (Get-FileSha256 -Path $builtAppImage)) {
+                $uiaStatus = 'failed'
+                Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'failed' `
+                    -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog -Detail 'Probe result or packaged hashes disagree'
+                throw "The release UIA probe did not verify the packaged candidate hashes and semantics; see $uiaLog"
+            }
+            $uiaStatus = 'passed'
+            Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'passed' `
+                -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog `
+                -Detail "$($uiaProof.NodeCount) native $($uiaProof.AccessibilityBackend) nodes; project region and Settings exposed; app.so sha256 $($uiaProof.AppSha256)"
         }
-        $uiaStatus = 'passed'
-        Add-VerifyGate -Gates $gates -Id 'G11' -Name 'packaged release UI Automation' -Status 'passed' `
-            -Command 'viewer/tool/verify-release-uia.ps1' -Log $uiaLog `
-            -Detail "$($uiaProof.NodeCount) native $($uiaProof.AccessibilityBackend) nodes; project region and Settings exposed; app.so sha256 $($uiaProof.AppSha256)"
 
         if ($IncludeWindowedIntegration) {
             Write-VerifyMessage -Message 'verify: windowed integration_test/viewer_test.dart -d windows (this opens a real window)'
@@ -1450,6 +1466,7 @@ function Invoke-VerifyWindows {
         $statusResult = Invoke-CapturedProcess -FilePath 'git' -Arguments @('-C', $repositoryFull, 'status', '--porcelain') `
             -WorkingDirectory $repositoryFull -TimeoutSeconds 120
         $dirty = -not [string]::IsNullOrWhiteSpace($statusResult.StdOut)
+        $null = Write-GateLog -EvidenceRoot $evidence -Name '13-source-status.txt' -Text $statusResult.StdOut
     }
     catch {
         $dirty = $null
@@ -1528,9 +1545,14 @@ function Invoke-VerifyWindows {
     $markdown.Add("uia_fixture_root: $uiaFixtureResolved (G11 seeds its own store with the packaged CLI)")
     $markdown.Add("console_window_proof: $consoleWindowProof (decision 2026-09-29, spec.md section 11)")
     $markdown.Add('')
-    $markdown.Add('Scope: headless Flutter gates plus an external UIA or MSAA check of one packaged-release')
-    $markdown.Add('window and its Settings dialog on a synthetic store. No keyboard or pointer input,')
-    $markdown.Add('NVDA driving or real clipboard access. Native exposure does not prove NVDA speech.')
+    if ($SkipReleaseUia) {
+        $markdown.Add('Scope: build and headless gates only. G11 is unavailable; separate Windows 11 candidate proof is required.')
+    }
+    else {
+        $markdown.Add('Scope: headless Flutter gates plus an external UIA or MSAA check of one packaged-release')
+        $markdown.Add('window and its Settings dialog on a synthetic store. No keyboard or pointer input,')
+        $markdown.Add('NVDA driving or real clipboard access. Native exposure does not prove NVDA speech.')
+    }
     $markdown.Add('')
     $markdown.Add('## Gates')
     $markdown.Add('')
@@ -1610,7 +1632,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $toolResult = Invoke-VerifyWindows -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
             -EvidenceRoot $EvidenceRoot -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
             -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath -PackageOutputRoot $PackageOutputRoot -GoldenBaseline $GoldenBaseline `
-            -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds `
+            -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds -SkipReleaseUia:$SkipReleaseUia `
             -FixtureSeed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `
             -FixtureCommandTimeoutSeconds $FixtureCommandTimeoutSeconds -GateTimeoutSeconds $GateTimeoutSeconds `
             -KeepFixtureRoot:$KeepFixtureRoot -IncludeWindowedIntegration:$IncludeWindowedIntegration

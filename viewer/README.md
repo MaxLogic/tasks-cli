@@ -240,7 +240,11 @@ integration suites, then opens the packaged release against a synthetic store
 to check its external Windows UI Automation tree. The UIA gate sends no
 keyboard or pointer input and fails if the native project region or row is
 missing. `-IncludeWindowedIntegration` separately opts into the Flutter
-windowed test build. `measure.ps1` seeds deterministic
+windowed test build. Hosted Server 2022 builds use `-SkipReleaseUia` and record
+G11 as unavailable because that runtime exposes only a bare `FLUTTERVIEW`.
+Before publication, run `release/verify-viewer.ps1 -BundleRoot <directory>` on
+Windows 11 against the downloaded candidate. See [release maintenance](../release/README.md).
+`measure.ps1` seeds deterministic
 release fixtures with a recorded seed and times the release CLI round trips.
 Each script retains logs under `viewer/target/evidence/viewer/<run-id>/` and
 receives explicit temporary data and settings roots; none of them touch a real
