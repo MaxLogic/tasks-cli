@@ -1439,7 +1439,7 @@ fn matches_project_query(record: &ProjectRecord, query: &ProjectQuery) -> bool {
         return false;
     }
     if !query.query.is_empty() {
-        let needle = query.query.to_ascii_lowercase();
+        let alternatives = query.query.to_ascii_lowercase();
         let key = record
             .stats
             .as_ref()
@@ -1448,7 +1448,13 @@ fn matches_project_query(record: &ProjectRecord, query: &ProjectQuery) -> bool {
             .chain(std::iter::once(record.project_id.as_str()))
             .chain(key)
             .chain(record.roots.iter().map(String::as_str))
-            .any(|haystack| contains_ascii_insensitive(haystack, &needle));
+            .any(|haystack| {
+                alternatives
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|needle| !needle.is_empty())
+                    .any(|needle| contains_ascii_insensitive(haystack, needle))
+            });
         if !matched {
             return false;
         }

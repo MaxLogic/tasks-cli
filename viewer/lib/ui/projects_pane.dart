@@ -273,7 +273,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   onSubmitted: (_) => unawaited(projects.submitQuery()),
                   decoration: const InputDecoration(
                     labelText: 'Search projects (Ctrl+F)',
-                    helperText: 'Search name, path or project ID',
+                    helperText: 'Search name, path or ID; use | for OR',
                     isDense: true,
                     border: OutlineInputBorder(),
                   ),

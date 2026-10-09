@@ -137,6 +137,11 @@ AltGr combinations; F1/F2/F3, F4, F5, F6, F10, Ctrl+S, Ctrl+H and Ctrl+, keep
 their documented meaning while a text field has focus. Press F10 for the full
 scoped list, including the per-region `Alt` access keys.
 
+In the Projects search field, `|` separates alternatives: `delphiai|semantic`
+matches DelphiAiKit and delphi-semantics. Spaces around alternatives and empty
+alternatives are ignored; an input containing only pipes matches nothing.
+The current project-state filter still applies.
+
 In the Tasks search field, a number such as `123` searches for that exact ticket
 using the selected project's prefix (`T-123` or `KEY-123`). Leading zeros and
 surrounding spaces are accepted. Other input searches titles and bodies as before.

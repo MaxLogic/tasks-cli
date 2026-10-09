@@ -1238,6 +1238,33 @@ fn projects_state_filters_follow_the_documented_meaning() {
 }
 
 #[test]
+fn projects_query_matches_pipe_separated_alternatives() {
+    let data_root = tempfile::tempdir().unwrap();
+    let (ai, _) = add_project(data_root.path(), "DelphiAiKit");
+    let (semantics, _) = add_project(data_root.path(), "delphi-semantics");
+    let (other, _) = add_project(data_root.path(), "Other project");
+    let matched = |query: &str| -> Vec<String> {
+        let mut ids =
+            project_ids(&projects(data_root.path(), json!({"query": query, "limit": 200})).data());
+        ids.sort();
+        ids
+    };
+    let mut expected = vec![ai.to_string(), semantics.to_string()];
+    expected.sort();
+    for query in [
+        "delphiai|semantic",
+        " DELPHIAI | semantic ",
+        "|delphiai||semantic|",
+    ] {
+        assert_eq!(matched(query), expected, "query: {query}");
+    }
+    assert_eq!(matched("semantic|semantics"), vec![semantics.to_string()]);
+    assert_eq!(matched("missing|Other project"), vec![other.to_string()]);
+    assert!(matched("missing|absent").is_empty());
+    assert!(matched("||").is_empty());
+}
+
+#[test]
 fn projects_query_matches_literal_characters_and_case() {
     let data_root = tempfile::tempdir().unwrap();
     // Fixed ids (not `Uuid::new_v4()`): the "100" query below must match only

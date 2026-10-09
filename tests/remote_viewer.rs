@@ -256,18 +256,23 @@ fn remote_pages_reject_stale_tokens_and_bound_client_roots_are_searchable() {
     assert_ne!(stale.status.code(), Some(0));
     // Bound roots are canonical; a Windows temp path may use an 8.3 alias.
     let root_query = f.root.path().canonicalize().unwrap();
-    let local = ok(request(
-        &f.clients[0],
-        &["viewer", "projects", "--request-file", "-"],
-        json!({"query":root_query.to_string_lossy(),"state":"all"}),
-    ));
-    assert_eq!(local["data"]["total_count"], 1);
-    let remote = ok(request(
-        &f.clients[1],
-        &["viewer", "projects", "--request-file", "-"],
-        json!({"query":root_query.to_string_lossy(),"state":"all"}),
-    ));
-    assert_eq!(remote["data"]["total_count"], 0);
+    for query in [
+        root_query.to_string_lossy().to_string(),
+        format!("absent-project|{}", root_query.to_string_lossy()),
+    ] {
+        let local = ok(request(
+            &f.clients[0],
+            &["viewer", "projects", "--request-file", "-"],
+            json!({"query":query,"state":"all"}),
+        ));
+        assert_eq!(local["data"]["total_count"], 1);
+        let remote = ok(request(
+            &f.clients[1],
+            &["viewer", "projects", "--request-file", "-"],
+            json!({"query":query,"state":"all"}),
+        ));
+        assert_eq!(remote["data"]["total_count"], 0);
+    }
 }
 
 #[test]

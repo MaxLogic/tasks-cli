@@ -561,9 +561,14 @@ fn execute_viewer(
                 roots
                     .iter()
                     .filter(|(_, paths)| {
-                        paths
-                            .iter()
-                            .any(|path| path.to_ascii_lowercase().contains(&search))
+                        paths.iter().any(|path| {
+                            let path = path.to_ascii_lowercase();
+                            search
+                                .split('|')
+                                .map(str::trim)
+                                .filter(|needle| !needle.is_empty())
+                                .any(|needle| path.contains(needle))
+                        })
                     })
                     .map(|(id, _)| {
                         Uuid::parse_str(id).map_err(|_| {
