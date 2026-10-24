@@ -844,12 +844,11 @@ body
     );
 }
 
-/// The reviewed key list for the live projects (a temp copy; the live stores
-/// are never opened) must hold only valid, unique keys.
+/// The public key-map fixture must hold only valid, unique keys. Keep it
+/// synthetic so clean checkouts do not depend on private project records.
 #[test]
-fn the_reviewed_project_key_list_is_valid_and_unique() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("issues/closed/project-key-task-ids/project-keys.csv");
+fn the_public_project_key_fixture_is_valid_and_unique() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/project-keys.csv");
     let temp = tempfile::tempdir().unwrap();
     let copy = temp.path().join("project-keys.csv");
     fs::copy(&source, &copy).unwrap();

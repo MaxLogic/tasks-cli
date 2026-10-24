@@ -1,0 +1,4 @@
+key,project_name,project_path,project_id
+AL,Example Alpha,/example/alpha,00000000-0000-4000-8000-000000000001
+B2,Example Beta,/example/beta,00000000-0000-4000-8000-000000000002
+ABCDEF,Example Gamma,/example/gamma,00000000-0000-4000-8000-000000000003

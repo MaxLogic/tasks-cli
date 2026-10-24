@@ -91,7 +91,10 @@ void main() {
   ) async {
     await pumpRealViewer(tester);
     final helper = tester.getRect(
-      _inPane(ViewerProjectsPane, find.text('Search name, path or project ID')),
+      _inPane(
+        ViewerProjectsPane,
+        find.text('Search name, path or ID; use | for OR'),
+      ),
     );
     final stateLabel = tester.getRect(
       _inPane(ViewerProjectsPane, find.text('State filter (Alt+S)')),
