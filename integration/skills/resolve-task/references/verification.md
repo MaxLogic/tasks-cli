@@ -73,7 +73,9 @@ diff/resource hygiene.
    as executed merely because another run covers its requirement. A broad
    command in a task's Proof (full suite, full build, project-wide analysis)
    moves to the next batch gate unless the task states a `Cadence exception`.
-7. Check diff, encoding, and staged scope.
+7. Check diff, encoding, and staged scope. Keep `.private/`, its root links
+   and the excluded `.tasks.json` copy out of the project candidate. Record
+   consumed overlay inputs separately by overlay revision and dirty input hashes.
 8. Repeat affected checks after the last code change.
 
 Project-wide analysis is normally a batch/Final command. Scheduling it at task

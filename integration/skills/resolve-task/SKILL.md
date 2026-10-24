@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.3.2"
+  version: "6.3.3"
   adapted-from: "resolve-task (5.2.0)"
 ---
 
@@ -36,9 +36,24 @@ Use priority and unlock counts to order otherwise ready work.
 
 Inspect the live dirty tree. Preserve unrelated changes and never revert an
 ambiguous patch. Use the current checkout unless a prepared isolated workspace
-is authorized; do not create a worktree automatically. In a prepared worktree,
-verify tracked identity plus required untracked/ignored local guidance. Never
-initialize another task store for that worktree.
+is authorized; do not create a worktree automatically. In an overlay project's
+prepared worktree, verify its own `.private/` and excluded root links. If missing, run
+`private-overlay.ps1 prepare-worktree -Path <wt> -Apply` before dependent work.
+Verify required untracked/ignored guidance, configuration and fixtures too.
+
+In overlay projects, `.tasks.json` is an ordinary excluded copy of
+`.private/.tasks.json`, not a symlink. The CLI rejects symlinked identity files.
+Use `private-overlay.ps1 adopt -CopyFromOverlay .tasks.json` to register it in
+`overlayCopies`; preview before adding `-Apply`. `prepare-worktree` copies it
+into each worktree. Compare identity with the main checkout. Never regenerate
+its UUID or initialize another task store for that worktree.
+
+Discover durable private records in the repository root's `.private/` first.
+Read legacy `.agents/` records only as a fallback; use `private-overlay` for
+migration and missing overlay setup. Preserve folder names. Subproject records
+use `.private/<relative subproject path>/<name>/`, never a nested overlay.
+Do not create durable `.agents/` records without a project exception. Session
+state, skill links and caches stay local.
 
 Establish a focused baseline. In full mode, record the task/batch/final schedule,
 candidate paths, selected IDs and dependency order, risk/reviewer specialty and
@@ -118,9 +133,21 @@ before that gate. Keep affected tasks `to-verify` and run the post-delivery gate
 before marking them `done`. A failed pre-commit gate, missing tool or environment
 gap does not qualify for this exception. Respect an explicit user prohibition
 on commits and preserve unrelated work. Do not stage junction-linked skills or
-unrelated generated content.
+unrelated generated content. Never stage `.private/`, its root links or the
+excluded `.tasks.json` copy in the project repository. Never force-add them.
+If any appears in project status, stop and repair excludes through
+`private-overlay` before staging. Commit private records separately inside
+`.private/`; project commit authority grants no overlay push authority.
 This commit rule grants no push or deployment authority; follow the repository's
 separate rules for those actions.
+
+To finish an assigned overlay worktree, commit code and `.private/` changes
+separately, then merge both branches, including
+`git -C <main>/.private merge <branch>`. Run
+`private-overlay.ps1 remove-worktree -Path <wt> -Apply` afterward. Never use
+`git worktree remove --force`, `git clean -x`, recursive deletion or a tool's
+delete-thread-and-worktree action. Settling or archiving a thread keeps its
+worktree.
 
 Before final proof, reconcile every selected task and ledger transition, stop
 or account for active workers, and materialize one exact delivery candidate.
