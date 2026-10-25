@@ -235,7 +235,9 @@ size and SHA-256, writes a local file and prints its path, never file bytes or
 base64. Without --out it reuses a verified cache under
 `<data-root>/cache/attachments/<project-uuid>/A<id>/<safe-name>`; explicit output
 refuses a different existing file unless --overwrite is given. Display names
-stay exact; portable disk names are sanitized. Multi-file output collisions
+stay exact; portable disk names are sanitized and bounded to 255 UTF-8 bytes,
+preserving extensions up to 32 bytes and escaping Windows device names,
+including CONIN$/CONOUT$ and superscript COM/LPT names. Multi-file output collisions
 refuse the whole get before writing.
 
 Limits are 20 MiB per file after compression, 32 retained attachments/50 MiB
@@ -243,7 +245,9 @@ stored per task and 1 GiB unique stored bytes per project, including detached
 content. Technical decode bounds are 256 MiB original per file and 512 MiB
 original per add command (maximum 32 files). <!-- owner confirmation pending: L2/L6 -->
 Clipboard inspection returns a token; callers may pass --clipboard-token to add
-to detect a changed capture. Remote servers must advertise attachments-v1;
+to detect a changed capture. Helpers have a 10 s deadline plus a bounded 500 ms
+shutdown grace. Remote servers must advertise attachments-v1; a missing
+capabilities field disables attachment operations (exit 5 `remote_capability`);
 unknown upload outcomes reconcile the exact retained body. SQLite backups
 include bytes; Markdown exports list metadata only. The capable Windows viewer
 adds an Attachments tab (Alt+5), file picker/paste, previews, Save as and Detach.
