@@ -1,5 +1,6 @@
-use crate::cli::{Cli, Command};
+use crate::cli::{AttachmentCommand, Cli, Command, OutputFormat};
 use crate::error::AppError;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -151,7 +152,10 @@ fn should_inject_project_context(cli: &Cli) -> bool {
     cli.project.is_none()
         && !matches!(
             &cli.command,
-            Command::Init { .. } | Command::Bind { .. } | Command::BulkImport { .. }
+            Command::Init { .. }
+                | Command::Bind { .. }
+                | Command::BulkImport { .. }
+                | Command::Attachment(AttachmentCommand::Clipboard)
         )
 }
 
@@ -197,22 +201,124 @@ pub fn delegate(cli: &Cli) -> Result<i32, AppError> {
         wslenv.push(':');
     }
     wslenv.push_str("TASKS_ORIGIN_CONTEXT:TASKS_DELEGATED");
-    let status = command
+    let capture = matches!(
+        &cli.command,
+        Command::Attachment(AttachmentCommand::Get { .. })
+    );
+    command
         .env("TASKS_ORIGIN_CONTEXT", context)
         .env("TASKS_DELEGATED", "1")
         .env("WSLENV", wslenv)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
+        .stdout(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .stderr(Stdio::inherit())
-        .env_remove("TASKS_WINDOWS_EXE")
-        .status()
-        .map_err(|err| {
+        .env_remove("TASKS_WINDOWS_EXE");
+    let mut child = command.spawn().map_err(|err| {
+        AppError::Interop(format!(
+            "cannot start Windows backend {}: {err}; check --windows-exe or TASKS_WINDOWS_EXE",
+            exe.display()
+        ))
+    })?;
+    let mut stdout = Vec::new();
+    if capture {
+        let read = child
+            .stdout
+            .take()
+            .ok_or_else(|| AppError::Interop("attachment get stdout pipe was not created".into()))?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut stdout);
+        if read.is_err() || stdout.len() > 1024 * 1024 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Interop("cannot capture delegated attachment get stdout within 1 MiB; files may already have been written by tasks.exe".into()));
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| AppError::Interop(format!("cannot wait for Windows backend: {e}")))?;
+    if capture {
+        if status.success() {
+            stdout = convert_get_stdout(&stdout, cli.format, windows_path_to_linux)?;
+        }
+        std::io::stdout()
+            .lock()
+            .write_all(&stdout)
+            .map_err(|e| AppError::io_op("write delegated attachment paths", e))?;
+    }
+    Ok(status.code().unwrap_or(6))
+}
+
+fn windows_path_to_linux(path: &str) -> Result<String, AppError> {
+    let output = ProcessCommand::new("wslpath")
+        .args(["-u", path])
+        .output()
+        .map_err(|e| {
             AppError::Interop(format!(
-                "cannot start Windows backend {}: {err}; check --windows-exe or TASKS_WINDOWS_EXE",
-                exe.display()
+                "cannot convert already-written Windows path {path}: {e}"
             ))
         })?;
-    Ok(status.code().unwrap_or(6))
+    if !output.status.success() {
+        return Err(AppError::Interop(format!(
+            "cannot convert already-written Windows path {path}: wslpath -u failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let converted = String::from_utf8(output.stdout).map_err(|e| AppError::Interop(format!("cannot convert already-written Windows path {path}: wslpath returned invalid UTF-8: {e}")))?;
+    let converted = converted.trim_end_matches(['\r', '\n']);
+    if !Path::new(converted).is_absolute() || converted.contains(['\r', '\n']) {
+        return Err(AppError::Interop(format!("cannot convert already-written Windows path {path}: wslpath did not return one absolute Linux path")));
+    }
+    Ok(converted.to_owned())
+}
+
+fn convert_get_stdout(
+    bytes: &[u8],
+    format: OutputFormat,
+    convert: impl Fn(&str) -> Result<String, AppError>,
+) -> Result<Vec<u8>, AppError> {
+    match format {
+        OutputFormat::Text => {
+            let text = std::str::from_utf8(bytes).map_err(|e| {
+                AppError::Interop(format!(
+                    "delegated attachment get returned invalid UTF-8 paths: {e}"
+                ))
+            })?;
+            let mut output = String::new();
+            for path in text.lines() {
+                output.push_str(&convert(path)?);
+                output.push('\n');
+            }
+            Ok(output.into_bytes())
+        }
+        OutputFormat::Json => {
+            let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
+                AppError::Interop(format!(
+                    "delegated attachment get returned invalid metadata JSON: {e}"
+                ))
+            })?;
+            let items = value
+                .pointer_mut("/data/items")
+                .and_then(|v| v.as_array_mut())
+                .ok_or_else(|| {
+                    AppError::Interop("delegated attachment get JSON is missing data.items".into())
+                })?;
+            for item in items {
+                let path = item.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AppError::Interop(
+                        "delegated attachment get JSON is missing an item's path".into(),
+                    )
+                })?;
+                item["path"] = serde_json::Value::String(convert(path)?);
+            }
+            let mut output = serde_json::to_vec(&value)?;
+            output.push(b'\n');
+            Ok(output)
+        }
+    }
 }
 
 #[cfg(test)]

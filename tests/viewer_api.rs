@@ -125,11 +125,10 @@ fn attachment_metadata_is_retained_in_viewer_and_doctor_counts_detached_blobs() 
 }
 
 #[test]
-fn attachment_surface_returns_the_documented_stub_error_without_a_store() {
+fn attachment_commands_refuse_missing_stores_without_creating_them() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("absent");
     for tail in [
-        vec!["attachment", "clipboard"],
         vec![
             "attachment",
             "add",
@@ -143,8 +142,13 @@ fn attachment_surface_returns_the_documented_stub_error_without_a_store() {
         vec!["attachment", "get", "1"],
         vec!["attachment", "detach", "1", "A1", "--expect-version", "1"],
     ] {
-        let run = spawn(&viewer_args(&missing, None, &tail), None);
-        run.fails_with_message(2, "usage", "not implemented in this build");
+        let run = spawn(
+            &viewer_args(&missing, Some(&Uuid::new_v4().to_string()), &tail),
+            None,
+        );
+        assert!(run.stdout.is_empty());
+        assert_ne!(run.code, 0);
+        assert!(!run.stderr.contains("not implemented in this build"));
     }
     assert!(!missing.exists());
 }
@@ -529,7 +533,18 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
     assert_eq!(data["protocol_version"], 1);
     assert_eq!(
         data["operations"],
-        json!(["info", "projects", "tasks", "show", "update", "archive"])
+        json!([
+            "info",
+            "projects",
+            "tasks",
+            "show",
+            "update",
+            "archive",
+            "attachment-add",
+            "attachment-get",
+            "attachment-detach",
+            "attachment-clipboard"
+        ])
     );
     assert_eq!(
         data["statuses"],
@@ -589,6 +604,7 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
 fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
     let project = Project::new();
     let info = project.run(&["viewer", "info"]).data();
+    let mut probed = Vec::new();
     for operation in info["operations"].as_array().unwrap() {
         let operation = operation.as_str().unwrap();
         if !operation.starts_with("attachment-") {
@@ -599,6 +615,25 @@ fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
             .to_string();
         let source = project.data_root.path().join("probe.txt");
         fs::write(&source, b"synthetic attachment").unwrap();
+        let attached_id = if matches!(operation, "attachment-get" | "attachment-detach") {
+            let added = project
+                .run(&[
+                    "attachment",
+                    "add",
+                    &id,
+                    "--expect-version",
+                    "1",
+                    "--file",
+                    source.to_str().unwrap(),
+                ])
+                .data();
+            added["attachments"][0]["display_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            String::new()
+        };
         let tail = match operation {
             "attachment-add" => vec![
                 "attachment",
@@ -609,8 +644,15 @@ fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
                 "--file",
                 source.to_str().unwrap(),
             ],
-            "attachment-get" => vec!["attachment", "get", &id],
-            "attachment-detach" => vec!["attachment", "detach", &id, "A1", "--expect-version", "1"],
+            "attachment-get" => vec!["attachment", "get", &id, &attached_id],
+            "attachment-detach" => vec![
+                "attachment",
+                "detach",
+                &id,
+                &attached_id,
+                "--expect-version",
+                "2",
+            ],
             "attachment-clipboard" => vec!["attachment", "clipboard"],
             _ => panic!("advertised attachment operation has no CLI probe: {operation}"),
         };
@@ -655,11 +697,38 @@ fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
             !stderr.contains("not implemented in this build"),
             "{operation}: {stderr}"
         );
-        if !output.status.success() {
+        if operation == "attachment-clipboard" {
+            assert_eq!(output.status.code(), Some(6));
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-            assert_ne!(error["error"]["code"], "usage", "{operation}: {stderr}");
+            assert_eq!(error["error"]["code"], "interop", "{operation}: {stderr}");
+        } else {
+            assert!(output.status.success(), "{operation}: {stderr}");
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            match operation {
+                "attachment-add" => {
+                    assert_eq!(result["data"]["attachments"].as_array().unwrap().len(), 1)
+                }
+                "attachment-get" => assert_eq!(
+                    fs::read(result["data"]["items"][0]["path"].as_str().unwrap()).unwrap(),
+                    b"synthetic attachment"
+                ),
+                "attachment-detach" => {
+                    assert_eq!(result["data"]["detached"].as_array().unwrap().len(), 1)
+                }
+                _ => unreachable!(),
+            }
         }
+        probed.push(operation);
     }
+    assert_eq!(
+        probed,
+        [
+            "attachment-add",
+            "attachment-get",
+            "attachment-detach",
+            "attachment-clipboard"
+        ]
+    );
 }
 
 #[test]
