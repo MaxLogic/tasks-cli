@@ -180,6 +180,14 @@ tasks update T-12 --expect-version 1 --status todo
 tasks update T-12 --expect-version 2 --clear-deps
 tasks update T-12 --expect-version 3 --add-label needs-human --remove-label perf
 tasks history T-12
+tasks attachment add T-12 --expect-version 4 --file run.log
+tasks attachment add T-12 --expect-version 5 --file - --name report.txt
+tasks attachment clipboard
+tasks attachment add T-12 --expect-version 6 --clipboard
+tasks attachment list T-12
+tasks attachment get T-12 A1
+tasks attachment get T-12 A1 --out saved.log --overwrite
+tasks attachment detach T-12 A1 --expect-version 7
 tasks rules show
 tasks rules set --body-file RULES.md --expect-version 1
 ```
@@ -211,13 +219,36 @@ leaves the rules out.
 The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
 work before or after the subcommand, whichever reads better.
 
-Current project databases use schema 8, including mutation attribution and
-atomic request receipts. `history` includes stored context; `project-history`
+The attachment contract requires project schema 9, adding retained attachment
+references and deduplicated file bytes to attribution and atomic request
+receipts. `history` includes stored context; `project-history`
 pages through project creation, key changes and import provenance. Legacy
 history retains null attribution. Context collection is implemented, with
 optional [harness hooks](integration/context-hooks.md) for supplied session
 metadata. Project schema, server schema and the JSON envelope version are
 separate contracts.
+
+Attachments accept any file type. Add/detach check the task version and create
+one audit event; detach keeps the bytes in history. `show` includes metadata,
+and list/search append `attachments=N` for nonzero counts. Get verifies original
+size and SHA-256, writes a local file and prints its path, never file bytes or
+base64. Without --out it reuses a verified cache under
+`<data-root>/cache/attachments/<project-uuid>/A<id>/<safe-name>`; explicit output
+refuses a different existing file unless --overwrite is given. Display names
+stay exact; portable disk names are sanitized. Multi-file output collisions
+refuse the whole get before writing.
+
+Limits are 20 MiB per file after compression, 32 retained attachments/50 MiB
+stored per task and 1 GiB unique stored bytes per project, including detached
+content. Technical decode bounds are 256 MiB original per file and 512 MiB
+original per add command (maximum 32 files). <!-- owner confirmation pending: L2/L6 -->
+Clipboard inspection returns a token; callers may pass --clipboard-token to add
+to detect a changed capture. Remote servers must advertise attachments-v1;
+unknown upload outcomes reconcile the exact retained body. SQLite backups
+include bytes; Markdown exports list metadata only. The capable Windows viewer
+adds an Attachments tab (Alt+5), file picker/paste, previews, Save as and Detach.
+These are the attachment implementation requirements; dated deployment records
+identify which installed candidates have been verified and upgraded.
 
 ## Labels and ranked search
 
@@ -255,10 +286,10 @@ queue. Explicit `--status` bypasses readiness. Every page is internally
 consistent; changes between requests can move ranked results, so restart
 pagination after relevant edits.
 
-New databases start at schema 8. Existing databases require explicit
+The schema-9 contract requires new databases to start at 9. Existing databases require explicit
 `tasks migrate` after a validated backup: schema 3 added labels and ranked
 search, 4 priority, 5 `to-verify`, 6 project keys, 7 attribution and project
-history, and 8 mutation receipts. Earlier state names become `draft`/`todo`;
+history, 8 mutation receipts and 9 attachments. Earlier state names become `draft`/`todo`;
 existing history snapshots remain unchanged. Older binaries refuse databases
 newer than they support. Remote migration requires server administration;
 network requests never migrate a project implicitly.
