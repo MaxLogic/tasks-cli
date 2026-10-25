@@ -504,7 +504,20 @@ fn execute_viewer(
     command: &ViewerCommand,
 ) -> Result<(), AppError> {
     let output = match command {
-        ViewerCommand::Info => api_output(client.read(Method::GET, "/v1/viewer/info", b"")?)?,
+        ViewerCommand::Info => {
+            // Server capability is authoritative, even if an older server's
+            // viewer payload incorrectly advertises newer operations.
+            let attachments = client.has_attachment_capability()?;
+            let mut output = api_output(client.read(Method::GET, "/v1/viewer/info", b"")?)?;
+            if !attachments {
+                if let Some(operations) = output.output["data"]["operations"].as_array_mut() {
+                    operations
+                        .retain(|op| !op.as_str().is_some_and(|s| s.starts_with("attachment-")));
+                }
+                output.text = serde_json::to_string(&output.output)?;
+            }
+            output
+        }
         ViewerCommand::Recovery => {
             let store = PendingStore::new(root)?;
             let _lock = store.lock()?;

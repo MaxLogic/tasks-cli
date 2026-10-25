@@ -53,6 +53,7 @@ impl Drop for HttpBackend {
 
 pub enum Reply {
     Ok,
+    JsonRoutes(Vec<(String, serde_json::Value)>),
     Redirect(String),
     Large,
     LargeStream,
@@ -151,7 +152,7 @@ impl TlsFixture {
                 let mut lines = head.split("\r\n");
                 let first = lines.next().unwrap().split_whitespace().collect::<Vec<_>>();
                 let method = Method::from_bytes(first[0].as_bytes()).unwrap();
-                let uri = first[1].parse().unwrap();
+                let uri: http::Uri = first[1].parse().unwrap();
                 let mut headers = axum::http::HeaderMap::new();
                 for line in lines.filter(|line| !line.is_empty()) {
                     let (name, value) = line.split_once(':').unwrap();
@@ -169,6 +170,16 @@ impl TlsFixture {
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).unwrap();
                 match &reply {
+                    Reply::JsonRoutes(routes) => {
+                        let value = &routes
+                            .iter()
+                            .find(|(path, _)| *path == uri.path())
+                            .unwrap()
+                            .1;
+                        let body = serde_json::to_vec(value).unwrap();
+                        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+                        stream.write_all(&body).unwrap();
+                    }
                     Reply::Stall => {
                         std::thread::sleep(std::time::Duration::from_secs(2));
                     }

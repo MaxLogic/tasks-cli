@@ -114,7 +114,7 @@ impl RemoteClient {
             credential_id: *credential_id,
         })
     }
-    pub fn info(&self) -> Result<Value, AppError> {
+    fn service_info(&self) -> Result<Value, AppError> {
         let reply = parse_reply(
             self.http
                 .send(Method::GET, "/v1/info", b"", None)
@@ -122,17 +122,35 @@ impl RemoteClient {
         )?;
         if reply["server_id"].as_str() != Some(self.server_id.to_string().as_str())
             || reply["ready"] != true
-            || !reply["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| {
-                    capabilities
-                        .iter()
-                        .any(|value| value == "request-bound-receipts")
-                })
         {
             return Err(invalid_reply());
         }
         Ok(reply)
+    }
+    /// Mutation/configuration preflight retains the request-bound receipt gate.
+    pub fn info(&self) -> Result<Value, AppError> {
+        let reply = self.service_info()?;
+        if !reply["capabilities"]
+            .as_array()
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|value| value == "request-bound-receipts")
+            })
+        {
+            return Err(invalid_reply());
+        }
+        Ok(reply)
+    }
+    /// Advertisement discovery is read-only. Legacy servers may omit this
+    /// field entirely; that means no advertised capabilities, not receipt safety.
+    pub fn has_attachment_capability(&self) -> Result<bool, AppError> {
+        let reply = self.service_info()?;
+        match reply.get("capabilities") {
+            None => Ok(false),
+            Some(Value::Array(items)) => Ok(items.iter().any(|v| v == "attachments-v1")),
+            Some(_) => Err(invalid_reply()),
+        }
     }
     pub fn read(&self, method: Method, target: &str, payload: &[u8]) -> Result<Value, AppError> {
         parse_reply(
@@ -142,10 +160,7 @@ impl RemoteClient {
         )
     }
     pub fn require_attachments(&self) -> Result<(), AppError> {
-        if !self.info()?["capabilities"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|v| v == "attachments-v1"))
-        {
+        if !self.has_attachment_capability()? {
             return Err(AppError::Remote { code:"remote_capability", message:"server does not support attachments-v1; upgrade the server before using attachments".into(), request_id:None });
         }
         Ok(())
@@ -168,6 +183,9 @@ impl RemoteClient {
         request_id: Option<Uuid>,
     ) -> Result<ApiOutput, AppError> {
         self.require_attachments()?;
+        // Advertisement discovery deliberately permits receipt-less legacy
+        // reads; a new binary mutation still requires safe receipt recovery.
+        self.info()?;
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         if !store.list()?.is_empty() {

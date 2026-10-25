@@ -658,6 +658,18 @@ fn viewer_projects(server: &OwnedServer, bytes: &[u8]) -> Result<ReceiptResponse
     response(result)
 }
 
+/// Capability and viewer operation advertisements share the C1 remote source
+/// and the process-isolated compatibility hook.
+fn remote_attachment_operations() -> &'static [&'static str] {
+    #[cfg(feature = "test-hooks")]
+    if std::env::var_os("TASKS_TEST_NO_ATTACHMENTS_CAPABILITY").is_some() {
+        return &[];
+    }
+    crate::attachment::command::viewer_operations(
+        crate::attachment::command::AttachmentBackend::Remote,
+    )
+}
+
 /// Called only after signature verification, nonce admission and body digest.
 pub fn handle(
     server: &OwnedServer,
@@ -680,16 +692,8 @@ pub fn handle(
             "ed25519-signatures",
             "persistent-replay-protection",
         ];
-        if !crate::attachment::command::viewer_operations(
-            crate::attachment::command::AttachmentBackend::Remote,
-        )
-        .is_empty()
-        {
+        if !remote_attachment_operations().is_empty() {
             capabilities.push("attachments-v1");
-        }
-        #[cfg(feature = "test-hooks")]
-        if std::env::var_os("TASKS_TEST_NO_ATTACHMENTS_CAPABILITY").is_some() {
-            capabilities.retain(|v| *v != "attachments-v1");
         }
         return Ok(ReceiptResponse {
             receipt: None,
@@ -703,17 +707,17 @@ pub fn handle(
                 "viewer info does not accept query parameters",
             )));
         }
-        let result = output_with_project(
-            None,
-            CommandPayload::ViewerInfo(crate::viewer::info_for_backend(
-                crate::attachment::command::AttachmentBackend::Remote,
-            )),
-        )
-        .map(|mut value| {
-            value["output"]["data"]["backend"] = json!("remote");
-            value["output"]["data"]["receipt_recovery"] = json!(true);
-            value
-        });
+        let mut info =
+            crate::viewer::info_for_backend(crate::attachment::command::AttachmentBackend::Remote);
+        info.operations.retain(|op| !op.starts_with("attachment-"));
+        info.operations
+            .extend_from_slice(remote_attachment_operations());
+        let result =
+            output_with_project(None, CommandPayload::ViewerInfo(info)).map(|mut value| {
+                value["output"]["data"]["backend"] = json!("remote");
+                value["output"]["data"]["receipt_recovery"] = json!(true);
+                value
+            });
         return response(result);
     }
     if *method == Method::POST && uri.path() == "/v1/viewer/projects" && uri.query().is_none() {
