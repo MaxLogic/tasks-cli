@@ -276,4 +276,46 @@ Describe 'package.ps1 batch guards' {
         @($result.Findings).Count | Should -BeGreaterThan 0
         Test-Path -LiteralPath $outputRoot | Should -BeFalse
     }
+
+    It 'packages a selected source and CLI entirely under the lane roots' {
+        $repository = Join-Path $script:Root 'repository'
+        $viewer = Join-Path $repository 'viewer'
+        $lane = Join-Path $script:Root 'lane'
+        $source = Join-Path $lane 'flutter-release'
+        $cliTarget = Join-Path $lane 'rust'
+        $output = Join-Path $lane 'viewer-release'
+        $evidence = Join-Path $lane 'evidence'
+        New-FakeBundle -Root $source
+        New-Item -ItemType Directory -Force -Path (Join-Path $cliTarget 'release'), (Join-Path $viewer 'assets/announcements') | Out-Null
+        Copy-Item -LiteralPath (Join-Path $source 'tasks.exe') -Destination (Join-Path $cliTarget 'release/tasks.exe')
+        foreach ($leaf in @('catalog.json', 'manifest.json')) {
+            Set-Content -LiteralPath (Join-Path $viewer "assets/announcements/$leaf") -Value '{}'
+        }
+        $announcementTool = Join-Path $script:Root 'announcements-stub.ps1'
+        Set-Content -LiteralPath $announcementTool -Value '# Announcement validation is mocked in this packaging-path test.'
+        Mock Resolve-FfprobeExecutable { 'unused-ffprobe' }
+        Mock Test-AnnouncementBundle { [pscustomobject]@{ Findings = @(); Verified = @([pscustomobject]@{ Bytes = 1 }) } }
+        Mock Get-SourceIdentity { [pscustomobject]@{ Commit = 'fixture'; Dirty = $false } }
+
+        $before = @(Get-ChildItem -LiteralPath $repository -Recurse -File | ForEach-Object { "$($_.FullName):$((Get-FileHash -LiteralPath $_.FullName).Hash)" })
+        $result = Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $repository `
+            -CliTargetDirectory $cliTarget -PackageParentRoot $lane -PackageSourceRoot $source `
+            -OutputRoot $output -EvidenceRoot $evidence -WorkingRoot $script:Root -AnnouncementToolPath $announcementTool
+
+        $result.Ok | Should -BeTrue
+        $result.OutputRoot | Should -Be $output
+        $result.LaunchTest.Ok | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $evidence 'package-summary.json') | Should -BeTrue
+        (Get-FileHash -LiteralPath (Join-Path $output 'tasks.exe')).Hash | Should -Be (Get-FileHash -LiteralPath (Join-Path $cliTarget 'release/tasks.exe')).Hash
+        $after = @(Get-ChildItem -LiteralPath $repository -Recurse -File | ForEach-Object { "$($_.FullName):$((Get-FileHash -LiteralPath $_.FullName).Hash)" })
+        $after | Should -Be $before
+        Test-Path -LiteralPath (Join-Path $repository 'target') | Should -BeFalse
+    }
+
+    It 'refuses an output outside the selected package parent before writing' {
+        { Invoke-PackageTool -ViewerRoot $script:Root -RepositoryRoot $script:Root `
+                -PackageParentRoot (Join-Path $script:Root 'lane') -OutputRoot (Join-Path $script:Root 'elsewhere') } |
+            Should -Throw '*must stay inside*'
+        Test-Path -LiteralPath (Join-Path $script:Root 'elsewhere') | Should -BeFalse
+    }
 }

@@ -37,6 +37,12 @@ param(
 
     [string]$OutputRoot,
 
+    [string]$CliTargetDirectory,
+
+    [string]$PackageParentRoot,
+
+    [string]$PackageSourceRoot,
+
     [string]$CliExecutable,
 
     [string]$FfprobePath,
@@ -54,6 +60,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'tool-paths.ps1')
 
 function Write-PackageMessage {
     <#
@@ -89,7 +96,7 @@ function Resolve-PackageOutputRoot {
         throw "Refusing to use '$targetFull': the package output must stay inside '$allowedFull'."
     }
 
-    return $targetFull
+    return Assert-ToolOutputPath -Path $targetFull
 }
 
 function Get-BundleRelativePath {
@@ -404,6 +411,12 @@ function Invoke-PackageTool {
 
         [string]$OutputRoot,
 
+        [string]$CliTargetDirectory,
+
+        [string]$PackageParentRoot,
+
+        [string]$PackageSourceRoot,
+
         [string]$CliExecutable,
 
         [string]$FfprobePath,
@@ -422,12 +435,18 @@ function Invoke-PackageTool {
     $findings = [System.Collections.Generic.List[string]]::new()
     $viewerFull = [System.IO.Path]::GetFullPath($ViewerRoot)
     $repositoryFull = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $targetRoot = Join-Path -Path $repositoryFull -ChildPath 'target'
+    if ([string]::IsNullOrWhiteSpace($PackageParentRoot)) {
+        $PackageParentRoot = Join-Path $repositoryFull 'target'
+    }
+    $targetRoot = Assert-ToolOutputPath -Path $PackageParentRoot
+    if ([string]::IsNullOrWhiteSpace($CliTargetDirectory)) {
+        $CliTargetDirectory = Join-Path $repositoryFull 'target'
+    }
     if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
         $OutputRoot = Join-Path -Path $targetRoot -ChildPath 'viewer-release'
     }
     if ([string]::IsNullOrWhiteSpace($CliExecutable)) {
-        $CliExecutable = Join-Path -Path $targetRoot -ChildPath 'release/tasks.exe'
+        $CliExecutable = Join-Path -Path $CliTargetDirectory -ChildPath 'release/tasks.exe'
     }
     if ([string]::IsNullOrWhiteSpace($WorkingRoot)) {
         $WorkingRoot = [System.IO.Path]::GetTempPath()
@@ -437,7 +456,13 @@ function Invoke-PackageTool {
     }
 
     $outputFull = Resolve-PackageOutputRoot -Path $OutputRoot -AllowedRoot $targetRoot
-    $bundleSource = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release'
+    if ([string]::IsNullOrWhiteSpace($PackageSourceRoot)) {
+        $PackageSourceRoot = Join-Path $viewerFull 'build/windows/x64/runner/Release'
+    }
+    $bundleSource = [System.IO.Path]::GetFullPath($PackageSourceRoot)
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+        $EvidenceRoot = Assert-ToolOutputPath -Path $EvidenceRoot
+    }
     $announcementsDirectory = Join-Path -Path $viewerFull -ChildPath 'assets/announcements'
     $catalogPath = Join-Path -Path $announcementsDirectory -ChildPath 'catalog.json'
 
@@ -575,7 +600,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     $toolExitCode = 1
     try {
         $toolResult = Invoke-PackageTool -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
-            -OutputRoot $OutputRoot -CliExecutable $CliExecutable -FfprobePath $FfprobePath `
+            -OutputRoot $OutputRoot -CliTargetDirectory $CliTargetDirectory `
+            -PackageParentRoot $PackageParentRoot -PackageSourceRoot $PackageSourceRoot `
+            -CliExecutable $CliExecutable -FfprobePath $FfprobePath `
             -AnnouncementToolPath $AnnouncementToolPath -EvidenceRoot $EvidenceRoot `
             -WorkingRoot $WorkingRoot -LaunchTimeoutSeconds $LaunchTimeoutSeconds -KeepLaunchRoot:$KeepLaunchRoot
         foreach ($finding in $toolResult.Findings) {

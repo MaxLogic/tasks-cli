@@ -54,6 +54,14 @@ param(
 
     [string]$EvidenceRoot,
 
+    [string]$CliTargetDirectory,
+
+    [string]$EvidenceParentRoot,
+
+    [string]$PackageParentRoot,
+
+    [string]$PackageSourceRoot,
+
     [string]$CliExecutable,
 
     [string]$FlutterRoot,
@@ -94,6 +102,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'tool-paths.ps1')
 
 function Write-VerifyMessage {
     <#
@@ -159,16 +168,22 @@ function Resolve-VerifyEvidenceRoot {
 
         [string]$EvidenceRoot,
 
+        [string]$EvidenceParentRoot,
+
         [datetime]$Now = (Get-Date)
     )
 
-    $evidenceParent = Join-Path -Path $ViewerRoot -ChildPath 'target/evidence/viewer'
+    if ([string]::IsNullOrWhiteSpace($EvidenceParentRoot)) {
+        $EvidenceParentRoot = Join-Path -Path $ViewerRoot -ChildPath 'target/evidence/viewer'
+    }
+    $evidenceParent = $EvidenceParentRoot
     if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
         $EvidenceRoot = Join-Path -Path $evidenceParent -ChildPath `
             ("{0}-verify-windows" -f $Now.ToString('yyyy-MM-dd-HHmmss'))
     }
 
-    return Assert-PathInside -Path $EvidenceRoot -Parent $evidenceParent -Purpose 'verification evidence'
+    $resolved = Assert-PathInside -Path $EvidenceRoot -Parent $evidenceParent -Purpose 'verification evidence'
+    return Assert-ToolOutputPath -Path $resolved
 }
 
 function Resolve-VerifyFixtureRoot {
@@ -969,6 +984,14 @@ function Invoke-VerifyWindows {
 
         [string]$EvidenceRoot,
 
+        [string]$CliTargetDirectory,
+
+        [string]$EvidenceParentRoot,
+
+        [string]$PackageParentRoot,
+
+        [string]$PackageSourceRoot,
+
         [string]$CliExecutable,
 
         [string]$FlutterRoot,
@@ -1012,7 +1035,7 @@ function Invoke-VerifyWindows {
     }
     # The installed tasks command links to target/release, so the plain and
     # test-hooks builds of this run use their own target directory.
-    $cliTargetDir = Join-Path -Path $repositoryFull -ChildPath 'target/verify-cli'
+    $cliTargetDir = Resolve-ToolCliTarget -RepositoryRoot $repositoryFull -CliTargetDirectory $CliTargetDirectory
     if ([string]::IsNullOrWhiteSpace($CliExecutable)) {
         $CliExecutable = Join-Path -Path $cliTargetDir -ChildPath 'release/tasks.exe'
     }
@@ -1034,7 +1057,7 @@ function Invoke-VerifyWindows {
         throw "The release UIA probe '$UiaProbeToolPath' is missing."
     }
 
-    $evidence = Resolve-VerifyEvidenceRoot -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot
+    $evidence = Resolve-VerifyEvidenceRoot -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot -EvidenceParentRoot $EvidenceParentRoot
     New-Item -ItemType Directory -Force -Path $evidence | Out-Null
     $launcher = Resolve-FlutterLauncher -FlutterRoot $FlutterRoot
     $fixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -RepositoryRoot $repositoryFull
@@ -1047,10 +1070,11 @@ function Invoke-VerifyWindows {
     $uiaFixtureResolved = Resolve-VerifyFixtureRoot -WorkingRoot $WorkingRoot -RepositoryRoot $repositoryFull `
         -FixtureRoot "$fixtureResolved-uia"
 
-    # Dot-sourcing package.ps1 later rebinds its parameter names here
-    # (CliExecutable, WorkingRoot, ...) to its own defaults. Capture the values
-    # packaging and the fixture cleanup need now, so both use this run's CLI and
-    # roots, and cleanup also works when an earlier gate fails.
+    # Import package.ps1 in a child scope and retain the run-selected arguments:
+    # its script parameter defaults must not overwrite this harness's roots.
+    $selectedPackageOutput = $PackageOutputRoot
+    $selectedPackageParent = $PackageParentRoot
+    $selectedPackageSource = $PackageSourceRoot
     $packageCliExecutable = $CliExecutable
     $packageWorkingRoot = $WorkingRoot
     $fixtureCleanupWorkingRoot = $WorkingRoot
@@ -1298,12 +1322,15 @@ function Invoke-VerifyWindows {
             -Command 'flutter build windows --release' -Log $windowsLog -Detail "sha256 $(Get-FileSha256 -Path $viewerExe)"
 
         Write-VerifyMessage -Message 'verify: packaging the portable release bundle'
-        . $PackageToolPath
-        if ($null -eq (Get-Command -Name 'Invoke-PackageTool' -ErrorAction SilentlyContinue)) {
-            throw "The packaging tool '$PackageToolPath' does not define Invoke-PackageTool."
+        $packageResult = & {
+            . $PackageToolPath
+            if ($null -eq (Get-Command -Name 'Invoke-PackageTool' -ErrorAction SilentlyContinue)) {
+                throw "The packaging tool '$PackageToolPath' does not define Invoke-PackageTool."
+            }
+            Invoke-PackageTool -ViewerRoot $viewerFull -RepositoryRoot $repositoryFull -OutputRoot $selectedPackageOutput `
+                -CliExecutable $packageCliExecutable -EvidenceRoot $evidence -WorkingRoot $packageWorkingRoot `
+                -PackageParentRoot $selectedPackageParent -PackageSourceRoot $selectedPackageSource
         }
-        $packageResult = Invoke-PackageTool -ViewerRoot $viewerFull -RepositoryRoot $repositoryFull -OutputRoot $PackageOutputRoot `
-            -CliExecutable $packageCliExecutable -EvidenceRoot $evidence -WorkingRoot $packageWorkingRoot
         $packageHash = Assert-BundleHash -BundleRoot $packageResult.OutputRoot
         $packageFindings = @($packageResult.Findings)
         $hashFindings = @($packageHash.Findings)
@@ -1394,7 +1421,9 @@ function Invoke-VerifyWindows {
                 throw "The packaged release UIA probe failed (exit $($uiaResult.ExitCode)); see $uiaLog"
             }
             $uiaProof = $uiaResult.StdOut | ConvertFrom-Json
-            $builtAppImage = Join-Path -Path $viewerFull -ChildPath 'build/windows/x64/runner/Release/data/app.so'
+            $builtAppImage = if ([string]::IsNullOrWhiteSpace($selectedPackageSource)) {
+                Join-Path $viewerFull 'build/windows/x64/runner/Release/data/app.so'
+            } else { Join-Path $selectedPackageSource 'data/app.so' }
             if (-not $uiaProof.Ok -or -not $uiaProof.SettingsChecks.Ok -or
                 $uiaProof.ViewerSha256 -ne $packageResult.ViewerExeSha256 -or
                 $uiaProof.CliSha256 -ne $packageResult.CliExeSha256 -or
@@ -1630,7 +1659,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     $toolExitCode = 1
     try {
         $toolResult = Invoke-VerifyWindows -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot `
-            -EvidenceRoot $EvidenceRoot -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
+            -EvidenceRoot $EvidenceRoot -EvidenceParentRoot $EvidenceParentRoot -CliTargetDirectory $CliTargetDirectory `
+            -PackageParentRoot $PackageParentRoot -PackageSourceRoot $PackageSourceRoot `
+            -CliExecutable $CliExecutable -FlutterRoot $FlutterRoot `
             -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -PackageToolPath $PackageToolPath -PackageOutputRoot $PackageOutputRoot -GoldenBaseline $GoldenBaseline `
             -UiaProbeToolPath $UiaProbeToolPath -UiaTimeoutSeconds $UiaTimeoutSeconds -SkipReleaseUia:$SkipReleaseUia `
             -FixtureSeed $FixtureSeed -AlphaTaskCount $AlphaTaskCount -BetaTaskCount $BetaTaskCount `

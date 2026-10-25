@@ -43,6 +43,10 @@ param(
 
     [string]$EvidenceRoot,
 
+    [string]$CliTargetDirectory,
+
+    [string]$EvidenceParentRoot,
+
     [string]$CliExecutable,
 
     [string]$FixtureBinary,
@@ -68,6 +72,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'tool-paths.ps1')
 
 function Write-MeasureMessage {
     param(
@@ -138,16 +143,22 @@ function Resolve-MeasureEvidenceRoot {
 
         [string]$EvidenceRoot,
 
+        [string]$EvidenceParentRoot,
+
         [datetime]$Now = (Get-Date)
     )
 
-    $evidenceParent = Join-Path -Path $ViewerRoot -ChildPath 'target/evidence/viewer'
+    if ([string]::IsNullOrWhiteSpace($EvidenceParentRoot)) {
+        $EvidenceParentRoot = Join-Path -Path $ViewerRoot -ChildPath 'target/evidence/viewer'
+    }
+    $evidenceParent = $EvidenceParentRoot
     if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
         $EvidenceRoot = Join-Path -Path $evidenceParent -ChildPath `
             ("{0}-measure" -f $Now.ToString('yyyy-MM-dd-HHmmss'))
     }
 
-    return Assert-PathInside -Path $EvidenceRoot -Parent $evidenceParent -Purpose 'measurement evidence'
+    $resolved = Assert-PathInside -Path $EvidenceRoot -Parent $evidenceParent -Purpose 'measurement evidence'
+    return Assert-ToolOutputPath -Path $resolved
 }
 
 function Resolve-MeasureFixtureRoot {
@@ -825,6 +836,10 @@ function Invoke-Measure {
 
         [string]$EvidenceRoot,
 
+        [string]$CliTargetDirectory,
+
+        [string]$EvidenceParentRoot,
+
         [string]$CliExecutable,
 
         [string]$FixtureBinary,
@@ -852,7 +867,8 @@ function Invoke-Measure {
     )
 
     $repositoryFull = [System.IO.Path]::GetFullPath($RepositoryRoot)
-    $evidence = Resolve-MeasureEvidenceRoot -ViewerRoot $ViewerRoot -EvidenceRoot $EvidenceRoot
+    $cliTargetDir = Resolve-ToolCliTarget -RepositoryRoot $repositoryFull -CliTargetDirectory $CliTargetDirectory
+    $evidence = Resolve-MeasureEvidenceRoot -ViewerRoot $ViewerRoot -EvidenceRoot $EvidenceRoot -EvidenceParentRoot $EvidenceParentRoot
     New-Item -ItemType Directory -Force -Path $evidence | Out-Null
     $fixtureResolved = Resolve-MeasureFixtureRoot -WorkingRoot $WorkingRoot -FixtureRoot $FixtureRoot -RepositoryRoot $repositoryFull
     $fixtureOwned = Initialize-MeasureFixtureRoot -FixtureRoot $fixtureResolved
@@ -864,7 +880,6 @@ function Invoke-Measure {
     )
     # The installed tasks command links to target/release, so this run builds
     # into its own target directory.
-    $cliTargetDir = Join-Path -Path $repositoryFull -ChildPath 'target/verify-cli'
     $outcome = 1
     try {
         if (-not $SkipBuild) {
@@ -1203,6 +1218,7 @@ function Invoke-Measure {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         $run = Invoke-Measure -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot -EvidenceRoot $EvidenceRoot `
+            -CliTargetDirectory $CliTargetDirectory -EvidenceParentRoot $EvidenceParentRoot `
             -CliExecutable $CliExecutable -FixtureBinary $FixtureBinary -FixtureRoot $FixtureRoot `
             -WorkingRoot $WorkingRoot -Iterations $Iterations -Warmup $Warmup -TimeoutSeconds $TimeoutSeconds `
             -Seed $Seed -SkipBuild:$SkipBuild -KeepFixtureRoot:$KeepFixtureRoot
