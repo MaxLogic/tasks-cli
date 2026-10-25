@@ -531,7 +531,7 @@ fn execute_viewer(
                     else if pending.target == "/v1/projects" {"init"} else if pending.method == "PATCH" {"update"}
                     else if pending.target.ends_with("/tasks") {"create"} else if pending.target.ends_with("/rules") {"rules_set"} else {"project_key"};
                 Ok(json!({"request_id":id,"project_id":project_id,"operation":operation,
-                    "task_id":pending.payload.get("request").and_then(|request|request.get("id")),
+                    "task_id":pending.recovery_task_id(),
                     "archived":pending.payload.get("archived"),"outcome_known":store.confirmation(&pending)?.is_some()}))
             }).collect::<Result<Vec<_>,AppError>>()?;
             viewer_output(json!({"command":"viewer_recovery","protocol_version":1,"items":items}))

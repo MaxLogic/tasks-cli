@@ -21,6 +21,108 @@ fn task(f: &Fixture, project: Uuid) {
     ));
 }
 
+fn attachment_recovery_after_lost_response(detach: bool) {
+    let f = Fixture::new();
+    let project_id = f.project();
+    let project = project_id.to_string();
+    task(&f, project_id);
+    task(&f, project_id);
+    let source = f.body("recovery attachment");
+    let add = [
+        "--project",
+        &project,
+        "attachment",
+        "add",
+        "FIX-002",
+        "--expect-version",
+        "1",
+        "--file",
+        source.to_str().unwrap(),
+    ];
+    if detach {
+        ok(run(&f.clients[0], &add));
+    }
+    let receipt = Uuid::new_v4().to_string();
+    let detach_args = [
+        "--project",
+        &project,
+        "attachment",
+        "detach",
+        "FIX-002",
+        "A1",
+        "--expect-version",
+        "2",
+    ];
+    let mut args = if detach {
+        detach_args.to_vec()
+    } else {
+        add.to_vec()
+    };
+    args.extend(["--request-id", &receipt]);
+    f.drop_write.store(true, Ordering::SeqCst);
+    let lost = run(&f.clients[0], &args);
+    assert_eq!(lost.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&lost.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "unknown_write_outcome");
+    let operation = if detach {
+        "attachment_detach"
+    } else {
+        "attachment_add"
+    };
+    let expected = json!({
+        "schema_version":1,"project_id":null,"id_key":null,
+        "data":{"command":"viewer_recovery","protocol_version":1,"items":[{
+            "request_id":receipt,"project_id":project,"operation":operation,
+            "task_id":2,"archived":null,"outcome_known":false
+        }]}
+    });
+    assert_eq!(ok(run(&f.clients[0], &["viewer", "recovery"])), expected);
+    let path = f.clients[0].join(format!("client/pending/{receipt}.json"));
+    let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(stored["task_id"], 2);
+    // The reviewed format whitelist stays unchanged: binary v2, JSON detach v1.
+    assert_eq!(stored["format_version"], if detach { 1 } else { 2 });
+    // Legacy records lack the identity field. Recovery still associates them
+    // using the validated numeric route, without changing the replay payload.
+    stored.as_object_mut().unwrap().remove("task_id");
+    fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    assert_eq!(ok(run(&f.clients[0], &["viewer", "recovery"])), expected);
+    let replay = ok(run(&f.clients[0], &["viewer", "reconcile", &receipt]));
+    assert_eq!(replay["data"]["command"], operation);
+    assert_eq!(replay["data"]["id"], 2);
+    assert_eq!(replay["data"]["display_id"], "FIX-002");
+    assert_eq!(replay["data"]["version"], if detach { 3 } else { 2 });
+    assert_eq!(
+        ok(run(&f.clients[0], &["viewer", "reconcile", &receipt])),
+        replay
+    );
+    let mut confirmed = expected;
+    confirmed["data"]["items"][0]["outcome_known"] = json!(true);
+    assert_eq!(ok(run(&f.clients[0], &["viewer", "recovery"])), confirmed);
+    ok(run(&f.clients[0], &["viewer", "acknowledge", &receipt]));
+    assert!(!path.exists());
+    assert!(!path.with_extension("body").exists());
+    assert_eq!(
+        ok(run(&f.clients[0], &["viewer", "recovery"]))["data"]["items"],
+        json!([])
+    );
+    let history = ok(run(&f.clients[1], &["--project", &project, "history", "2"]));
+    assert_eq!(
+        history["data"]["items"].as_array().unwrap().len(),
+        if detach { 3 } else { 2 }
+    );
+}
+
+#[test]
+fn attachment_recovery_add_reports_task_identity_and_reconciles_legacy_record() {
+    attachment_recovery_after_lost_response(false);
+}
+
+#[test]
+fn attachment_recovery_detach_reports_task_identity_and_reconciles_legacy_record() {
+    attachment_recovery_after_lost_response(true);
+}
+
 #[test]
 fn binary_upload_lost_response_reconciles_exact_sidecar_and_detaches() {
     let f = Fixture::new();

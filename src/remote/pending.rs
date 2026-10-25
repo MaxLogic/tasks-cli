@@ -19,6 +19,9 @@ pub struct PendingWrite {
     pub method: String,
     pub target: String,
     pub payload: Value,
+    /// Recovery metadata only; never included in the signed mutation payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<PendingBody>,
 }
@@ -48,6 +51,7 @@ impl PendingWrite {
             method: method.into(),
             target: target.into(),
             payload,
+            task_id: attachment_task_id(method, target),
             body: None,
         };
         value.validate()?;
@@ -89,6 +93,9 @@ impl PendingWrite {
             || self.server_id.is_nil()
             || self.credential_id.is_nil()
             || !self.payload.is_object()
+            || self
+                .task_id
+                .is_some_and(|id| Some(id) != attachment_task_id(&self.method, &self.target))
             || self.bytes()?.len() > MAX_BYTES as usize
         {
             return Err(invalid());
@@ -124,6 +131,7 @@ impl PendingWrite {
             method: "POST".into(),
             target: target.into(),
             payload: serde_json::json!({}),
+            task_id: attachment_task_id("POST", target),
             body: Some(PendingBody {
                 content_type: "application/octet-stream".into(),
                 sha256: crate::markdown::sha256(bytes),
@@ -132,6 +140,12 @@ impl PendingWrite {
         };
         request.validate()?;
         Ok(request)
+    }
+    pub fn recovery_task_id(&self) -> Option<u64> {
+        self.task_id
+            // Older attachment pending files have no explicit identity field.
+            .or_else(|| attachment_task_id(&self.method, &self.target))
+            .or_else(|| self.payload.get("request")?.get("id")?.as_u64())
     }
     pub fn payload_sha256(&self) -> Result<String, AppError> {
         Ok(match &self.body {
@@ -148,6 +162,18 @@ impl PendingWrite {
             return Err(invalid());
         }
         Ok(())
+    }
+}
+fn attachment_task_id(method: &str, target: &str) -> Option<u64> {
+    let parts = target.split('/').collect::<Vec<_>>();
+    match (method, parts.as_slice()) {
+        ("POST", ["", "v1", "projects", project, "tasks", task, "attachments"])
+        | ("POST", ["", "v1", "projects", project, "tasks", task, "attachments", "detach"])
+            if valid_project_task(project, task) =>
+        {
+            task.parse().ok()
+        }
+        _ => None,
     }
 }
 fn valid_project_task(project: &str, task: &str) -> bool {
