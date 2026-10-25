@@ -52,6 +52,25 @@ pub fn is_mutation(method: &Method, uri: &Uri) -> bool {
     }
     true
 }
+/// Route classification is shared with authentication, never inferred from a caller header.
+pub fn is_upload(method: &Method, uri: &Uri) -> bool {
+    let parts: Vec<_> = uri.path().split('/').collect();
+    *method == Method::POST
+        && matches!(
+            parts.as_slice(),
+            ["", "v1", "projects", _, "tasks", _, "attachments"]
+        )
+}
+pub fn is_download(method: &Method, uri: &Uri) -> bool {
+    *method == Method::GET
+        && matches!(
+            uri.path().split('/').collect::<Vec<_>>().as_slice(),
+            ["", "v1", "projects", _, "tasks", _, "attachments", _]
+        )
+}
+pub(crate) fn covers_length(method: &Method, uri: &Uri, headers: &HeaderMap) -> bool {
+    is_upload(method, uri) || (is_download(method, uri) && headers.contains_key("content-length"))
+}
 
 pub(crate) fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, SigningError> {
     let mut values = headers.get_all(name).iter();
@@ -94,6 +113,12 @@ pub(crate) fn signature_base(
             header(headers, "idempotency-key")?
         ));
     }
+    if covers_length(method, uri, headers) {
+        base.push_str(&format!(
+            "\n\"content-length\": {}",
+            header(headers, "content-length")?
+        ));
+    }
     base.push_str(&format!("\n\"@signature-params\": {parameters}"));
     Ok(base)
 }
@@ -109,6 +134,27 @@ impl SigningIdentity {
         idempotency: Option<Uuid>,
         created: i64,
         nonce: &[u8; 32],
+    ) -> Result<HeaderMap, SigningError> {
+        self.sign_with_content_type(
+            method,
+            uri,
+            body,
+            idempotency,
+            created,
+            nonce,
+            "application/json",
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_with_content_type(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        body: &[u8],
+        idempotency: Option<Uuid>,
+        created: i64,
+        nonce: &[u8; 32],
+        content_type: &str,
     ) -> Result<HeaderMap, SigningError> {
         let mutation = is_mutation(method, uri);
         if mutation != idempotency.is_some() || idempotency.is_some_and(|id| id.is_nil()) {
@@ -133,12 +179,15 @@ impl SigningIdentity {
             );
             Ok(())
         };
-        insert("content-type", "application/json".into())?;
+        insert("content-type", content_type.into())?;
         insert(
             "content-digest",
             format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body))),
         )?;
         insert("x-tasks-server-id", self.server_id.to_string())?;
+        if is_upload(method, uri) || is_download(method, uri) {
+            insert("content-length", body.len().to_string())?;
+        }
         if let Some(id) = idempotency {
             insert("idempotency-key", id.to_string())?;
         }
@@ -148,6 +197,9 @@ impl SigningIdentity {
             .collect::<Vec<_>>();
         if mutation {
             components.push("\"idempotency-key\"".into());
+        }
+        if covers_length(method, uri, &headers) {
+            components.push("\"content-length\"".into());
         }
         let parameters = format!(
             "({});created={created};expires={};nonce=\"{}\";alg=\"ed25519\";keyid=\"{}\"",
@@ -180,6 +232,16 @@ impl SigningIdentity {
         body: &[u8],
         idempotency: Option<Uuid>,
     ) -> Result<HeaderMap, SigningError> {
+        self.sign_now_with_content_type(method, uri, body, idempotency, "application/json")
+    }
+    pub fn sign_now_with_content_type(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        body: &[u8],
+        idempotency: Option<Uuid>,
+        content_type: &str,
+    ) -> Result<HeaderMap, SigningError> {
         let mut nonce = [0; 32];
         OsRng
             .try_fill_bytes(&mut nonce)
@@ -189,6 +251,14 @@ impl SigningIdentity {
             .map_err(|_| SigningError::Clock)?
             .as_secs();
         let created = i64::try_from(created).map_err(|_| SigningError::Clock)?;
-        self.sign(method, uri, body, idempotency, created, &nonce)
+        self.sign_with_content_type(
+            method,
+            uri,
+            body,
+            idempotency,
+            created,
+            &nonce,
+            content_type,
+        )
     }
 }

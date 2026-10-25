@@ -1,5 +1,6 @@
 //! Server-local identity and credential state. No network admin operations.
 pub mod api;
+pub mod attachments;
 mod export;
 pub mod maintenance;
 pub mod receipts;
@@ -146,6 +147,9 @@ impl OwnedServer {
 
     /// Explicit stopped-service upgrade, preserving a verified SQLite snapshot.
     pub fn migrate(root: &Path) -> Result<Option<PathBuf>, ServiceError> {
+        Ok(Self::migrate_all(root)?.backup_path)
+    }
+    pub fn migrate_all(root: &Path) -> Result<maintenance::MigrationResult, ServiceError> {
         let root = validate_storage_root(root)?;
         if !root.join("server.sqlite").is_file() {
             return Err(ServiceError::Validation("server is not initialized"));
@@ -160,7 +164,12 @@ impl OwnedServer {
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 2 {
             Self::validate_schema_version(&conn, 2)?;
-            return Ok(None);
+            let projects = maintenance::migrate_projects(&root)?;
+            return Ok(maintenance::MigrationResult {
+                schema_version: 2,
+                backup_path: None,
+                projects,
+            });
         }
         if version != 1 {
             return Err(ServiceError::Validation(
@@ -194,7 +203,12 @@ impl OwnedServer {
         tx.pragma_update(None, "user_version", 2)?;
         Self::validate_schema_version(&tx, 2)?;
         tx.commit()?;
-        Ok(Some(backup))
+        let projects = maintenance::migrate_projects(&root)?;
+        Ok(maintenance::MigrationResult {
+            schema_version: 2,
+            backup_path: Some(backup),
+            projects,
+        })
     }
 
     pub fn server_id(&self) -> Uuid {

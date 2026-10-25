@@ -191,6 +191,13 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         return Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None });
     }
     let client = RemoteClient::new(profile)?;
+    if let Command::Attachment(command @ crate::cli::AttachmentCommand::Clipboard) = &cli.command {
+        print(
+            super::attachment::execute(&client, root, "", command)?,
+            cli.format,
+        );
+        return Ok(());
+    }
     if let Command::Viewer(command) = &cli.command {
         return execute_viewer(cli, root, &client, command);
     }
@@ -291,6 +298,13 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         return Ok(());
     }
     let id = project(cli, root)?;
+    if let Command::Attachment(command) = &cli.command {
+        print(
+            super::attachment::execute(&client, root, &id, command)?,
+            cli.format,
+        );
+        return Ok(());
+    }
     if matches!(
         cli.command,
         Command::Enrich { .. } | Command::EnrichClipboard
@@ -500,7 +514,7 @@ fn execute_viewer(
                 let parts=pending.target.split('/').collect::<Vec<_>>();
                 let project_id=parts.get(3).filter(|s| Uuid::parse_str(s).is_ok()).copied()
                     .or_else(||pending.payload.get("project_id").and_then(serde_json::Value::as_str));
-                let operation=if pending.target.ends_with("/viewer/update") {"viewer_update"} else if pending.target.ends_with("/archive") {"archive"}
+                let operation=if pending.target.ends_with("/attachments") {"attachment_add"} else if pending.target.ends_with("/attachments/detach") {"attachment_detach"} else if pending.target.ends_with("/viewer/update") {"viewer_update"} else if pending.target.ends_with("/archive") {"archive"}
                     else if pending.target == "/v1/projects" {"init"} else if pending.method == "PATCH" {"update"}
                     else if pending.target.ends_with("/tasks") {"create"} else if pending.target.ends_with("/rules") {"rules_set"} else {"project_key"};
                 Ok(json!({"request_id":id,"project_id":project_id,"operation":operation,

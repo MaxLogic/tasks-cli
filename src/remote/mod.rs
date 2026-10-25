@@ -1,4 +1,5 @@
 //! Synchronous remote-client building blocks; profile routing is added separately.
+pub mod attachment;
 pub mod client;
 pub mod command;
 pub mod config;

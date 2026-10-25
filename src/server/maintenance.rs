@@ -167,10 +167,16 @@ fn online_backup(source: &Path, destination: &Path) -> Result<(), ServiceError> 
     let source = open_source(source)?;
     let target = private_fs::create_file(destination)?;
     drop(target);
-    source.backup("main", destination, None::<fn(rusqlite::backup::Progress)>)?;
+    let mut copied = Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let backup = rusqlite::backup::Backup::new(&source, &mut copied)?;
+    if !matches!(backup.step(-1)?, rusqlite::backup::StepResult::Done) {
+        return Err(invalid(
+            "stopped-service backup did not complete in one step",
+        ));
+    }
+    drop(backup);
     // Standalone snapshots must not need WAL/SHM files. Only this new copy's
     // journal mode changes; the source authority retains its durability mode.
-    let copied = Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     copied.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
     drop(copied);
     fs::OpenOptions::new()
@@ -227,9 +233,9 @@ fn project_evidence(root: &Path, id: Uuid) -> Result<DatabaseEvidence, ServiceEr
     check_db(&conn)?;
     let schema: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if schema != CURRENT_SCHEMA_VERSION {
-        return Err(invalid(
-            "project backup requires schema 8; migrate a copy explicitly",
-        ));
+        return Err(invalid(format!(
+            "project backup requires schema {CURRENT_SCHEMA_VERSION}; migrate a copy explicitly"
+        )));
     }
     let identity: String =
         conn.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
@@ -244,6 +250,8 @@ fn project_evidence(root: &Path, id: Uuid) -> Result<DatabaseEvidence, ServiceEr
         "imports",
         "metadata_events",
         "mutation_receipts",
+        "attachment_blobs",
+        "task_attachments",
     ] {
         counts.push((table.to_string(), count(&conn, table)?));
     }
@@ -516,9 +524,7 @@ pub fn import_project(
     check_db(&source)?;
     let schema: i32 = source.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if schema != CURRENT_SCHEMA_VERSION {
-        return Err(invalid(
-            "project schema is not 8; migrate a copy explicitly before import",
-        ));
+        return Err(invalid(format!("project schema is not {CURRENT_SCHEMA_VERSION}; migrate a copy explicitly before import")));
     }
     let text: String = source.query_row("SELECT project_id FROM project", [], |row| row.get(0))?;
     let id = Uuid::parse_str(&text).map_err(|_| invalid("invalid project UUID"))?;
@@ -585,6 +591,35 @@ pub fn import_project(
         let _ = fs::remove_dir_all(&dir);
     }
     result
+}
+
+#[derive(Serialize)]
+pub struct ProjectMigration {
+    pub project_id: Uuid,
+    pub from_version: i32,
+    pub to_version: i32,
+    pub backup_path: Option<PathBuf>,
+}
+#[derive(Serialize)]
+pub struct MigrationResult {
+    pub schema_version: u32,
+    pub backup_path: Option<PathBuf>,
+    pub projects: Vec<ProjectMigration>,
+}
+/// Caller holds the server ownership lock for catalog and all project upgrades.
+pub(crate) fn migrate_projects(root: &Path) -> Result<Vec<ProjectMigration>, ServiceError> {
+    let mut results = Vec::new();
+    for project_id in project_ids(root)? {
+        let mut store = Store::open_for_migration(root, &project_id.to_string())?;
+        let (from_version, to_version, backup_path) = store.migrate()?;
+        results.push(ProjectMigration {
+            project_id,
+            from_version,
+            to_version,
+            backup_path,
+        });
+    }
+    Ok(results)
 }
 
 #[cfg(test)]

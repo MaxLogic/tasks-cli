@@ -23,6 +23,15 @@ pub struct ReceiptResponse {
 
 pub fn refusal(error: &AppError) -> Option<ReceiptResponse> {
     let status = match error {
+        AppError::Coded {
+            exit: 2,
+            code:
+                "attachment_too_large" | "attachment_original_too_large" | "attachment_batch_too_large",
+            ..
+        } => 413,
+        AppError::Coded { exit: 2, .. } => 400,
+        AppError::Coded { exit: 3, .. } => 404,
+        AppError::Coded { exit: 4, .. } => 409,
         AppError::VersionConflict { .. } | AppError::StaleSnapshot(_) | AppError::Conflict(_) => {
             409
         }
@@ -43,6 +52,40 @@ pub fn refusal(error: &AppError) -> Option<ReceiptResponse> {
         body,
         receipt: None,
     })
+}
+
+/// Read-only fast path before parsing or decoding an upload. Execute rechecks it
+/// under BEGIN IMMEDIATE to close the race with another identical request.
+pub fn lookup(
+    store: &Store,
+    identity: &ReceiptIdentity,
+    payload_sha256: &str,
+) -> Result<Option<ReceiptResponse>, AppError> {
+    let prior = store.conn.query_row("SELECT actor_id,installation_id,route,payload_sha256,status,response_json FROM mutation_receipts WHERE request_id=?1", [identity.request_id.to_string()], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,u16>(4)?,r.get::<_,String>(5)?))).optional()?;
+    let Some((actor, installation, route, digest, status, body)) = prior else {
+        return Ok(None);
+    };
+    if actor != identity.actor_id
+        || installation != identity.installation_id.to_string()
+        || route != identity.route
+        || digest != payload_sha256
+    {
+        return Ok(Some(ReceiptResponse {
+            receipt: None,
+            status: 409,
+            body: json!({"schema_version":1,"error":{"code":"idempotency_conflict","message":"this request ID belongs to a different request","exit_code":4}}),
+        }));
+    }
+    Ok(Some(ReceiptResponse {
+        status,
+        body: serde_json::from_str(&body)?,
+        receipt: Some(crate::remote::protocol::RequestReceipt {
+            request_id: identity.request_id,
+            route: identity.route.clone(),
+            payload_sha256: digest,
+            status,
+        }),
+    }))
 }
 
 /// Owning the connection ensures even a panic drops and rolls back the outer

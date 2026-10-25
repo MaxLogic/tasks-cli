@@ -42,6 +42,7 @@ pub struct HttpsClient {
     client: Client,
     origin: Url,
     identity: SigningIdentity,
+    pub request_timeout: Duration,
 }
 pub(crate) fn validate_origin(endpoint: &str) -> Result<Url, ClientError> {
     let origin =
@@ -118,6 +119,7 @@ impl HttpsClient {
             client,
             origin,
             identity,
+            request_timeout: options.request_timeout,
         })
     }
 
@@ -140,7 +142,28 @@ impl HttpsClient {
         body: &[u8],
         receipt: Option<Uuid>,
     ) -> Result<reqwest::blocking::Response, ClientError> {
-        if !target.starts_with("/v1/") || target.contains('#') || body.len() > MAX_REQUEST_BYTES {
+        self.request_typed(
+            method,
+            target,
+            body,
+            receipt,
+            "application/json",
+            MAX_REQUEST_BYTES,
+            self.request_timeout,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn request_typed(
+        &self,
+        method: Method,
+        target: &str,
+        body: &[u8],
+        receipt: Option<Uuid>,
+        content_type: &str,
+        max_request: usize,
+        timeout: Duration,
+    ) -> Result<reqwest::blocking::Response, ClientError> {
+        if !target.starts_with("/v1/") || target.contains('#') || body.len() > max_request {
             return Err(ClientError::Configuration(
                 "expected a bounded /v1/ request target",
             ));
@@ -168,12 +191,13 @@ impl HttpsClient {
             .map_err(|_| ClientError::Configuration("invalid API request target"))?;
         let headers = self
             .identity
-            .sign_now(&method, &uri, body, receipt)
+            .sign_now_with_content_type(&method, &uri, body, receipt, content_type)
             .map_err(|_| ClientError::Signature)?;
         let response = self
             .client
             .request(method, url)
             .headers(headers)
+            .timeout(timeout)
             .body(body.to_vec())
             .send()
             .map_err(|_| ClientError::Transport)?;
@@ -185,27 +209,59 @@ impl HttpsClient {
 
     fn read_response(
         &self,
+        response: reqwest::blocking::Response,
+    ) -> Result<HttpResponse, ClientError> {
+        self.read_bounded_response(response, MAX_RESPONSE_BYTES)
+    }
+    fn read_bounded_response(
+        &self,
         mut response: reqwest::blocking::Response,
+        max: usize,
     ) -> Result<HttpResponse, ClientError> {
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+            .is_some_and(|length| length > max as u64)
         {
             return Err(ClientError::ResponseLimit);
         }
         let status = response.status().as_u16();
         let mut bytes = Vec::new();
         Read::by_ref(&mut response)
-            .take((MAX_RESPONSE_BYTES + 1) as u64)
+            .take((max + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| ClientError::Transport)?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
+        if bytes.len() > max {
             return Err(ClientError::ResponseLimit);
         }
         Ok(HttpResponse {
             status,
             body: bytes,
         })
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_binary(
+        &self,
+        method: Method,
+        target: &str,
+        body: &[u8],
+        content_type: &str,
+        receipt: Option<Uuid>,
+        max_request: usize,
+        max_response: usize,
+        timeout: Duration,
+    ) -> Result<HttpResponse, ClientError> {
+        self.read_bounded_response(
+            self.request_typed(
+                method,
+                target,
+                body,
+                receipt,
+                content_type,
+                max_request,
+                timeout,
+            )?,
+            max_response,
+        )
     }
 
     pub fn export(

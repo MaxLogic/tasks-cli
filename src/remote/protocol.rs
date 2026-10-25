@@ -13,6 +13,15 @@ fn initial_status() -> TaskStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadRequest {
+    Attachments {
+        id: String,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        after: Option<u64>,
+        #[serde(default = "attachment_page_size")]
+        limit: usize,
+    },
     List {
         #[serde(default)]
         status: Option<TaskStatus>,
@@ -79,6 +88,17 @@ pub enum ReadRequest {
     ViewerShow {
         id: String,
     },
+}
+fn attachment_page_size() -> usize {
+    100
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetachAttachments {
+    pub expect_version: u64,
+    pub attachments: Vec<u64>,
+    #[serde(default)]
+    pub attribution: Attribution,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

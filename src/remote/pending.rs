@@ -19,6 +19,15 @@ pub struct PendingWrite {
     pub method: String,
     pub target: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<PendingBody>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingBody {
+    pub content_type: String,
+    pub sha256: String,
+    pub len: u64,
 }
 fn invalid() -> AppError {
     AppError::Remote { code: "pending_request", message: "invalid pending request; preserve it for inspection and use its original server and credential".into(), request_id: None }
@@ -39,6 +48,7 @@ impl PendingWrite {
             method: method.into(),
             target: target.into(),
             payload,
+            body: None,
         };
         value.validate()?;
         Ok(value)
@@ -46,6 +56,12 @@ impl PendingWrite {
     fn validate(&self) -> Result<(), AppError> {
         let parts = self.target.split('/').collect::<Vec<_>>();
         let valid = match (self.method.as_str(), parts.as_slice()) {
+            ("POST", ["", "v1", "projects", project, "tasks", task, "attachments"]) => {
+                self.format_version == 2 && valid_project_task(project, task)
+            }
+            ("POST", ["", "v1", "projects", project, "tasks", task, "attachments", "detach"]) => {
+                self.format_version == 1 && valid_project_task(project, task)
+            }
             ("POST", ["", "v1", "projects"]) => true,
             (method, ["", "v1", "projects", project, resource]) => {
                 let canonical = Uuid::parse_str(project)
@@ -68,7 +84,7 @@ impl PendingWrite {
             _ => false,
         };
         if !valid
-            || self.format_version != 1
+            || !matches!(self.format_version, 1 | 2)
             || self.request_id.is_nil()
             || self.server_id.is_nil()
             || self.credential_id.is_nil()
@@ -77,7 +93,51 @@ impl PendingWrite {
         {
             return Err(invalid());
         }
+        match (&self.body, self.format_version) {
+            (None, 1) => (),
+            (Some(body), 2)
+                if parts.len() == 7
+                    && parts[6] == "attachments"
+                    && self.payload == serde_json::json!({})
+                    && body.content_type == "application/octet-stream"
+                    && body.len <= crate::attachment::frame::MAX_UPLOAD_BYTES as u64
+                    && body.sha256.len() == 64
+                    && body
+                        .sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {}
+            _ => return Err(invalid()),
+        }
         Ok(())
+    }
+    pub fn binary(
+        server_id: Uuid,
+        credential_id: Uuid,
+        target: &str,
+        bytes: &[u8],
+    ) -> Result<Self, AppError> {
+        let request = Self {
+            format_version: 2,
+            request_id: Uuid::new_v4(),
+            server_id,
+            credential_id,
+            method: "POST".into(),
+            target: target.into(),
+            payload: serde_json::json!({}),
+            body: Some(PendingBody {
+                content_type: "application/octet-stream".into(),
+                sha256: crate::markdown::sha256(bytes),
+                len: bytes.len() as u64,
+            }),
+        };
+        request.validate()?;
+        Ok(request)
+    }
+    pub fn payload_sha256(&self) -> Result<String, AppError> {
+        Ok(match &self.body {
+            Some(body) => body.sha256.clone(),
+            None => crate::markdown::sha256(&self.bytes()?),
+        })
     }
     pub fn bytes(&self) -> Result<Vec<u8>, AppError> {
         Ok(serde_json::to_vec(&self.payload)?)
@@ -89,6 +149,12 @@ impl PendingWrite {
         }
         Ok(())
     }
+}
+fn valid_project_task(project: &str, task: &str) -> bool {
+    Uuid::parse_str(project).is_ok_and(|id| !id.is_nil() && id.to_string() == project)
+        && task
+            .parse::<u64>()
+            .is_ok_and(|id| id > 0 && id <= i64::MAX as u64 && id.to_string() == task)
 }
 pub struct PendingStore {
     root: PathBuf,
@@ -119,6 +185,10 @@ impl PendingStore {
     }
     pub fn save(&self, request: &PendingWrite) -> Result<(), AppError> {
         request.validate()?;
+        self.clean_orphan_bodies(request.body.as_ref().map(|_| request.request_id))?;
+        if request.body.is_some() {
+            self.load_body(request)?;
+        }
         if std::fs::symlink_metadata(self.root.join(format!("{}.confirmed", request.request_id)))
             .is_ok()
         {
@@ -166,7 +236,74 @@ impl PendingStore {
             return Err(invalid());
         }
         request.validate()?;
+        if request.body.is_some() {
+            self.load_body(&request)?;
+        }
         Ok(request)
+    }
+    fn body_path(&self, id: Uuid) -> PathBuf {
+        self.root.join(format!("{id}.body"))
+    }
+    fn clean_orphan_bodies(&self, except: Option<Uuid>) -> Result<(), AppError> {
+        private_fs::validate_dir(&self.root)?;
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".body")) else {
+                continue;
+            };
+            let id = Uuid::parse_str(stem).map_err(|_| invalid())?;
+            if id.to_string() != stem {
+                return Err(invalid());
+            }
+            if Some(id) != except && !self.path(id).try_exists()? {
+                // Only canonical, private, regular sidecars can be retired.
+                drop(private_fs::open_file(&entry.path())?);
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+    pub fn load_body(&self, request: &PendingWrite) -> Result<Vec<u8>, AppError> {
+        request.validate()?;
+        let body = request.body.as_ref().ok_or_else(invalid)?;
+        let mut bytes = Vec::new();
+        private_fs::open_file(&self.body_path(request.request_id))?
+            .take(body.len + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != body.len || crate::markdown::sha256(&bytes) != body.sha256 {
+            return Err(invalid());
+        }
+        Ok(bytes)
+    }
+    pub fn save_binary(&self, request: &PendingWrite, bytes: &[u8]) -> Result<(), AppError> {
+        request.validate()?;
+        let body = request.body.as_ref().ok_or_else(invalid)?;
+        if bytes.len() as u64 != body.len || crate::markdown::sha256(bytes) != body.sha256 {
+            return Err(invalid());
+        }
+        self.clean_orphan_bodies(None)?;
+        let path = self.body_path(request.request_id);
+        let temporary = self.root.join(format!(".body-{}.tmp", Uuid::new_v4()));
+        let result = (|| {
+            let mut file = private_fs::create_file(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            atomicwrites::move_atomic(&temporary, &path)?;
+            #[cfg(unix)]
+            {
+                std::fs::hard_link(&temporary, &path)?;
+                std::fs::remove_file(&temporary)?;
+                std::fs::File::open(&self.root)?.sync_all()?;
+            }
+            self.save(request)
+        })();
+        if temporary.exists() {
+            std::fs::remove_file(&temporary)?;
+        }
+        result
     }
     pub fn list(&self) -> Result<Vec<Uuid>, AppError> {
         private_fs::validate_dir(&self.root)?;
@@ -192,7 +329,9 @@ impl PendingStore {
         remove_completed(&self.path(id), || {
             #[cfg(unix)]
             std::fs::File::open(&self.root)?.sync_all()?;
-            Ok(())
+            // JSON is already gone and the terminal result is known. A failed
+            // body unlink leaves an orphan for the next locked save to retire.
+            std::fs::remove_file(self.body_path(id))
         })
     }
 
@@ -279,7 +418,7 @@ fn validate_confirmation(
     request.validate()?;
     if receipt.request_id != request.request_id
         || receipt.route != format!("{} {}", request.method, request.target)
-        || receipt.payload_sha256 != crate::markdown::sha256(&request.bytes()?)
+        || receipt.payload_sha256 != request.payload_sha256()?
         || !matches!(receipt.status, 200 | 400 | 404 | 409 | 413)
     {
         return Err(invalid());
@@ -291,7 +430,7 @@ fn remove_completed(
     sync_directory: impl FnOnce() -> std::io::Result<()>,
 ) -> Result<(), AppError> {
     std::fs::remove_file(path)?;
-    // The terminal server result is already known. Failed directory sync may
+    // The terminal server result is already known. Failed cleanup/sync may
     // resurrect this same receipt after a crash; reconciling it is safe. It must
     // not report an unknown outcome after the only recovery file was unlinked.
     let _ = sync_directory();

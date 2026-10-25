@@ -38,6 +38,12 @@ struct Record {
     operation: &'static str,
     duration_ms: u64,
     outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stored_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_original_bytes: Option<u64>,
 }
 pub(super) struct RequestLog {
     sink: RequestLogs,
@@ -59,6 +65,9 @@ impl RequestLog {
                 operation,
                 duration_ms: 0,
                 outcome: "cancelled".into(),
+                item_count: None,
+                stored_bytes: None,
+                declared_original_bytes: None,
             },
         }
     }
@@ -73,6 +82,49 @@ impl RequestLog {
     }
     pub(super) fn completed(&mut self, status: u16) {
         self.record.outcome = format!("http_{status}");
+    }
+    pub(super) fn attachment_sizes(&mut self, count: u64, stored: u64, original: u64) {
+        self.record.item_count = Some(count);
+        self.record.stored_bytes = Some(stored);
+        self.record.declared_original_bytes = Some(original);
+    }
+    /// Inspect only numeric fields in server-produced output, including receipts.
+    pub(super) fn attachment_output(&mut self, reply: &serde_json::Value) {
+        let data = &reply["output"]["data"];
+        let (operation, field) = match data["command"].as_str() {
+            Some("attachment_add") => ("attachment_add", "attachments"),
+            Some("attachment_list") => ("attachment_list", "items"),
+            Some("attachment_detach") => ("attachment_detach", "detached"),
+            _ => return,
+        };
+        let Some(items) = data[field].as_array() else {
+            return;
+        };
+        let sizes = items
+            .iter()
+            .try_fold((0u64, 0u64), |(stored, original), item| {
+                if field == "detached" {
+                    // Detach sends identifiers and declares no content bytes.
+                    Some((stored, original))
+                } else {
+                    Some((
+                        stored.checked_add(item["stored_size"].as_u64()?)?,
+                        original.checked_add(item["original_size"].as_u64()?)?,
+                    ))
+                }
+            });
+        if let Some((stored, original)) = sizes {
+            self.record.operation = operation;
+            self.attachment_sizes(items.len() as u64, stored, original);
+        }
+    }
+    pub(super) fn attachment_finished(&mut self, success: bool) {
+        self.record.outcome = if success {
+            "attachment_complete"
+        } else {
+            "attachment_interrupted"
+        }
+        .into();
     }
     pub(super) fn handoff(&mut self) -> Self {
         self.emit = false;
@@ -137,6 +189,25 @@ fn operation(method: &Method, uri: &Uri) -> (Option<Uuid>, &'static str) {
         .and_then(|value| Uuid::parse_str(value).ok());
     if project.is_none() {
         return (None, "unknown");
+    }
+    let rest = segments.clone().collect::<Vec<_>>();
+    match rest.as_slice() {
+        ["tasks", id, "attachments"] if id.parse::<u64>().is_ok() && *method == Method::POST => {
+            return (project, "attachment_add")
+        }
+        ["tasks", id, "attachments", "detach"]
+            if id.parse::<u64>().is_ok() && *method == Method::POST =>
+        {
+            return (project, "attachment_detach")
+        }
+        ["tasks", id, "attachments", attachment]
+            if id.parse::<u64>().is_ok()
+                && attachment.parse::<u64>().is_ok()
+                && *method == Method::GET =>
+        {
+            return (project, "attachment_get")
+        }
+        _ => (),
     }
     let operation = match (segments.next(), segments.next(), segments.next()) {
         (Some("query"), None, None) if method == Method::POST => "project_query",

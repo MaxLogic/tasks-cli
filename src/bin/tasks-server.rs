@@ -2,7 +2,11 @@
 
 use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
-use tasks_cli::server::{maintenance, transport::ServiceState, OwnedServer, Registration};
+use tasks_cli::server::{
+    maintenance,
+    transport::{ConnectionControl, ServiceState, TransferListener},
+    OwnedServer, Registration,
+};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -63,11 +67,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Admin { command } => {
             if matches!(command, Admin::Migrate) {
-                let backup = OwnedServer::migrate(&cli.data_root)?;
-                println!(
-                    "{}",
-                    serde_json::json!({"schema_version":2,"backup_path":backup})
-                );
+                let result = OwnedServer::migrate_all(&cli.data_root)?;
+                println!("{}", serde_json::to_string(&result)?);
                 return Ok(());
             }
             if matches!(command, Admin::Init) {
@@ -136,7 +137,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let listener=tokio::net::TcpListener::bind(listen).await?;
                 let (stop_send,stop_receive)=tokio::sync::oneshot::channel::<()>();
                 let app=state.router();
-                let mut service=tokio::spawn(async move {axum::serve(listener,app).with_graceful_shutdown(async {let _=stop_receive.await;}).await});
+                let mut service=tokio::spawn(async move {axum::serve(TransferListener(listener),app.into_make_service_with_connect_info::<ConnectionControl>()).with_graceful_shutdown(async {let _=stop_receive.await;}).await});
                 tokio::select! {
                     result=&mut service => { result??; return Ok::<_,Box<dyn std::error::Error>>(()); },
                     result=shutdown_signal()=>{ result?; },

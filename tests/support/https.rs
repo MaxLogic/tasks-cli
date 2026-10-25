@@ -19,7 +19,8 @@ impl HttpBackend {
                 .block_on(async {
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                     ready.send(listener.local_addr().unwrap()).unwrap();
-                    axum::serve(listener, state.router())
+                    axum::serve(tasks_cli::server::transport::TransferListener(listener),
+                        state.router().into_make_service_with_connect_info::<tasks_cli::server::transport::ConnectionControl>())
                         .with_graceful_shutdown(async {
                             let _ = stopped.await;
                         })
@@ -164,7 +165,7 @@ impl TlsFixture {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0usize);
-                assert!(length <= 8 * 1024 * 1024);
+                assert!(length <= 52 * 1024 * 1024);
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).unwrap();
                 match &reply {

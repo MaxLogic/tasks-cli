@@ -97,10 +97,33 @@ impl OwnedServer {
                 "request compression is unsupported",
             ));
         }
-        if header(headers, "content-type")? != "application/json" {
+        let expected_type = if crate::remote::signing::is_upload(method, uri) {
+            "application/octet-stream"
+        } else {
+            "application/json"
+        };
+        if header(headers, "content-type")? != expected_type {
             return Err(ServiceError::Unauthorized(
-                "content type must be application/json",
+                "content type does not match the signed route profile",
             ));
+        }
+        let binary = crate::remote::signing::is_upload(method, uri)
+            || crate::remote::signing::is_download(method, uri);
+        if binary && headers.contains_key("transfer-encoding") {
+            return Err(ServiceError::Unauthorized(
+                "binary requests require a fixed signed length",
+            ));
+        }
+        let signed_length = crate::remote::signing::covers_length(method, uri, headers);
+        if signed_length {
+            let text = header(headers, "content-length")?;
+            if text
+                .parse::<u64>()
+                .ok()
+                .is_none_or(|n| n.to_string() != text)
+            {
+                return Err(ServiceError::Unauthorized("invalid signed content length"));
+            }
         }
         let addressed = Uuid::parse_str(header(headers, "x-tasks-server-id")?)
             .map_err(|_| ServiceError::Unauthorized("invalid server identity"))?;
@@ -128,6 +151,9 @@ impl OwnedServer {
         let mut expected = COMPONENTS.to_vec();
         if mutation {
             expected.push("idempotency-key");
+        }
+        if signed_length {
+            expected.push("content-length");
         }
         if list.items.len() != expected.len()
             || list.items.iter().zip(expected).any(|(item, name)| {

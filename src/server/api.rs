@@ -11,7 +11,7 @@ use crate::{
     AppError,
 };
 use axum::http::{Method, Uri};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -49,7 +49,7 @@ pub(crate) fn bounded_json(value: &impl Serialize) -> Result<Vec<u8>, AppError> 
     }
     Ok(out.bytes)
 }
-fn output(store: &Store, data: CommandPayload) -> Result<Value, AppError> {
+pub(crate) fn output(store: &Store, data: CommandPayload) -> Result<Value, AppError> {
     output_with_project(Some(store), data)
 }
 
@@ -79,7 +79,7 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, AppError> {
     serde_json::from_slice(bytes)
         .map_err(|_| AppError::validation("invalid API JSON or unsupported fields"))
 }
-fn response(result: Result<Value, AppError>) -> Result<ReceiptResponse, ServiceError> {
+pub(crate) fn response(result: Result<Value, AppError>) -> Result<ReceiptResponse, ServiceError> {
     match result {
         Ok(body) => Ok(ReceiptResponse {
             status: 200,
@@ -95,14 +95,14 @@ fn response(result: Result<Value, AppError>) -> Result<ReceiptResponse, ServiceE
 fn not_found() -> AppError {
     AppError::NotFound("unknown server project".into())
 }
-fn catalogued(server: &OwnedServer, id: Uuid) -> Result<bool, ServiceError> {
+pub(crate) fn catalogued(server: &OwnedServer, id: Uuid) -> Result<bool, ServiceError> {
     Ok(server.connect()?.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1)",
         [id.to_string()],
         |r| r.get(0),
     )?)
 }
-fn identity(
+pub(crate) fn identity(
     auth: &AuthenticatedRequest,
     method: &Method,
     uri: &Uri,
@@ -122,7 +122,7 @@ fn canonical(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
         Err(_) => Ok(bytes.to_vec()),
     }
 }
-fn context(
+pub(crate) fn context(
     auth: &AuthenticatedRequest,
     mut attribution: Attribution,
 ) -> Result<Attribution, AppError> {
@@ -144,6 +144,42 @@ fn unique_key(server: &OwnedServer, project: Uuid, key: &str) -> Result<(), AppE
 
 fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Result<Value, AppError> {
     let data = match request {
+        ReadRequest::Attachments {
+            id,
+            all,
+            after,
+            limit,
+        } => {
+            let id = store.resolve_ref(&id)?;
+            if !(1..=100).contains(&limit) {
+                return Err(AppError::validation("attachment page limit must be 1-100"));
+            }
+            let snapshot = store.conn.unchecked_transaction()?;
+            let version = snapshot
+                .query_row("SELECT version FROM tasks WHERE id=?1", [id], |r| {
+                    r.get::<_, u64>(0)
+                })
+                .optional()?
+                .ok_or_else(|| AppError::NotFound(format!("task {id}")))?;
+            let mut items =
+                crate::attachment::db::list(&snapshot, id, all, after.unwrap_or(0), limit + 1)?;
+            let has_more = items.len() > limit;
+            items.truncate(limit);
+            let next_after = if has_more {
+                items.last().map(|a| format!("A{}", a.attachment.id))
+            } else {
+                None
+            };
+            snapshot.commit()?;
+            CommandPayload::AttachmentList {
+                id,
+                display_id: store.display_id(id),
+                version,
+                items,
+                has_more,
+                next_after,
+            }
+        }
         ReadRequest::List {
             status,
             after,
@@ -339,6 +375,7 @@ fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Resul
 }
 
 enum Mutation {
+    Detach(u64, DetachAttachments),
     Create(CreateTask),
     Update(u64, UpdateTask),
     Rules(SetRules),
@@ -349,6 +386,7 @@ enum Mutation {
 impl Mutation {
     fn attribution(&self) -> &Attribution {
         match self {
+            Self::Detach(_, v) => &v.attribution,
             Self::Create(v) => &v.attribution,
             Self::Update(_, v) => &v.attribution,
             Self::Rules(v) => &v.attribution,
@@ -359,6 +397,17 @@ impl Mutation {
     }
     fn apply(self, store: &mut Store, server: &OwnedServer) -> Result<Value, AppError> {
         let data = match self {
+            Self::Detach(id, v) => {
+                let result = store.detach(id, v.expect_version, &v.attachments)?;
+                CommandPayload::AttachmentDetach {
+                    id: result.id,
+                    display_id: store.display_id(result.id),
+                    status: result.status.to_string(),
+                    version: result.version,
+                    event_id: result.event_id,
+                    detached: result.detached,
+                }
+            }
             Self::Create(v) => {
                 let deps = v
                     .deps
@@ -638,6 +687,10 @@ pub fn handle(
         {
             capabilities.push("attachments-v1");
         }
+        #[cfg(feature = "test-hooks")]
+        if std::env::var_os("TASKS_TEST_NO_ATTACHMENTS_CAPABILITY").is_some() {
+            capabilities.retain(|v| *v != "attachments-v1");
+        }
         return Ok(ReceiptResponse {
             receipt: None,
             status: 200,
@@ -728,6 +781,14 @@ pub fn handle(
         ));
     }
     let prepared: Result<Mutation, AppError> = match (method.as_str(), parts.len(), parts[4]) {
+        ("POST", 8, "tasks") if parts[6] == "attachments" && parts[7] == "detach" => {
+            match parts[5].parse::<u64>() {
+                Ok(id) if id > 0 && id <= i64::MAX as u64 && id.to_string() == parts[5] => {
+                    parse(bytes).map(|v| Mutation::Detach(id, v))
+                }
+                _ => Err(AppError::validation("invalid task route")),
+            }
+        }
         ("POST", 5, "tasks") => parse(bytes).map(Mutation::Create),
         ("PATCH", 6, "tasks") => match parts[5].parse::<u64>() {
             Ok(id) if id > 0 && id <= i64::MAX as u64 && id.to_string() == parts[5] => {

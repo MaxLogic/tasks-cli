@@ -61,6 +61,108 @@ fn row_snapshot(path: &Path) -> (String, i64, String, String, i64, i64) {
 }
 
 #[test]
+fn admin_migrate_upgrades_all_schema8_projects_and_preserves_verified_backups() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("server");
+    let server = OwnedServer::initialize(&root).unwrap();
+    let ids = [project(&root, "ONE"), project(&root, "TWO")];
+    let before = ids.map(|id| row_snapshot(&data_root_project_path(&root, &id.to_string())));
+    for id in ids {
+        let conn = Connection::open(data_root_project_path(&root, &id.to_string())).unwrap();
+        conn.execute_batch(
+            "DROP TABLE task_attachments; DROP TABLE attachment_blobs; PRAGMA user_version=8;",
+        )
+        .unwrap();
+    }
+    drop(server);
+    let migrate = || {
+        let result = super_command()
+            .args(["--data-root", root.to_str().unwrap(), "admin", "migrate"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()
+    };
+    let first = migrate();
+    assert_eq!(first["projects"].as_array().unwrap().len(), 2);
+    for (index, id) in ids.into_iter().enumerate() {
+        let db = data_root_project_path(&root, &id.to_string());
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(row_snapshot(&db), before[index]);
+        let entry = first["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["project_id"] == id.to_string())
+            .unwrap();
+        assert_eq!(entry["from_version"], 8);
+        assert_eq!(entry["to_version"], 9);
+        let backup = Path::new(entry["backup_path"].as_str().unwrap());
+        assert_eq!(row_snapshot(backup), before[index]);
+        let old = Connection::open(backup).unwrap();
+        assert_eq!(
+            old.pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            old.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+    let second = migrate();
+    assert!(second["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["from_version"] == 9 && p["to_version"] == 9 && p["backup_path"].is_null()));
+    let catalog = Connection::open(root.join("server.sqlite")).unwrap();
+    assert_eq!(
+        catalog
+            .pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+            .unwrap(),
+        2
+    );
+    let server = OwnedServer::open(&root).unwrap();
+    let out = base.path().join("backup");
+    maintenance::backup(&server, &out).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    for item in manifest["files"].as_array().unwrap().iter().skip(1) {
+        assert!(item["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c[0] == "attachment_blobs"));
+        assert!(item["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c[0] == "task_attachments"));
+    }
+}
+
+fn super_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_tasks-server"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
+#[test]
 fn backup_restores_catalog_credentials_receipts_and_unpublished_store() {
     let base = tempfile::tempdir().unwrap();
     let source = base.path().join("server");
@@ -80,6 +182,26 @@ fn backup_restores_catalog_credentials_receipts_and_unpublished_store() {
     server.revoke(credential).unwrap();
     let published = project(&source, "PUB");
     let unpublished = project(&source, "STUB");
+    {
+        let mut store = Store::open_rw(&source, &published.to_string()).unwrap();
+        let bytes = tasks_cli::attachment::envelope::encode(
+            &b"backup content"[..],
+            "kept.txt",
+            &tasks_cli::attachment::Limits::PRODUCTION,
+        )
+        .unwrap();
+        store
+            .attach(
+                1,
+                1,
+                vec![tasks_cli::attachment::db::PreparedItem {
+                    name: "kept.txt".into(),
+                    envelope: bytes,
+                }],
+                &tasks_cli::attachment::Limits::PRODUCTION,
+            )
+            .unwrap();
+    }
     let catalog = Connection::open(source.join("server.sqlite")).unwrap();
     catalog
         .execute(
@@ -92,6 +214,21 @@ fn backup_restores_catalog_credentials_receipts_and_unpublished_store() {
     let backup = base.path().join("backup");
     let result = maintenance::backup(&server, &backup).unwrap();
     assert_eq!(result.databases, 3);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+    let evidence = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["identity"] == published.to_string())
+        .unwrap();
+    for table in ["attachment_blobs", "task_attachments"] {
+        assert!(evidence["counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0] == table && row[1] == 1));
+    }
     assert!(backup
         .join("projects")
         .join(unpublished.to_string())

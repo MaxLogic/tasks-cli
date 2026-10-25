@@ -480,7 +480,11 @@ mod api_routes {
                 "{operation} must reflect attachments-v1 availability"
             );
         }
-        assert!(!capability, "C1 has no remote attachment implementation");
+        assert_eq!(
+            capability,
+            tasks_cli::attachment::frame::REMOTE_IMPLEMENTED,
+            "attachments-v1 must reflect the remote implementation switch"
+        );
     }
 
     #[test]

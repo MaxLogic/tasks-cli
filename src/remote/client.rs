@@ -141,6 +141,49 @@ impl RemoteClient {
                 .map_err(transport_error)?,
         )
     }
+    pub fn require_attachments(&self) -> Result<(), AppError> {
+        if !self.info()?["capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|v| v == "attachments-v1"))
+        {
+            return Err(AppError::Remote { code:"remote_capability", message:"server does not support attachments-v1; upgrade the server before using attachments".into(), request_id:None });
+        }
+        Ok(())
+    }
+    pub fn transfer_timeout(&self, body_bytes: u64, original_bytes: u64) -> Duration {
+        Duration::from_secs(
+            self.http
+                .request_timeout
+                .as_secs()
+                .saturating_add(body_bytes.div_ceil(128 * 1024))
+                .saturating_add(original_bytes.div_ceil(32 * 1024 * 1024))
+                .min(600),
+        )
+    }
+    pub fn write_binary(
+        &self,
+        root: &Path,
+        target: &str,
+        body: &[u8],
+        request_id: Option<Uuid>,
+    ) -> Result<ApiOutput, AppError> {
+        self.require_attachments()?;
+        let store = PendingStore::new(root)?;
+        let _lock = store.lock()?;
+        if !store.list()?.is_empty() {
+            return Err(AppError::Remote {
+                code: "pending_write",
+                message: "a previous write needs reconciliation; run tasks remote pending".into(),
+                request_id: None,
+            });
+        }
+        let mut request = PendingWrite::binary(self.server_id, self.credential_id, target, body)?;
+        if let Some(id) = request_id {
+            request.request_id = id;
+        }
+        store.save_binary(&request, body)?;
+        self.send_pending(&store, &request, request_id.is_some())
+    }
     pub fn write(
         &self,
         root: &Path,
@@ -221,22 +264,44 @@ impl RemoteClient {
             AppError::Remote { code:"unknown_write_outcome", message:format!("write outcome is unknown; run tasks remote reconcile {} with this profile before another mutation",request.request_id), request_id:Some(request.request_id) }
         };
         let method = Method::from_bytes(request.method.as_bytes()).map_err(|_| invalid_reply())?;
-        let reply = self
-            .http
-            .send(
+        let reply = if request.body.is_some() {
+            let body = store.load_body(request)?;
+            // A retained terminal refusal may itself be malformed. Replay exact
+            // verified bytes; use the maximum original budget for its deadline.
+            let originals = crate::attachment::frame::preflight_upload(
+                &body,
+                &crate::attachment::Limits::PRODUCTION,
+            )
+            .map_or(
+                crate::attachment::Limits::PRODUCTION.batch_original_bytes,
+                |frame| frame.metadata.items.iter().map(|i| i.original_size).sum(),
+            );
+            self.http.send_binary(
+                method,
+                &request.target,
+                &body,
+                "application/octet-stream",
+                Some(request.request_id),
+                crate::attachment::frame::MAX_UPLOAD_BYTES,
+                16 * 1024 * 1024,
+                self.transfer_timeout(body.len() as u64, originals),
+            )
+        } else {
+            self.http.send(
                 method,
                 &request.target,
                 &request.bytes()?,
                 Some(request.request_id),
             )
-            .map_err(|_| unknown())?;
+        }
+        .map_err(|_| unknown())?;
         let value: Value = serde_json::from_slice(&reply.body).map_err(|_| unknown())?;
         let receipt: super::protocol::RequestReceipt =
             serde_json::from_value(value.get("receipt").cloned().ok_or_else(unknown)?)
                 .map_err(|_| unknown())?;
         if receipt.request_id != request.request_id
             || receipt.route != format!("{} {}", request.method, request.target)
-            || receipt.payload_sha256 != crate::markdown::sha256(&request.bytes()?)
+            || receipt.payload_sha256 != request.payload_sha256()?
             || receipt.status != reply.status
             || !matches!(reply.status, 200 | 400 | 404 | 409 | 413)
         {
