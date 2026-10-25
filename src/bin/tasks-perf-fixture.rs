@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Seeds deterministic performance fixtures for `viewer/tool/measure.ps1`.
 //!
 //! The profiles match viewer/spec.md section 10: 100 projects with 1000 tasks

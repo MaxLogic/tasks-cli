@@ -12,6 +12,14 @@ pub enum AppError {
     },
     #[error("usage: {0}")]
     Usage(String),
+    #[error("destination exists: {0}; choose another path or pass --overwrite")]
+    DestinationExists(String),
+    #[error(
+        "destination collision: {0}; choose distinct destination names or use the default cache"
+    )]
+    DestinationCollision(String),
+    #[error("remote capability: {0}; upgrade the server to support attachments-v1")]
+    RemoteCapability(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("project/task not found: {0}")]
@@ -116,6 +124,9 @@ impl AppError {
         match self {
             Self::Coded { code, .. } => code,
             Self::Usage(_) => "usage",
+            Self::DestinationExists(_) => "destination_exists",
+            Self::DestinationCollision(_) => "destination_collision",
+            Self::RemoteCapability(_) => "remote_capability",
             Self::NotFound(_) | Self::NotFoundCode(_) => "not_found",
             Self::VersionConflict { .. } => "version_conflict",
             Self::Conflict(_) => "conflict",
@@ -139,6 +150,8 @@ impl AppError {
         match self {
             Self::Coded { exit, .. } => i32::from(*exit),
             Self::Usage(_) => 2,
+            Self::DestinationExists(_) | Self::DestinationCollision(_) => 2,
+            Self::RemoteCapability(_) => 5,
             Self::NotFound(_) | Self::NotFoundCode(_) => 3,
             Self::VersionConflict { .. } => 4,
             Self::Conflict(_) => 4,
@@ -257,6 +270,38 @@ impl AppError {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn attachment_destination_and_capability_errors_have_stable_codes() {
+        for (error, code, exit, recovery) in [
+            (
+                AppError::DestinationExists("C:/out/a.txt".into()),
+                "destination_exists",
+                2,
+                "--overwrite",
+            ),
+            (
+                AppError::DestinationCollision("A1 and A2 resolve to C:/out/a.txt".into()),
+                "destination_collision",
+                2,
+                "distinct destination",
+            ),
+            (
+                AppError::RemoteCapability("server lacks attachments-v1".into()),
+                "remote_capability",
+                5,
+                "upgrade the server",
+            ),
+        ] {
+            assert_eq!(error.exit_code(), exit);
+            assert_eq!(error.code(), code);
+            assert!(error.to_string().contains(recovery));
+            let json: serde_json::Value = serde_json::from_str(&error.json()).unwrap();
+            assert_eq!(json["schema_version"], 1);
+            assert_eq!(json["error"]["code"], code);
+            assert_eq!(json["error"]["message"], error.to_string());
+        }
+    }
 
     #[test]
     fn attachment_error_mapping_preserves_code_exit_and_message() {

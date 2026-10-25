@@ -24,6 +24,131 @@ const EXIT_CONFLICT_OR_STALE: i32 = 4;
 const EXIT_IO_OR_DATABASE: i32 = 6;
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
+#[test]
+fn doctor_reports_pre_attachment_schemas_without_migrating() {
+    let project = Project::new();
+    {
+        let conn = project.conn();
+        conn.execute_batch(
+            "DROP TABLE task_attachments; DROP TABLE attachment_blobs; PRAGMA user_version=8;",
+        )
+        .unwrap();
+    }
+    let data = project.run(&["doctor"]).data();
+    assert_eq!(data["schema_version"], 8);
+    assert_eq!(data["attachment_blobs"], 0);
+    assert_eq!(data["attachment_stored_bytes"], 0);
+    assert_eq!(data["attachment_quota_bytes"], 1_073_741_824u64);
+    let conn = project.conn();
+    assert_eq!(
+        conn.pragma_query_value::<u64, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        conn.query_row::<u64, _, _>(
+            "SELECT count(*) FROM sqlite_schema WHERE name='attachment_blobs'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        0
+    );
+    conn.pragma_update(None, "user_version", 9).unwrap();
+    drop(conn);
+    project
+        .run(&["doctor"])
+        .fails_with_message(6, "database", "attachment_blobs");
+}
+
+#[test]
+fn attachment_metadata_is_retained_in_viewer_and_doctor_counts_detached_blobs() {
+    use tasks_cli::attachment::{db::PreparedItem, envelope, Limits};
+    let project = Project::new();
+    let id = project.add_plain("attachments", TaskStatus::Ready);
+    let empty = project.add_plain("empty", TaskStatus::Ready);
+    let mut store = project.store();
+    let added = store
+        .attach(
+            id,
+            1,
+            vec![
+                PreparedItem {
+                    name: "a.txt".into(),
+                    envelope: envelope::encode(&b"hello"[..], "a.txt", &Limits::PRODUCTION)
+                        .unwrap(),
+                },
+                PreparedItem {
+                    name: "b.txt".into(),
+                    envelope: envelope::encode(&b"hello"[..], "b.txt", &Limits::PRODUCTION)
+                        .unwrap(),
+                },
+            ],
+            &Limits::PRODUCTION,
+        )
+        .unwrap();
+    let retained = &added.attachments[1].attachment;
+    store
+        .detach(id, 2, &[added.attachments[0].attachment.id])
+        .unwrap();
+    drop(store);
+    let detail = project.run(&["viewer", "show", &id.to_string()]).data();
+    assert_eq!(detail["version"], 3);
+    assert_eq!(detail["attachments"], json!([retained]));
+    assert_eq!(
+        project.run(&["viewer", "show", &empty.to_string()]).data()["attachments"],
+        json!([])
+    );
+    let tasks = project.tasks(json!({}));
+    for row in tasks["items"].as_array().unwrap() {
+        assert_eq!(row["attachment_count"], if row["id"] == id { 1 } else { 0 });
+    }
+    let doctor = project.run(&["doctor"]).data();
+    assert_eq!(doctor["attachment_blobs"], 1);
+    assert_eq!(doctor["attachment_stored_bytes"], 57);
+    assert_eq!(doctor["attachment_quota_bytes"], 1_073_741_824u64);
+    let mut args = viewer_args(
+        project.data_root.path(),
+        Some(&project.id_text()),
+        &["doctor"],
+    );
+    args[3] = "text".into();
+    let text = spawn(&args, None);
+    assert_eq!(text.code, 0, "{}", text.stderr);
+    for line in [
+        "attachment_blobs: 1\n",
+        "attachment_stored_bytes: 57\n",
+        "attachment_quota_bytes: 1073741824\n",
+    ] {
+        assert!(text.stdout.contains(line), "{}", text.stdout);
+    }
+}
+
+#[test]
+fn attachment_surface_returns_the_documented_stub_error_without_a_store() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("absent");
+    for tail in [
+        vec!["attachment", "clipboard"],
+        vec![
+            "attachment",
+            "add",
+            "1",
+            "--expect-version",
+            "1",
+            "--file",
+            "x",
+        ],
+        vec!["attachment", "list", "1"],
+        vec!["attachment", "get", "1"],
+        vec!["attachment", "detach", "1", "A1", "--expect-version", "1"],
+    ] {
+        let run = spawn(&viewer_args(&missing, None, &tail), None);
+        run.fails_with_message(2, "usage", "not implemented in this build");
+    }
+    assert!(!missing.exists());
+}
+
 struct Run {
     code: i32,
     stdout: String,
@@ -435,6 +560,16 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
         "ASCII letters, digits and -_.:"
     );
     assert_eq!(limits["deps"]["max_count"], 1000);
+    assert_eq!(
+        data["attachment_limits"],
+        json!({
+            "payload_bytes": 20_971_520, "original_bytes": 268_435_456,
+            "task_count": 32, "task_stored_bytes": 52_428_800,
+            "project_stored_bytes": 1_073_741_824, "batch_count": 32,
+            "batch_original_bytes": 536_870_912,
+            "preview_media_types": ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"]
+        })
+    );
 
     assert!(
         !missing.exists(),
@@ -448,6 +583,83 @@ fn viewer_info_reports_the_protocol_without_touching_a_store() {
     let args = viewer_args(&missing, Some(&project_id), &["viewer", "info"]);
     spawn(&args, None).ok();
     assert!(!missing.exists());
+}
+
+#[test]
+fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
+    let project = Project::new();
+    let info = project.run(&["viewer", "info"]).data();
+    for operation in info["operations"].as_array().unwrap() {
+        let operation = operation.as_str().unwrap();
+        if !operation.starts_with("attachment-") {
+            continue;
+        }
+        let id = project
+            .add_plain("capability probe", TaskStatus::Ready)
+            .to_string();
+        let source = project.data_root.path().join("probe.txt");
+        fs::write(&source, b"synthetic attachment").unwrap();
+        let tail = match operation {
+            "attachment-add" => vec![
+                "attachment",
+                "add",
+                &id,
+                "--expect-version",
+                "1",
+                "--file",
+                source.to_str().unwrap(),
+            ],
+            "attachment-get" => vec!["attachment", "get", &id],
+            "attachment-detach" => vec!["attachment", "detach", &id, "A1", "--expect-version", "1"],
+            "attachment-clipboard" => vec!["attachment", "clipboard"],
+            _ => panic!("advertised attachment operation has no CLI probe: {operation}"),
+        };
+        let args = viewer_args(project.data_root.path(), Some(&project.id_text()), &tail);
+        // Probe helper failure rather than reading the owner's clipboard.
+        let helper_root = project.data_root.path().join("no-clipboard-helpers");
+        fs::create_dir_all(&helper_root).unwrap();
+        #[cfg(windows)]
+        if operation == "attachment-clipboard" {
+            // Windows searches these directories before PATH. Refuse this
+            // probe if any could launch a real PowerShell clipboard helper.
+            let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+            for directory in [
+                Path::new(env!("CARGO_BIN_EXE_tasks"))
+                    .parent()
+                    .unwrap()
+                    .to_path_buf(),
+                helper_root.clone(),
+                windows.join("System32"),
+                windows.join("System"),
+                windows,
+            ] {
+                assert!(
+                    !directory.join("powershell.exe").exists(),
+                    "clipboard probe requires an unavailable helper: {}",
+                    directory.display()
+                );
+            }
+        }
+        let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
+            .args(args)
+            .current_dir(&helper_root)
+            .env("PATH", &helper_root)
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .env_remove("WSL_DISTRO_NAME")
+            .env_remove("WSL_INTEROP")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("not implemented in this build"),
+            "{operation}: {stderr}"
+        );
+        if !output.status.success() {
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_ne!(error["error"]["code"], "usage", "{operation}: {stderr}");
+        }
+    }
 }
 
 #[test]
@@ -1673,6 +1885,7 @@ fn task_pages_return_the_documented_fields_without_bodies() {
     assert_eq!(
         keys,
         [
+            "attachment_count",
             "created_ms",
             "dependency_count",
             "display_id",

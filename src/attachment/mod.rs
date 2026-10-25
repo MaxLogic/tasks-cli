@@ -1,5 +1,8 @@
+pub mod command;
 pub mod db;
 pub mod envelope;
+pub mod frame;
+pub mod materialize;
 pub mod name;
 pub mod sniff;
 

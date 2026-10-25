@@ -39,6 +39,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Attach files, inspect metadata, retrieve content or detach references.
+    #[command(subcommand)]
+    Attachment(AttachmentCommand),
     /// Configure remote access and recover pending write receipts.
     #[cfg(feature = "remote")]
     #[command(subcommand)]
@@ -426,10 +429,201 @@ fn project_key_arg(value: &str) -> Result<String, String> {
     crate::model::parse_project_key(value)
 }
 
+/// Attachment content never goes to stdout; get prints local paths only.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AttachmentCommand {
+    /// Attach files, stdin with a name, or clipboard image/files atomically.
+    Add {
+        /// Task ID (KEY-N, T-N or N).
+        id: String,
+        /// Current task version; refuses a stale write.
+        #[arg(long)]
+        expect_version: u64,
+        /// Source file; repeat for a batch, or use - for stdin with --name.
+        #[arg(
+            long,
+            required_unless_present = "clipboard",
+            conflicts_with = "clipboard"
+        )]
+        file: Vec<PathBuf>,
+        /// Display name, only with exactly one --file; required for stdin.
+        #[arg(long, requires = "file", conflicts_with = "clipboard")]
+        name: Option<String>,
+        /// Capture an image or files from the clipboard.
+        #[arg(long, conflicts_with_all = ["file", "name"])]
+        clipboard: bool,
+        /// Token from attachment clipboard; refuses if the clipboard changed.
+        #[arg(long, requires = "clipboard", conflicts_with_all = ["file", "name"])]
+        clipboard_token: Option<String>,
+        /// Remote recovery UUID; requires a remote profile.
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+    },
+    /// Page through retained attachment metadata in attachment ID order.
+    List {
+        /// Task ID (KEY-N, T-N or N).
+        id: String,
+        /// Also include detached references.
+        #[arg(long)]
+        all: bool,
+        /// Resume after this attachment ID (A12, a12 or 12).
+        #[arg(long)]
+        after: Option<String>,
+        /// Page size, 1-100 (default 100).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Verify attachments and write local files; stdout contains paths only.
+    Get {
+        /// Task ID (KEY-N, T-N or N).
+        id: String,
+        /// Attachment IDs (A12, a12 or 12); omitted means all retained.
+        attachment: Vec<String>,
+        /// Destination file or existing directory; - is refused.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Replace different existing content at an explicit destination.
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Detach references while retaining their content and audit history.
+    Detach {
+        /// Task ID (KEY-N, T-N or N).
+        id: String,
+        /// Attachment IDs (A12, a12 or 12) to detach.
+        #[arg(required = true, num_args = 1..)]
+        attachment: Vec<String>,
+        /// Current task version; refuses a stale write.
+        #[arg(long)]
+        expect_version: u64,
+        /// Remote recovery UUID; requires a remote profile.
+        #[arg(long)]
+        request_id: Option<uuid::Uuid>,
+    },
+    /// Inspect attachable clipboard image/files without opening a project.
+    Clipboard,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn attachment_commands_parse_and_document_every_option() {
+        use clap::CommandFactory;
+        for (subcommand, options) in [
+            (
+                "add",
+                vec![
+                    "--expect-version",
+                    "--file",
+                    "--name",
+                    "--clipboard",
+                    "--clipboard-token",
+                    "--request-id",
+                ],
+            ),
+            ("list", vec!["--all", "--after", "--limit"]),
+            ("get", vec!["--out", "--overwrite"]),
+            ("detach", vec!["--expect-version", "--request-id"]),
+            ("clipboard", vec![]),
+        ] {
+            let mut root = Cli::command();
+            let group = root
+                .find_subcommand_mut("attachment")
+                .expect("attachment group");
+            let command = group
+                .find_subcommand_mut(subcommand)
+                .expect("attachment command");
+            let help = command.render_long_help().to_string();
+            for option in options {
+                assert!(help.contains(option), "{subcommand}: missing {option}");
+            }
+        }
+        for tail in [
+            vec![
+                "add",
+                "T-1",
+                "--expect-version",
+                "1",
+                "--file",
+                "a",
+                "--file",
+                "b",
+            ],
+            vec![
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--file",
+                "-",
+                "--name",
+                "stdin.txt",
+            ],
+            vec![
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--clipboard",
+                "--clipboard-token",
+                "abcd",
+            ],
+            vec!["list", "1", "--all", "--after", "a12", "--limit", "100"],
+            vec!["get", "1", "A1", "2", "--out", "dest", "--overwrite"],
+            vec![
+                "detach",
+                "1",
+                "A1",
+                "a2",
+                "--expect-version",
+                "2",
+                "--request-id",
+                "00000000-0000-4000-8000-000000000001",
+            ],
+            vec!["clipboard"],
+        ] {
+            let args: Vec<_> = ["tasks", "attachment"].into_iter().chain(tail).collect();
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        }
+        for tail in [
+            vec!["add", "1", "--expect-version", "1"],
+            vec![
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--clipboard",
+                "--file",
+                "a",
+            ],
+            vec![
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--clipboard",
+                "--name",
+                "a",
+            ],
+            vec![
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--file",
+                "a",
+                "--clipboard-token",
+                "abcd",
+            ],
+            vec!["detach", "1", "--expect-version", "1"],
+        ] {
+            let args: Vec<_> = ["tasks", "attachment"].into_iter().chain(tail).collect();
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn init_requires_a_valid_key_and_uppercases_it() {

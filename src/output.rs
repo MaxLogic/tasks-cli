@@ -1,7 +1,7 @@
 use crate::bulk::BulkRun;
 use crate::model::{
-    render_keyed_task_id, HistoryEvent, ImportProblem, ImportReport, ProblemCounts, RuleRecord,
-    ShowTask, TaskSummary,
+    render_keyed_task_id, AddedAttachment, AttachmentRecord, HistoryEvent, ImportProblem,
+    ImportReport, ProblemCounts, RuleRecord, ShowTask, TaskSummary,
 };
 use crate::viewer::{
     ViewerArchivePayload, ViewerInfoPayload, ViewerProjectsPayload, ViewerShowPayload,
@@ -27,9 +27,62 @@ pub struct ShowPayload {
     pub rules: Option<String>,
 }
 
+/// Metadata and a verified local path. Original content is never serialized.
+#[derive(Debug, Serialize)]
+pub struct MaterializedAttachment {
+    pub attachment: AttachmentRecord,
+    pub path: String,
+    pub reused: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClipboardAttachmentItem {
+    pub source: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub original_size: u64,
+    pub kind: String,
+    pub media_type: String,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum CommandPayload {
+    AttachmentAdd {
+        id: u64,
+        display_id: String,
+        status: String,
+        version: u64,
+        event_id: Option<u64>,
+        attachments: Vec<AddedAttachment>,
+    },
+    AttachmentDetach {
+        id: u64,
+        display_id: String,
+        status: String,
+        version: u64,
+        event_id: Option<u64>,
+        detached: Vec<u64>,
+    },
+    AttachmentList {
+        id: u64,
+        display_id: String,
+        version: u64,
+        items: Vec<AttachmentRecord>,
+        has_more: bool,
+        next_after: Option<String>,
+    },
+    AttachmentGet {
+        id: u64,
+        display_id: String,
+        items: Vec<MaterializedAttachment>,
+    },
+    AttachmentClipboard {
+        items: Vec<ClipboardAttachmentItem>,
+        skipped: Vec<crate::clipboard::SkippedClipboardEntry>,
+        token: String,
+    },
     Init {
         project_id: String,
         project_key: Option<String>,
@@ -145,6 +198,9 @@ pub enum CommandPayload {
         project_id: String,
         schema_version: i32,
         sqlite_version: String,
+        attachment_blobs: u64,
+        attachment_stored_bytes: u64,
+        attachment_quota_bytes: u64,
     },
     ViewerArchive(ViewerArchivePayload),
     ViewerInfo(ViewerInfoPayload),
@@ -166,6 +222,12 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    fn attachment_line(item: &crate::model::AttachmentSummary) -> String {
+        format!(
+            "{}\t{}\t{}\t{} bytes\t{}",
+            item.display_id, item.kind, item.media_type, item.original_size, item.name
+        )
+    }
     fn rid(&self, id: u64) -> String {
         render_keyed_task_id(self.id_key.as_deref(), id)
     }
@@ -344,6 +406,39 @@ impl Envelope {
 
     pub fn text(&self) -> String {
         match &self.data {
+            CommandPayload::AttachmentAdd { display_id, status, version, event_id, attachments, .. } => {
+                let mut out = format!("id: {display_id}\nstatus: {status}\nversion: {version}\nevent_id: {}\n", event_id.map_or_else(|| "null".into(), |id| id.to_string()));
+                for item in attachments {
+                    out.push_str(&format!("attached: {}\n", Self::attachment_line(&item.attachment)));
+                }
+                out
+            }
+            CommandPayload::AttachmentDetach { display_id, status, version, event_id, detached, .. } => {
+                let mut out = format!("id: {display_id}\nstatus: {status}\nversion: {version}\nevent_id: {}\n", event_id.map_or_else(|| "null".into(), |id| id.to_string()));
+                for id in detached { out.push_str(&format!("detached: A{id}\n")); }
+                out
+            }
+            CommandPayload::AttachmentList { items, has_more, next_after, .. } => {
+                let mut out = String::new();
+                for item in items {
+                    out.push_str(&Self::attachment_line(&item.attachment));
+                    if item.detached_ms.is_some() { out.push_str("\tdetached"); }
+                    out.push('\n');
+                }
+                out.push_str(&format!("has_more: {has_more}\n"));
+                if let Some(next) = next_after { out.push_str(&format!("next_after: {next}\n")); }
+                out
+            }
+            CommandPayload::AttachmentGet { items, .. } => items.iter().map(|item| format!("{}\n", item.path)).collect(),
+            CommandPayload::AttachmentClipboard { items, token, .. } => {
+                let mut out = String::new();
+                for item in items {
+                    let description = item.path.as_deref().unwrap_or(&item.name);
+                    out.push_str(&format!("{}\t{} bytes\t{description}\n", item.source, item.original_size));
+                }
+                out.push_str(&format!("token: {token}\n"));
+                out
+            }
             CommandPayload::Init {
                 project_id,
                 project_key,
@@ -606,8 +701,11 @@ impl Envelope {
                 project_id,
                 schema_version,
                 sqlite_version,
+                attachment_blobs,
+                attachment_stored_bytes,
+                attachment_quota_bytes,
             } => format!(
-                "db_path: {db_path}\nproject_id: {project_id}\nschema_version: {schema_version}\nsqlite_version: {sqlite_version}\n"
+                "db_path: {db_path}\nproject_id: {project_id}\nschema_version: {schema_version}\nsqlite_version: {sqlite_version}\nattachment_blobs: {attachment_blobs}\nattachment_stored_bytes: {attachment_stored_bytes}\nattachment_quota_bytes: {attachment_quota_bytes}\n"
             ),
             // The viewer protocol is JSON-only; main.rs rejects text mode before
             // dispatch, so this arm exists to keep the renderer exhaustive.
@@ -625,6 +723,125 @@ impl Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    fn attachment_json() -> Value {
+        json!({"id":12,"display_id":"A12","name":"run.log","kind":"text",
+            "media_type":"text/plain; charset=utf-8","original_size":5,"stored_size":57,
+            "sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","added_ms":123})
+    }
+
+    fn assert_attachment_render(data: CommandPayload, expected: Value, text: &str) {
+        let envelope = Envelope {
+            schema_version: 1,
+            project_id: Some("project".into()),
+            id_key: Some("TSK".into()),
+            data,
+        };
+        assert_eq!(envelope.text(), text);
+        assert_eq!(
+            serde_json::from_str::<Value>(&envelope.json()).unwrap(),
+            json!({"schema_version":1,"project_id":"project","data":expected})
+        );
+    }
+
+    #[test]
+    fn attachment_add_renders_text_and_exact_json() {
+        let mut added = attachment_json();
+        added["deduplicated"] = json!(true);
+        assert_attachment_render(CommandPayload::AttachmentAdd {
+            id:1, display_id:"TSK-001".into(), status:"todo".into(), version:9, event_id:Some(431),
+            attachments:vec![serde_json::from_value(added.clone()).unwrap()],
+        }, json!({"command":"attachment_add","id":1,"display_id":"TSK-001","status":"todo","version":9,"event_id":431,"attachments":[added]}),
+        "id: TSK-001\nstatus: todo\nversion: 9\nevent_id: 431\nattached: A12\ttext\ttext/plain; charset=utf-8\t5 bytes\trun.log\n");
+    }
+
+    #[test]
+    fn attachment_detach_renders_text_json_and_noop() {
+        for (event_id, detached, tail) in [
+            (Some(432), vec![12, 13], "detached: A12\ndetached: A13\n"),
+            (None, vec![], ""),
+        ] {
+            let text = format!(
+                "id: TSK-001\nstatus: todo\nversion: 10\nevent_id: {}\n{tail}",
+                event_id.map_or_else(|| "null".into(), |id| id.to_string())
+            );
+            let expected = json!({"command":"attachment_detach","id":1,"display_id":"TSK-001","status":"todo","version":10,"event_id":event_id,"detached":detached});
+            assert_attachment_render(
+                CommandPayload::AttachmentDetach {
+                    id: 1,
+                    display_id: "TSK-001".into(),
+                    status: "todo".into(),
+                    version: 10,
+                    event_id,
+                    detached,
+                },
+                expected,
+                &text,
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_list_renders_retained_detached_and_pagination() {
+        let mut retained = attachment_json();
+        retained["detached_ms"] = Value::Null;
+        let mut detached = retained.clone();
+        detached["id"] = json!(13);
+        detached["display_id"] = json!("A13");
+        detached["detached_ms"] = json!(200);
+        let items = json!([retained, detached]);
+        assert_attachment_render(CommandPayload::AttachmentList { id:1, display_id:"TSK-001".into(), version:10, items:serde_json::from_value(items.clone()).unwrap(), has_more:true, next_after:Some("A13".into()) },
+        json!({"command":"attachment_list","id":1,"display_id":"TSK-001","version":10,"items":items,"has_more":true,"next_after":"A13"}),
+        "A12\ttext\ttext/plain; charset=utf-8\t5 bytes\trun.log\nA13\ttext\ttext/plain; charset=utf-8\t5 bytes\trun.log\tdetached\nhas_more: true\nnext_after: A13\n");
+        assert_attachment_render(
+            CommandPayload::AttachmentList {
+                id: 1,
+                display_id: "TSK-001".into(),
+                version: 10,
+                items: vec![],
+                has_more: false,
+                next_after: None,
+            },
+            json!({"command":"attachment_list","id":1,"display_id":"TSK-001","version":10,"items":[],"has_more":false,"next_after":null}),
+            "has_more: false\n",
+        );
+    }
+
+    #[test]
+    fn attachment_get_renders_only_paths_in_text_and_metadata_in_json() {
+        let mut record = attachment_json();
+        record["detached_ms"] = Value::Null;
+        let path = "C:/cache/A12/run.log";
+        for reused in [true, false] {
+            assert_attachment_render(
+                CommandPayload::AttachmentGet {
+                    id: 1,
+                    display_id: "TSK-001".into(),
+                    items: vec![MaterializedAttachment {
+                        attachment: serde_json::from_value(record.clone()).unwrap(),
+                        path: path.into(),
+                        reused,
+                    }],
+                },
+                json!({"command":"attachment_get","id":1,"display_id":"TSK-001","items":[{"attachment":record,"path":path,"reused":reused}]}),
+                "C:/cache/A12/run.log\n",
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_clipboard_renders_items_skips_token_without_image_path() {
+        assert_attachment_render(CommandPayload::AttachmentClipboard { items:vec![
+            ClipboardAttachmentItem { source:"image".into(), name:"clipboard image (PNG)".into(), path:None, original_size:412233, kind:"image".into(), media_type:"image/png".into() },
+            ClipboardAttachmentItem { source:"file".into(), name:"run.log".into(), path:Some("C:/logs/run.log".into()), original_size:5, kind:"text".into(), media_type:"text/plain; charset=utf-8".into() },
+        ], skipped:vec![crate::clipboard::SkippedClipboardEntry { path:"C:/logs".into(), reason:"directory".into() }], token:"abcd".into() },
+        json!({"command":"attachment_clipboard","items":[
+            {"source":"image","name":"clipboard image (PNG)","original_size":412233,"kind":"image","media_type":"image/png"},
+            {"source":"file","name":"run.log","path":"C:/logs/run.log","original_size":5,"kind":"text","media_type":"text/plain; charset=utf-8"}
+        ],"skipped":[{"path":"C:/logs","reason":"directory"}],"token":"abcd"}),
+        "image\t412233 bytes\tclipboard image (PNG)\nfile\t5 bytes\tC:/logs/run.log\ntoken: abcd\n");
+    }
 
     #[test]
     fn list_text_does_not_render_task_bodies() {

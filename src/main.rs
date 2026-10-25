@@ -1,7 +1,9 @@
+#![forbid(unsafe_code)]
+
 use clap::{error::ErrorKind, Parser};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tasks_cli::cli::{Cli, Command, OutputFormat, RulesCommand, ViewerCommand};
+use tasks_cli::cli::{AttachmentCommand, Cli, Command, OutputFormat, RulesCommand, ViewerCommand};
 use tasks_cli::error::AppError;
 use tasks_cli::interop;
 use tasks_cli::markdown;
@@ -236,6 +238,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             | Command::BulkImport { apply: true, .. }
             | Command::Viewer(ViewerCommand::Update { .. })
             | Command::Viewer(ViewerCommand::Archive { .. })
+            | Command::Attachment(AttachmentCommand::Add { .. } | AttachmentCommand::Detach { .. })
     );
     if mutation {
         tasks_cli::attribution::initialize(matches!(&cli.command, Command::Viewer(_)));
@@ -284,6 +287,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     if let Command::Viewer(command) = &cli.command {
         // `viewer info` answers without touching a data root or a store.
         return execute_viewer(&cli, command);
+    }
+    if let Command::Attachment(command) = &cli.command {
+        return tasks_cli::attachment::command::execute(&cli, command);
     }
     let data_root = resolved_root(&cli)?;
     match &cli.command {
@@ -948,6 +954,18 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 }
                 Command::Doctor => {
                     let (db_path, project_id, schema_version, sqlite_version) = store.doctor()?;
+                    // Diagnostics also supports older schemas without migrating them.
+                    // A schema-9 query failure must still be reported as corruption.
+                    let usage = if schema_version >= 9 {
+                        store.attachment_usage()?
+                    } else {
+                        tasks_cli::model::AttachmentUsage {
+                            attachment_blobs: 0,
+                            attachment_stored_bytes: 0,
+                            attachment_quota_bytes: tasks_cli::attachment::Limits::PRODUCTION
+                                .project_stored_bytes,
+                        }
+                    };
                     envelope(
                         Some(project_id.clone()),
                         CommandPayload::Doctor {
@@ -955,11 +973,15 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             project_id,
                             schema_version,
                             sqlite_version,
+                            attachment_blobs: usage.attachment_blobs,
+                            attachment_stored_bytes: usage.attachment_stored_bytes,
+                            attachment_quota_bytes: usage.attachment_quota_bytes,
                         },
                         cli.format,
                     );
                 }
-                Command::Enrich { .. }
+                Command::Attachment(_)
+                | Command::Enrich { .. }
                 | Command::EnrichClipboard
                 | Command::List { .. }
                 | Command::Unlocks { .. }

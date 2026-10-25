@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tasks_cli::server::{maintenance, transport::ServiceState, OwnedServer, Registration};

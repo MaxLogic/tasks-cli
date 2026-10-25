@@ -454,6 +454,36 @@ mod api_routes {
     }
 
     #[test]
+    fn attachment_viewer_operations_require_the_remote_attachment_capability() {
+        let f = ApiFixture::new();
+        let info = f.request(Method::GET, "/v1/info", json!(null), None);
+        assert_eq!(info.status, 200);
+        let capability = info.body["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "attachments-v1");
+        let viewer = f.request(Method::GET, "/v1/viewer/info", json!(null), None);
+        assert_eq!(viewer.status, 200);
+        let operations = viewer.body["output"]["data"]["operations"]
+            .as_array()
+            .unwrap();
+        for operation in [
+            "attachment-add",
+            "attachment-get",
+            "attachment-detach",
+            "attachment-clipboard",
+        ] {
+            assert_eq!(
+                operations.iter().any(|item| item == operation),
+                capability,
+                "{operation} must reflect attachments-v1 availability"
+            );
+        }
+        assert!(!capability, "C1 has no remote attachment implementation");
+    }
+
+    #[test]
     fn unknown_project_refusal_has_a_durable_receipt_even_after_later_creation() {
         let f = ApiFixture::new();
         let project = Uuid::new_v4();

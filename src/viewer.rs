@@ -6,6 +6,7 @@
 //! the existing read-only opening rules and never migrate. `viewer info` never
 //! touches a store.
 
+use crate::attachment::command::{self as attachment_command, AttachmentBackend};
 use crate::error::AppError;
 use crate::fingerprint;
 use crate::labels;
@@ -62,6 +63,20 @@ pub struct ViewerInfoPayload {
     pub priorities: Vec<&'static str>,
     pub editable_fields: Vec<&'static str>,
     pub editable_field_limits: EditableFieldLimits,
+    pub attachment_limits: AttachmentLimits,
+}
+
+/// Public L1-L6 admission limits and the image formats the viewer can preview.
+#[derive(Debug, Serialize)]
+pub struct AttachmentLimits {
+    pub payload_bytes: u64,
+    pub original_bytes: u64,
+    pub task_count: u32,
+    pub task_stored_bytes: u64,
+    pub project_stored_bytes: u64,
+    pub batch_count: u32,
+    pub batch_original_bytes: u64,
+    pub preview_media_types: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +190,7 @@ pub struct TaskItem {
     #[serde(default)]
     pub labels: Vec<String>,
     pub dependency_count: u64,
+    pub attachment_count: u64,
     /// Prerequisites that are not done, including cancelled ones; always 0
     /// for a done or cancelled task, since it has nothing left pending.
     pub waiting_dependency_count: u64,
@@ -207,12 +223,36 @@ pub struct ViewerUpdatePayload {
 
 /// `viewer info` reports the protocol surface without opening or creating a store.
 pub fn info() -> ViewerInfoPayload {
+    info_for_backend(AttachmentBackend::Local)
+}
+
+/// Server viewer info uses remote availability, independently of local commands.
+pub fn info_for_backend(backend: AttachmentBackend) -> ViewerInfoPayload {
+    let limits = crate::attachment::Limits::PRODUCTION;
+    let mut operations = OPERATIONS.to_vec();
+    operations.extend_from_slice(attachment_command::viewer_operations(backend));
     ViewerInfoPayload {
         protocol_version: PROTOCOL_VERSION,
-        operations: OPERATIONS.to_vec(),
+        operations,
         statuses: STATUS_VALUES.to_vec(),
         priorities: PRIORITY_VALUES.to_vec(),
         editable_fields: EDITABLE_FIELD_NAMES.to_vec(),
+        attachment_limits: AttachmentLimits {
+            payload_bytes: limits.payload_bytes,
+            original_bytes: limits.original_bytes,
+            task_count: limits.task_count,
+            task_stored_bytes: limits.task_stored_bytes,
+            project_stored_bytes: limits.project_stored_bytes,
+            batch_count: limits.batch_count,
+            batch_original_bytes: limits.batch_original_bytes,
+            preview_media_types: vec![
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+                "image/bmp",
+            ],
+        },
         editable_field_limits: EditableFieldLimits {
             title: TitleLimit {
                 max_chars: TITLE_MAX_CHARS,
@@ -2078,6 +2118,7 @@ fn read_task_item(row: &rusqlite::Row<'_>, key: Option<&str>) -> Result<TaskItem
         version: row.get::<_, i64>(4)? as u64,
         labels: Vec::new(),
         dependency_count: 0,
+        attachment_count: 0,
         waiting_dependency_count: 0,
         verifying_dependency_count: 0,
         created_ms,
@@ -2111,7 +2152,9 @@ fn populate_task_items(conn: &Connection, items: &mut [TaskItem]) -> Result<(), 
     let ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
     let mut labels_by_id = labels::read_many(conn, &ids)?;
     let mut counts = dependency_counts(conn, &ids)?;
+    let mut attachments = crate::attachment::db::attachment_counts(conn, &ids)?;
     for item in items {
+        item.attachment_count = attachments.remove(&item.id).unwrap_or_default();
         item.labels = labels_by_id.remove(&item.id).unwrap_or_default();
         if let Some((total, waiting, verifying)) = counts.remove(&item.id) {
             item.dependency_count = total;
@@ -2266,7 +2309,9 @@ fn read_task_detail(
         })?;
     Ok((
         TaskDetail {
-            attachments: Vec::new(),
+            attachments: crate::attachment::db::retained_attachments(conn, &[id])?
+                .remove(&id)
+                .unwrap_or_default(),
             priority: parse_canonical_priority(&priority)
                 .ok_or_else(|| corrupt_priority(key, id, &priority))?,
             id,

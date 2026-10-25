@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use clap::Parser;
 use tasks_cli::model::TaskUpdate;
 use tasks_cli::store::Store;

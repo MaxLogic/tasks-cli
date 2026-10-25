@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use clap::Parser;
 use rusqlite::TransactionBehavior;
 use tasks_cli::store::Store;

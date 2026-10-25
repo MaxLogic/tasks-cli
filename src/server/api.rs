@@ -623,10 +623,25 @@ pub fn handle(
                 "info does not accept query parameters",
             ));
         }
+        let mut capabilities = vec![
+            "typed-task-api",
+            "project-catalog",
+            "atomic-receipts",
+            "request-bound-receipts",
+            "ed25519-signatures",
+            "persistent-replay-protection",
+        ];
+        if !crate::attachment::command::viewer_operations(
+            crate::attachment::command::AttachmentBackend::Remote,
+        )
+        .is_empty()
+        {
+            capabilities.push("attachments-v1");
+        }
         return Ok(ReceiptResponse {
             receipt: None,
             status: 200,
-            body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":["typed-task-api","project-catalog","atomic-receipts","request-bound-receipts","ed25519-signatures","persistent-replay-protection"]}),
+            body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":capabilities}),
         });
     }
     if *method == Method::GET && uri.path() == "/v1/viewer/info" {
@@ -635,12 +650,17 @@ pub fn handle(
                 "viewer info does not accept query parameters",
             )));
         }
-        let result = output_with_project(None, CommandPayload::ViewerInfo(crate::viewer::info()))
-            .map(|mut value| {
-                value["output"]["data"]["backend"] = json!("remote");
-                value["output"]["data"]["receipt_recovery"] = json!(true);
-                value
-            });
+        let result = output_with_project(
+            None,
+            CommandPayload::ViewerInfo(crate::viewer::info_for_backend(
+                crate::attachment::command::AttachmentBackend::Remote,
+            )),
+        )
+        .map(|mut value| {
+            value["output"]["data"]["backend"] = json!("remote");
+            value["output"]["data"]["receipt_recovery"] = json!(true);
+            value
+        });
         return response(result);
     }
     if *method == Method::POST && uri.path() == "/v1/viewer/projects" && uri.query().is_none() {

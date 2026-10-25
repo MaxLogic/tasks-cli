@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod attachment;
 pub mod attribution;
 pub mod backup;
