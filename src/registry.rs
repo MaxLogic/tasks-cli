@@ -3,7 +3,7 @@ use crate::storage::{acquire_exclusive_lock, validate_storage_root};
 use crate::store::{create_project_db_with_key, StoreInfo};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -156,27 +156,81 @@ fn canonical_project_id(project: &str) -> Result<String, AppError> {
 }
 
 fn read_identity(path: &Path) -> Result<Option<String>, AppError> {
-    let metadata = match fs::symlink_metadata(path) {
+    let entry = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(AppError::io_path("inspect project identity", path, error)),
     };
-    if !metadata.is_file() {
+    // On Windows is_symlink() also includes junctions. Only file symlinks
+    // are eligible here; directory links and other reparse points stay rejected.
+    #[cfg(windows)]
+    let is_file_link = {
+        use std::os::windows::fs::FileTypeExt;
+        entry.file_type().is_symlink_file()
+    };
+    #[cfg(not(windows))]
+    let is_file_link = entry.is_symlink();
+    if !is_file_link && !ordinary_identity_file(&entry) {
         return Err(AppError::Validation(format!(
             "{} must be an ordinary file containing only a project_id",
             path.display()
         )));
     }
-    if metadata.len() > MAX_PROJECT_IDENTITY_BYTES {
-        return Err(AppError::Validation(format!(
-            "{} is {} bytes; project identity files are limited to {} bytes",
-            path.display(),
-            metadata.len(),
-            MAX_PROJECT_IDENTITY_BYTES
-        )));
+    let metadata = if is_file_link {
+        fs::metadata(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                match fs::read_link(path) {
+                    Ok(target) => {
+                        // Relative targets resolve against the link's directory.
+                        let target = path
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(target);
+                        if fs::symlink_metadata(&target).is_ok() {
+                            AppError::Validation(format!(
+                                "project identity link {} points to {}, which is a link to a missing target",
+                                path.display(),
+                                target.display()
+                            ))
+                        } else {
+                            AppError::Validation(format!(
+                                "project identity link {} points to missing {}",
+                                path.display(),
+                                target.display()
+                            ))
+                        }
+                    }
+                    Err(error) => AppError::io_path("read project identity link", path, error),
+                }
+            } else {
+                AppError::io_path("inspect project identity target", path, error)
+            }
+        })?
+    } else {
+        entry
+    };
+    validate_identity_metadata(path, &metadata)?;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A concurrent replacement with a FIFO must not block before the
+        // opened handle's type can be checked.
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
     }
-    let bytes =
-        fs::read(path).map_err(|error| AppError::io_path("read project identity", path, error))?;
+    let file = options
+        .open(path)
+        .map_err(|error| AppError::io_path("open project identity", path, error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| AppError::io_path("inspect opened project identity", path, error))?;
+    validate_identity_metadata(path, &metadata)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PROJECT_IDENTITY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| AppError::io_path("read project identity", path, error))?;
     if bytes.len() as u64 > MAX_PROJECT_IDENTITY_BYTES {
         return Err(AppError::Validation(format!(
             "{} grew beyond the {} byte project identity limit while it was read",
@@ -207,6 +261,35 @@ fn read_identity(path: &Path) -> Result<Option<String>, AppError> {
         )));
     }
     Ok(Some(canonical))
+}
+
+fn ordinary_identity_file(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return false;
+        }
+    }
+    metadata.is_file()
+}
+
+fn validate_identity_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), AppError> {
+    if !ordinary_identity_file(metadata) {
+        return Err(AppError::Validation(format!(
+            "{} must be an ordinary file containing only a project_id",
+            path.display()
+        )));
+    }
+    if metadata.len() > MAX_PROJECT_IDENTITY_BYTES {
+        return Err(AppError::Validation(format!(
+            "{} is {} bytes; project identity files are limited to {} bytes",
+            path.display(),
+            metadata.len(),
+            MAX_PROJECT_IDENTITY_BYTES
+        )));
+    }
+    Ok(())
 }
 
 fn identity_project(route_from: &Path) -> Result<Option<String>, AppError> {

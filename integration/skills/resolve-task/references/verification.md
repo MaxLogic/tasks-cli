@@ -74,7 +74,7 @@ diff/resource hygiene.
    command in a task's Proof (full suite, full build, project-wide analysis)
    moves to the next batch gate unless the task states a `Cadence exception`.
 7. Check diff, encoding, and staged scope. Keep `.private/`, its root links
-   and the excluded `.tasks.json` copy out of the project candidate. Record
+   and the excluded `.tasks.json` link or copy out of the project candidate. Record
    consumed overlay inputs separately by overlay revision and dirty input hashes.
 8. Repeat affected checks after the last code change.
 

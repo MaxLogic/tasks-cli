@@ -97,7 +97,11 @@ tasks show APP-1
 ```
 
 Replace the bracketed path before running the commands. `init` creates the
-project-root `.tasks.json`; commit that identity if the project uses Git.
+project-root `.tasks.json`; commit that identity if the project uses Git and
+keeps its identity public. Private-overlay projects can instead exclude a file
+symlink to `.private/.tasks.json` or an ordinary copy. The target must be a valid
+identity file of at most 4 KiB; dangling links fail closed. Monorepo subprojects
+may have their own identities, with the nearest ancestor taking precedence.
 Do not commit the database. A fresh machine cannot recover a local backlog
 from the UUID alone: restore its backup or configure its existing remote server.
 Forks must deliberately choose whether to use the original backlog or create

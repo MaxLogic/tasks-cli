@@ -18,7 +18,16 @@ and execution.
 
 Each project root has a `.tasks.json` containing only a canonical UUID
 `project_id`. The CLI discovers the nearest identity from the working directory,
-including an inherited file in a Git worktree. It never skips an invalid nearer
+including an inherited file in a Git worktree. Monorepos may give subprojects
+their own identities: discovery walks ancestors and selects the first file,
+independent of Git boundaries, using the root identity if none is nearer.
+`init --root <subdirectory> --key KEY` creates a subproject identity without
+changing its parent's file. The identity may be an excluded file symlink to
+`.private/.tasks.json`, or to the root overlay's
+`.private/<relative subproject path>/.tasks.json` for a subproject; ordinary
+copies still work. The target must be an ordinary file of at most 4 KiB with
+only the canonical lowercase `project_id` UUID. Dangling links, directory links
+and other reparse points are rejected. The CLI never skips an invalid nearer
 identity to find a usable outer one. Run commands from the project tree:
 
 ```text

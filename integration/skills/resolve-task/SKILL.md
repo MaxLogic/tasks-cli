@@ -41,11 +41,13 @@ prepared worktree, verify its own `.private/` and excluded root links. If missin
 `private-overlay.ps1 prepare-worktree -Path <wt> -Apply` before dependent work.
 Verify required untracked/ignored guidance, configuration and fixtures too.
 
-In overlay projects, `.tasks.json` is an ordinary excluded copy of
-`.private/.tasks.json`, not a symlink. The CLI rejects symlinked identity files.
-Use `private-overlay.ps1 adopt -CopyFromOverlay .tasks.json` to register it in
-`overlayCopies`; preview before adding `-Apply`. `prepare-worktree` copies it
-into each worktree. Compare identity with the main checkout. Never regenerate
+In overlay projects, `.tasks.json` may be an excluded file symlink to
+`.private/.tasks.json` or an ordinary excluded copy. The CLI validates the
+target as an ordinary identity file of at most 4 KiB; dangling links fail closed.
+Prefer the link: `private-overlay.ps1 adopt -Link .tasks.json` records it in
+`links` and turns an identical copy into the link; preview before `-Apply`.
+`prepare-worktree` links it, or copies `overlayCopies` entries, in each worktree.
+Compare identity with the main checkout. Never regenerate
 its UUID or initialize another task store for that worktree.
 
 Discover durable private records in the repository root's `.private/` first.
@@ -134,7 +136,7 @@ before marking them `done`. A failed pre-commit gate, missing tool or environmen
 gap does not qualify for this exception. Respect an explicit user prohibition
 on commits and preserve unrelated work. Do not stage junction-linked skills or
 unrelated generated content. Never stage `.private/`, its root links or the
-excluded `.tasks.json` copy in the project repository. Never force-add them.
+excluded `.tasks.json` link or copy in the project repository. Never force-add them.
 If any appears in project status, stop and repair excludes through
 `private-overlay` before staging. Commit private records separately inside
 `.private/`; project commit authority grants no overlay push authority.

@@ -129,6 +129,22 @@ same backlog from any nested directory. When no identity file exists, the
 registry picks the longest registered ancestor. Unknown projects fail loudly
 instead of creating a second backlog.
 
+Monorepos can put a separate `.tasks.json` in each subproject. The CLI walks
+upward and selects the first identity it finds, regardless of Git boundaries;
+otherwise the root identity applies. `init --root <subdirectory> --key KEY`
+creates a subproject identity without changing the parent's file.
+
+The identity may be an ordinary file or a file symlink, for example to
+`.private/.tasks.json` or, for a subproject, the root overlay's
+`.private/<relative subproject path>/.tasks.json`. Excluded copies still work.
+The target must be an ordinary file of at most 4 KiB containing only the canonical
+lowercase `project_id` UUID. Directories, directory links and other reparse
+points are rejected. A dangling identity link fails with its link and target
+paths, without falling back to a parent. `init` preserves an existing matching
+link and its target; it refuses conflicting or dangling links.
+See [project identity files](docs/project-identities.md) for target validation
+and Windows junction behavior.
+
 ```text
 tasks init --root "D:\Work\Project" --key APP
 tasks bind --root "D:\Work\Project\subdir" --project UUID
