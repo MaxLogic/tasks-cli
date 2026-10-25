@@ -130,11 +130,11 @@ fn schema_six_migration_preserves_legacy_snapshots_without_inventing_authors() {
         .unwrap();
     // Removing only the additive version-seven objects restores the version-six
     // representation, including an existing history snapshot and task version.
-    store.conn.execute_batch("DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json; PRAGMA user_version=6;").unwrap();
+    store.conn.execute_batch("DROP TABLE task_attachments; DROP TABLE attachment_blobs; DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json; PRAGMA user_version=6;").unwrap();
     drop(store);
     let mut migration = Store::open_for_migration(root.path(), &project.to_string()).unwrap();
     let (from, to, backup) = migration.migrate().unwrap();
-    assert_eq!((from, to), (6, 8));
+    assert_eq!((from, to), (6, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let backup = rusqlite::Connection::open(backup.unwrap()).unwrap();
     assert_eq!(
         backup

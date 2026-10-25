@@ -61,6 +61,39 @@ fn canonical_frame_start(value: &str) -> Option<CanonicalFrameHeader> {
     })
 }
 
+/// Metadata-only export frame, never an attachment import source.
+fn attachment_frame(lines: &[Line<'_>], start: usize) -> Option<(usize, usize)> {
+    let count: usize = lines
+        .get(start)?
+        .text
+        .trim()
+        .strip_prefix("<!-- tasks-cli:canonical-v1:attachments count=")?
+        .strip_suffix(" -->")?
+        .parse()
+        .ok()?;
+    if count == 0 || count > 32 {
+        return None;
+    }
+    let item = regex::Regex::new(
+        r"^- A([1-9][0-9]*) (.+) \((.{3,127}), ([0-9]+) bytes, sha256 ([0-9a-f]{64})\)$",
+    )
+    .ok()?;
+    let mut seen = HashSet::new();
+    for index in start + 1..=start + count {
+        let captures = item.captures(lines.get(index)?.text)?;
+        let id: u64 = captures[1].parse().ok()?;
+        if !seen.insert(id) {
+            return None;
+        }
+        crate::attachment::name::validate(&captures[2], &crate::attachment::Limits::PRODUCTION)
+            .ok()?;
+        let _: u64 = captures[4].parse().ok()?;
+    }
+    let end = start.checked_add(count)?.checked_add(1)?;
+    (lines.get(end)?.text.trim() == "<!-- tasks-cli:canonical-v1:end-attachments -->")
+        .then_some((end, count))
+}
+
 fn canonical_frame_end(value: &str, kind: CanonicalFrameKind, sha256: &str) -> bool {
     let value = value.trim();
     let name = match kind {
@@ -1261,6 +1294,7 @@ pub(crate) fn parse_with_map(
     let mut protected_lines = vec![false; lines.len()];
     let mut canonical_marker_lines = vec![false; lines.len()];
     let mut canonical_frames = HashMap::<usize, CanonicalFrame>::new();
+    let mut attachment_frames = HashMap::<usize, (usize, usize)>::new();
     let mut frame_problems = Vec::new();
     let mut sections: Vec<(usize, String)> = Vec::new();
     let mut task_starts = Vec::new();
@@ -1281,6 +1315,30 @@ pub(crate) fn parse_with_map(
             continue;
         }
         if has_schema_marker {
+            if line
+                .text
+                .trim()
+                .starts_with("<!-- tasks-cli:canonical-v1:attachments ")
+            {
+                let preceding = canonical_frames
+                    .values()
+                    .filter(|f| f.kind == CanonicalFrameKind::Body && f.end_line < index)
+                    .max_by_key(|f| f.end_line);
+                if let Some(body) = preceding {
+                    if lines[body.end_line + 1..index]
+                        .iter()
+                        .all(|l| l.text.trim().is_empty())
+                    {
+                        if let Some((end, count)) = attachment_frame(&lines, index) {
+                            attachment_frames.insert(body.end_line, (end, count));
+                            protected_lines[index..=end].fill(true);
+                            canonical_marker_lines[index..=end].fill(true);
+                            index = end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
             if let Some(header) = canonical_frame_start(line.text) {
                 let position_kind = canonical_frame_position_kind(&lines, index);
                 if position_kind == Some(header.kind) {
@@ -1526,7 +1584,9 @@ pub(crate) fn parse_with_map(
                 .enumerate()
                 .skip(frame_end_line + 1)
                 .take(end_index.saturating_sub(frame_end_line + 1))
-                .find(|(_, line)| !line.text.trim().is_empty());
+                .find(|(index, line)| {
+                    !canonical_marker_lines[*index] && !line.text.trim().is_empty()
+                });
             if let Some((line_index, line)) = trailing {
                 parse_problems.push(ImportProblem {
                     kind: PROBLEM_OTHER.to_string(),
@@ -1787,6 +1847,10 @@ pub(crate) fn parse_with_map(
         SchemaClass::LegacyCompatible
     };
 
+    if !attachment_frames.is_empty() {
+        let references: usize = attachment_frames.values().map(|(_, count)| count).sum();
+        section_warnings.push(format!("{references} attachment reference(s) on {} task(s) were not imported; Markdown exports omit attachment bytes", attachment_frames.len()));
+    }
     let mut parsed = ParsedImport {
         source_name,
         source,

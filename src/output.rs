@@ -193,6 +193,9 @@ impl Envelope {
         if !item.labels.is_empty() {
             line.push_str(&format!("\tlabels=[{}]", item.labels.join(",")));
         }
+        if item.attachment_count > 0 {
+            line.push_str(&format!("\tattachments={}", item.attachment_count));
+        }
         line.push('\n');
         line
     }
@@ -214,6 +217,19 @@ impl Envelope {
                 dependency.version,
                 dependency.title
             ));
+        }
+        for attachment in &task.attachments {
+            out.push_str(&format!(
+                "attachment: A{}\t{}\t{}\t{} bytes\t{}\n",
+                attachment.id,
+                attachment.kind,
+                attachment.media_type,
+                attachment.original_size,
+                attachment.name
+            ));
+        }
+        if !task.attachments.is_empty() {
+            out.push_str(&format!("attachments: tasks attachment get {} [A{} ...] writes local files and prints their paths\n", self.rid(task.id), task.attachments[0].id));
         }
         out.push_str("title:\n");
         out.push_str(&format!("{}\n", task.title));
@@ -617,6 +633,7 @@ mod tests {
             project_id: None,
             data: CommandPayload::List {
                 items: vec![TaskSummary {
+                    attachment_count: 0,
                     priority: Default::default(),
                     labels: vec![],
                     id: 1,

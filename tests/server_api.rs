@@ -295,13 +295,13 @@ fn schema_seven_upgrade_preserves_history_and_backups_and_rejects_weakened_recei
         .query_row("SELECT snapshot_json FROM events", [], |r| r.get(0))
         .unwrap();
     db.conn
-        .execute_batch("DROP TABLE mutation_receipts; PRAGMA user_version=7;")
+        .execute_batch("DROP TABLE task_attachments; DROP TABLE attachment_blobs; DROP TABLE mutation_receipts; PRAGMA user_version=7;")
         .unwrap();
     drop(db);
     assert!(Store::open_rw(root.path(), &project.to_string()).is_err());
     let mut db = Store::open_for_migration(root.path(), &project.to_string()).unwrap();
     let (from, to, backup) = db.migrate().unwrap();
-    assert_eq!((from, to), (7, 8));
+    assert_eq!((from, to), (7, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let backup = rusqlite::Connection::open(backup.unwrap()).unwrap();
     assert_eq!(
         backup

@@ -61,7 +61,7 @@ fn genuine_v0_schema_migrates_and_preserves_data() {
     let (root, project_id, _db_path) = legacy_fixture("ready");
     let mut store = Store::open_for_migration(root.path(), &project_id.to_string()).expect("open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 8));
+    assert_eq!((from, to), (0, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let backup = backup_path.expect("backup path");
     assert!(backup.is_file());
 
@@ -107,7 +107,7 @@ fn every_migration_attempt_backups_the_current_live_database() {
         [],
     )
     .expect("new live task");
-    conn.execute_batch("DROP TRIGGER tasks_fts_insert; DROP TRIGGER tasks_fts_update; DROP TRIGGER tasks_fts_delete; DROP TABLE tasks_fts; DROP TABLE task_labels; DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json;").unwrap();
+    conn.execute_batch("DROP TRIGGER tasks_fts_insert; DROP TRIGGER tasks_fts_update; DROP TRIGGER tasks_fts_delete; DROP TABLE tasks_fts; DROP TABLE task_labels; DROP TABLE task_attachments; DROP TABLE attachment_blobs; DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json;").unwrap();
     conn.pragma_update(None, "user_version", 0i64)
         .expect("reset version for reproduction");
     drop(conn);
@@ -395,4 +395,155 @@ fn concurrent_migrations_serialize_and_both_exit_successfully() {
 
     let store = Store::open_readonly(root.path(), &project_id.to_string()).expect("current db");
     assert_eq!(store.project_id, project_id);
+}
+
+/// Independent representations of every published schema; legacy snapshots stay opaque.
+fn versioned_fixture(version: i32) -> (TempDir, Uuid, PathBuf) {
+    if version == 0 {
+        return legacy_fixture("ready");
+    }
+    let root = tempfile::tempdir().unwrap();
+    let project = Uuid::new_v4();
+    let db = data_root_project_path(root.path(), &project.to_string());
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = Connection::open(&db).unwrap();
+    let priority = if version >= 4 {
+        ",priority TEXT NOT NULL DEFAULT 'P2' CHECK(priority IN ('P0','P1','P2','P3'))"
+    } else {
+        ""
+    };
+    let key = if version >= 6 {
+        ",project_key TEXT"
+    } else {
+        ""
+    };
+    let statuses = if version == 1 {
+        "'backlog','ready','in-progress','blocked','done','cancelled'"
+    } else if version < 5 {
+        "'draft','todo','in-progress','blocked','done','cancelled'"
+    } else {
+        "'draft','todo','in-progress','to-verify','blocked','done','cancelled'"
+    };
+    conn.execute_batch(&format!("CREATE TABLE project(project_id TEXT PRIMARY KEY,rules_markdown TEXT NOT NULL DEFAULT '',rules_version INTEGER NOT NULL DEFAULT 1,next_task_number INTEGER NOT NULL DEFAULT 8{key});
+        CREATE TABLE tasks(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL,version INTEGER NOT NULL CHECK(version>0),created_ms INTEGER NOT NULL,updated_ms INTEGER NOT NULL{priority},CHECK(status IN ({statuses})));
+        CREATE TABLE dependencies(task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,depends_on_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,PRIMARY KEY(task_id,depends_on_id));
+        CREATE TABLE events(event_id INTEGER PRIMARY KEY AUTOINCREMENT,task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,entity_type TEXT NOT NULL,operation TEXT NOT NULL,resulting_version INTEGER NOT NULL,created_ms INTEGER NOT NULL,snapshot_json TEXT NOT NULL);
+        CREATE TABLE imports(input_sha256 TEXT PRIMARY KEY,source_name TEXT NOT NULL,original_source BLOB NOT NULL,report_json TEXT NOT NULL,imported_ms INTEGER NOT NULL);
+        CREATE INDEX idx_tasks_status_id ON tasks(status,id);CREATE INDEX idx_dependencies_depends_on_id ON dependencies(depends_on_id);CREATE INDEX idx_events_task_id ON events(task_id,event_id);" )).unwrap();
+    conn.execute(
+        "INSERT INTO project(project_id) VALUES (?1)",
+        [project.to_string()],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO tasks(id,title,body,status,version,created_ms,updated_ms) VALUES (7,'legacy','exact body',?1,4,0,0)",[if version==1 {"ready"}else{"todo"}]).unwrap();
+    conn.execute_batch("INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json) VALUES (7,'task','update',4,0,' {\"id\":7, \"body\":\"exact body\"} ');").unwrap();
+    if version >= 3 {
+        tasks_cli::labels::create_schema(&conn).unwrap();
+    }
+    if version >= 4 {
+        conn.execute_batch("CREATE INDEX idx_tasks_priority_id ON tasks(priority,id);CREATE INDEX idx_tasks_status_priority_id ON tasks(status,priority,id);").unwrap();
+    }
+    if version >= 7 {
+        conn.execute_batch("ALTER TABLE events ADD COLUMN attribution_json TEXT CHECK(attribution_json IS NULL OR (length(CAST(attribution_json AS BLOB))<=16384 AND json_valid(attribution_json)));
+        CREATE TABLE metadata_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT,operation TEXT NOT NULL,created_ms INTEGER NOT NULL,snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),attribution_json TEXT NOT NULL CHECK(length(CAST(attribution_json AS BLOB))<=16384 AND json_valid(attribution_json)));
+        CREATE TRIGGER metadata_events_no_update BEFORE UPDATE ON metadata_events BEGIN SELECT RAISE(ABORT,'metadata history is append-only'); END;
+        CREATE TRIGGER metadata_events_no_delete BEFORE DELETE ON metadata_events BEGIN SELECT RAISE(ABORT,'metadata history is append-only'); END;").unwrap();
+    }
+    if version >= 8 {
+        conn.execute_batch(include_str!("../src/receipt_schema.sql"))
+            .unwrap();
+    }
+    conn.pragma_update(None, "user_version", version).unwrap();
+    drop(conn);
+    (root, project, db)
+}
+
+#[test]
+fn all_published_schemas_upgrade_to_nine_with_validated_backup_and_unchanged_snapshots() {
+    for version in 0..=8 {
+        let (root, project, db) = versioned_fixture(version);
+        let old = Connection::open(&db).unwrap();
+        let snapshots: Vec<String> = if version == 0 {
+            vec![]
+        } else {
+            old.prepare("SELECT snapshot_json FROM events ORDER BY event_id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        drop(old);
+        let mut store = Store::open_for_migration(root.path(), &project.to_string()).unwrap();
+        let (from, to, backup) = store
+            .migrate()
+            .unwrap_or_else(|e| panic!("schema {version}: {e}"));
+        assert_eq!((from, to), (version, 9));
+        let backup = Connection::open_with_flags(
+            backup.unwrap(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+                .unwrap(),
+            version
+        );
+        assert_eq!(
+            backup
+                .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(backup
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            store
+                .conn
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i32>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(store.attachment_usage().unwrap().attachment_blobs, 0);
+        if version > 0 {
+            let after: Vec<String> = store
+                .conn
+                .prepare("SELECT snapshot_json FROM events ORDER BY event_id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(after, snapshots, "schema {version}");
+        }
+        assert!(store.migrate().unwrap().2.is_none());
+        drop(store);
+        Store::open_readonly(root.path(), &project.to_string()).unwrap();
+    }
+}
+
+#[test]
+fn attachment_schema_validation_rejects_missing_or_altered_guards() {
+    for altered in [false, true] {
+        let (root, project, _) = versioned_fixture(8);
+        let mut store = Store::open_for_migration(root.path(), &project.to_string()).unwrap();
+        store.migrate().unwrap();
+        store
+            .conn
+            .execute_batch("DROP TRIGGER attachment_blobs_no_replace")
+            .unwrap();
+        if altered {
+            store.conn.execute_batch("CREATE TRIGGER attachment_blobs_no_replace BEFORE INSERT ON attachment_blobs BEGIN SELECT 1; END").unwrap();
+        }
+        drop(store);
+        let error = Store::open_rw(root.path(), &project.to_string()).unwrap_err();
+        assert!(error.to_string().contains("attachment schema is damaged"));
+    }
 }

@@ -2266,6 +2266,7 @@ fn read_task_detail(
         })?;
     Ok((
         TaskDetail {
+            attachments: Vec::new(),
             priority: parse_canonical_priority(&priority)
                 .ok_or_else(|| corrupt_priority(key, id, &priority))?,
             id,

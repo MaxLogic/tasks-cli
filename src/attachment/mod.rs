@@ -1,3 +1,4 @@
+pub mod db;
 pub mod envelope;
 pub mod name;
 pub mod sniff;

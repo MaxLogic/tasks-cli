@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 8;
+pub const CURRENT_SCHEMA_VERSION: i32 = 9;
 
 /// Caller owns a read/write snapshot. Fetch only bounded archive metadata.
 pub(crate) fn effective_archive_from(conn: &Connection) -> Result<Option<i64>, AppError> {
@@ -429,10 +429,18 @@ fn configure_writer(conn: &Connection) -> Result<(), AppError> {
 }
 
 /// Snapshot fields compared between consecutive task events, in output order.
-const HISTORY_FIELDS: [&str; 6] = ["title", "body", "status", "priority", "labels", "deps"];
+const HISTORY_FIELDS: [&str; 7] = [
+    "title",
+    "body",
+    "status",
+    "priority",
+    "labels",
+    "deps",
+    "attachments",
+];
 
 /// Column holding `ok` (1 when the event has a comparable predecessor);
-/// the six per-field flags follow it.
+/// the per-field flags follow it.
 const HISTORY_OK_COLUMN: usize = 6;
 
 /// Column of the raw snapshot text when `history_sql` selects it.
@@ -586,6 +594,7 @@ fn initialize_new_database(
     create_selection_schema(&tx)?;
     create_attribution_schema(&tx)?;
     create_receipt_schema(&tx)?;
+    crate::attachment::db::create_schema(&tx)?;
     tx.execute(
         "INSERT INTO project(project_id, rules_markdown, rules_version, next_task_number, project_key) VALUES (?1, '', 1, 1, ?2)",
         params![project_id.to_string(), key],
@@ -635,6 +644,7 @@ fn validate_current_schema(
         }
     }
     validate_receipt_schema(conn)?;
+    crate::attachment::db::validate_schema(conn)?;
     for column in [
         "project_id",
         "rules_markdown",
@@ -1434,13 +1444,134 @@ fn refuse_existing_backup_destination(out: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn remove_backup_artifacts(path: &Path) -> Result<(), AppError> {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(AppError::io_path("remove the backup file", path, error)),
+// A reservation belongs to one attempt. Keep its handle alive so its file ID
+// cannot be recycled, and check that ID before touching its pathname again.
+struct BackupTemp {
+    path: PathBuf,
+    reservation: fs::File,
+    identity: file_id::FileId,
+}
+
+impl BackupTemp {
+    fn reserve(parent: &Path) -> Result<Self, AppError> {
+        let path = parent.join(format!(".tasks-cli-tmp-{}", Uuid::new_v4()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Permit SQLite readers/writers, but prevent replacement while the
+            // reservation is held, including while we capture the file ID.
+            const FILE_SHARE_READ_WRITE: u32 = 0x00000001 | 0x00000002;
+            options.share_mode(FILE_SHARE_READ_WRITE);
+        }
+        let reservation = options
+            .open(&path)
+            .map_err(|error| AppError::io_path("create the temporary backup file", &path, error))?;
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = reservation.metadata()?;
+            file_id::FileId::new_inode(metadata.dev(), metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let identity = file_id::get_file_id(&path).map_err(|error| {
+            AppError::io_path("identify the temporary backup file", &path, error)
+        })?;
+        Ok(Self {
+            path,
+            reservation,
+            identity,
+        })
     }
-    remove_backup_sidecars(path)
+
+    fn matches(path: &Path, identity: file_id::FileId) -> Result<bool, AppError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_file() => return Ok(false),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(AppError::io_path(
+                    "inspect the temporary backup file",
+                    path,
+                    error,
+                ))
+            }
+        }
+        match file_id::get_file_id(path) {
+            Ok(current) => Ok(current == identity),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(AppError::io_path(
+                "identify the temporary backup file",
+                path,
+                error,
+            )),
+        }
+    }
+
+    fn ensure_owned(&self) -> Result<(), AppError> {
+        if Self::matches(&self.path, self.identity)? {
+            Ok(())
+        } else {
+            Err(AppError::Database(format!(
+                "temporary backup {} was replaced; refusing to use another process's file",
+                self.path.display()
+            )))
+        }
+    }
+
+    fn cleanup(self) -> Result<(), AppError> {
+        let Self {
+            path,
+            reservation,
+            identity,
+        } = self;
+        // Pin the original identity even while releasing Windows' no-delete
+        // handle. A failed reservation never reaches this method.
+        #[cfg(windows)]
+        let _pin = fs::File::open(&path).map_err(|error| {
+            AppError::io_path(
+                "hold the temporary backup file during cleanup",
+                &path,
+                error,
+            )
+        })?;
+        #[cfg(windows)]
+        drop(reservation);
+        #[cfg(not(windows))]
+        let _pin = reservation;
+        if !Self::matches(&path, identity)? {
+            return Ok(());
+        }
+        // A same-user rename can replace this path between the identity check
+        // and deletion below; active renames in our private data root are
+        // outside the threat model. Tasks never rename another attempt's file.
+        remove_backup_sidecars(&path)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::io_path("remove the backup file", &path, error)),
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn backup_retry_barrier(removed: &Path) -> Result<(), AppError> {
+    let Some(ready) = std::env::var_os("TASKS_TEST_BACKUP_RETRY_READY") else {
+        return Ok(());
+    };
+    fs::write(&ready, removed.to_string_lossy().as_bytes())?;
+    let Some(resume) = std::env::var_os("TASKS_TEST_BACKUP_RETRY_RESUME") else {
+        return Ok(());
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !Path::new(&resume).exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(AppError::LockTimeout("backup test barrier deadline".into()));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn publish_backup(
@@ -1453,8 +1584,7 @@ fn publish_backup(
     let parent = out.parent().unwrap_or_else(|| Path::new("."));
     validate_storage_root(parent)?;
     refuse_existing_backup_destination(&out)?;
-    let name = out
-        .file_name()
+    out.file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             AppError::InvalidPath(format!(
@@ -1462,49 +1592,79 @@ fn publish_backup(
                 out.display()
             ))
         })?;
-    let temp = parent.join(format!(
-        ".{name}.tasks-cli-tmp-{}-{}",
-        std::process::id(),
-        BACKUP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let reserved = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|error| AppError::io_path("create the temporary backup file", &temp, error))?;
-    drop(reserved);
-    let result = (|| {
-        conn.backup(
-            rusqlite::MAIN_DB,
-            &temp,
-            None::<fn(rusqlite::backup::Progress)>,
-        )?;
-        validate_backup(&temp, expected_project, expected_schema)?;
-        remove_backup_sidecars(&temp)?;
-        // A destination sidecar may have appeared while SQLite produced and
-        // validated the temporary backup.  Refuse publication while keeping
-        // that unrelated sidecar untouched.
-        refuse_existing_backup_destination(&out)?;
-        match std::fs::hard_link(&temp, &out) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(AppError::Usage(format!(
-                    "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
-                    out.display()
-                )));
+    for attempt in 0..3 {
+        // Never reopen a name released by an earlier attempt. Reservation
+        // failure returns directly, without cleanup of the unacquired path.
+        let temp = BackupTemp::reserve(parent)?;
+        let result = (|| {
+            temp.ensure_owned()?;
+            let done = {
+                let mut destination = Connection::open(&temp.path)?;
+                let backup = rusqlite::backup::Backup::new(conn, &mut destination)?;
+                #[cfg(feature = "test-hooks")]
+                let forced = std::env::var("TASKS_TEST_BACKUP_STEP").ok();
+                #[cfg(not(feature = "test-hooks"))]
+                let forced: Option<String> = None;
+                #[cfg(feature = "test-hooks")]
+                if let Some(log) = std::env::var_os("TASKS_TEST_BACKUP_STEP_LOG") {
+                    use std::io::Write;
+                    writeln!(
+                        fs::OpenOptions::new().create(true).append(true).open(log)?,
+                        "attempt {}",
+                        attempt + 1
+                    )?;
+                }
+                let step = match forced.as_deref() {
+                    Some("busy") => rusqlite::backup::StepResult::Busy,
+                    Some("locked") => rusqlite::backup::StepResult::Locked,
+                    Some("more") => rusqlite::backup::StepResult::More,
+                    _ => backup.step(-1)?,
+                };
+                step == rusqlite::backup::StepResult::Done
+            };
+            if !done {
+                return Ok(None);
             }
-            Err(error) => return Err(AppError::io_path("publish the backup", &out, error)),
+            temp.ensure_owned()?;
+            validate_backup(&temp.path, expected_project, expected_schema)?;
+            remove_backup_sidecars(&temp.path)?;
+            // Preserve any destination or sidecar created during the backup.
+            refuse_existing_backup_destination(&out)?;
+            temp.ensure_owned()?;
+            match fs::hard_link(&temp.path, &out) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(AppError::Usage(format!(
+                        "refusing to overwrite {}: it already exists; choose a different --out path or move the existing file",
+                        out.display()
+                    )));
+                }
+                Err(error) => return Err(AppError::io_path("publish the backup", &out, error)),
+            }
+            Ok(Some(
+                std::fs::metadata(&out)
+                    .map_err(|error| AppError::io_path("read the backup size", &out, error))?
+                    .len(),
+            ))
+        })();
+        #[cfg(feature = "test-hooks")]
+        let removed = temp.path.clone();
+        let cleanup = temp.cleanup();
+        match result {
+            Ok(Some(bytes)) => return Ok(bytes),
+            Err(error) => return Err(error),
+            Ok(None) => cleanup?,
         }
-        Ok(std::fs::metadata(&out)
-            .map_err(|error| AppError::io_path("read the backup size", &out, error))?
-            .len())
-    })();
-    let cleanup = remove_backup_artifacts(&temp);
-    match (result, cleanup) {
-        (Ok(bytes), Ok(())) => Ok(bytes),
-        (Ok(bytes), Err(_)) => Ok(bytes),
-        (Err(error), _) => Err(error),
+        #[cfg(feature = "test-hooks")]
+        backup_retry_barrier(&removed)?;
+        if attempt < 2 {
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
+    Err(AppError::LockTimeout(
+        "online backup was incomplete after 3 single-step attempts; retry when writers are idle"
+            .into(),
+    ))
 }
 
 // Publish a complete rendered export without replacing a competing writer's file.
@@ -1762,6 +1922,7 @@ impl Store {
             )));
         }
         validate_current_schema(&conn, &project_id, &db_path)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let project_key = crate::keys::read_key(&conn)?;
         Ok(Self {
             project_id,
@@ -1961,6 +2122,7 @@ impl Store {
                 )
             })?;
             summaries.push(TaskSummary {
+                attachment_count: 0,
                 id: row.get::<_, i64>(0)? as u64,
                 display_id: String::new(),
                 status: task_status,
@@ -1987,10 +2149,12 @@ impl Store {
         let next_after = if has_more { next_after } else { None };
         let ids = summaries.iter().map(|task| task.id).collect::<Vec<_>>();
         let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut counts = crate::attachment::db::attachment_counts(&self.conn, &ids)?;
         let mut labels = crate::labels::read_many(&self.conn, &ids)?;
         for row in summaries.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
             row.labels = labels.remove(&row.id).unwrap_or_default();
+            row.attachment_count = counts.remove(&row.id).unwrap_or(0);
         }
         self.stamp(&mut summaries);
         snapshot.commit()?;
@@ -2143,6 +2307,7 @@ impl Store {
 
     fn selection_summary(row: &rusqlite::Row<'_>) -> Result<TaskSummary, AppError> {
         Ok(TaskSummary {
+            attachment_count: 0,
             id: row.get(0)?,
             display_id: String::new(),
             status: validate_status(&row.get::<_, String>(1)?)?,
@@ -2160,10 +2325,12 @@ impl Store {
     fn populate_summaries(conn: &Connection, items: &mut [TaskSummary]) -> Result<(), AppError> {
         let ids = items.iter().map(|t| t.id).collect::<Vec<_>>();
         let mut deps = Self::task_dependencies_for_ids(conn, &ids)?;
+        let mut counts = crate::attachment::db::attachment_counts(conn, &ids)?;
         let mut labels = crate::labels::read_many(conn, &ids)?;
         for task in items {
             task.deps = deps.remove(&task.id).unwrap_or_default();
             task.labels = labels.remove(&task.id).unwrap_or_default();
+            task.attachment_count = counts.remove(&task.id).unwrap_or(0);
         }
         Ok(())
     }
@@ -2221,10 +2388,12 @@ impl Store {
         items.truncate(size);
         let ids = items.iter().map(|t| t.task.id).collect::<Vec<_>>();
         let mut deps = Self::task_dependencies_for_ids(&snapshot, &ids)?;
+        let mut counts = crate::attachment::db::attachment_counts(&snapshot, &ids)?;
         let mut labels = crate::labels::read_many(&snapshot, &ids)?;
         for item in &mut items {
             item.task.deps = deps.remove(&item.task.id).unwrap_or_default();
             item.task.labels = labels.remove(&item.task.id).unwrap_or_default();
+            item.task.attachment_count = counts.remove(&item.task.id).unwrap_or(0);
             item.task.display_id = self.display_id(item.task.id);
         }
         snapshot.commit()?;
@@ -2286,6 +2455,7 @@ impl Store {
                 )
             })?;
             out.push(TaskSummary {
+                attachment_count: 0,
                 id: row.get::<_, i64>(0)? as u64,
                 display_id: String::new(),
                 status: task_status,
@@ -2310,10 +2480,12 @@ impl Store {
         }
         let ids = out.iter().map(|task| task.id).collect::<Vec<_>>();
         let mut dependencies = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut counts = crate::attachment::db::attachment_counts(&self.conn, &ids)?;
         let mut labels = crate::labels::read_many(&self.conn, &ids)?;
         for row in out.iter_mut() {
             row.deps = dependencies.remove(&row.id).unwrap_or_default();
             row.labels = labels.remove(&row.id).unwrap_or_default();
+            row.attachment_count = counts.remove(&row.id).unwrap_or(0);
         }
         self.stamp(&mut out);
         snapshot.commit()?;
@@ -2342,9 +2514,11 @@ impl Store {
         let mut items = Vec::new();
         let ids = matches.iter().map(|r| r.id).collect::<Vec<_>>();
         let mut deps = Self::task_dependencies_for_ids(&self.conn, &ids)?;
+        let mut counts = crate::attachment::db::attachment_counts(&self.conn, &ids)?;
         let mut labels = crate::labels::read_many(&self.conn, &ids)?;
         for row in matches {
             items.push(TaskSummary {
+                attachment_count: counts.remove(&row.id).unwrap_or(0),
                 id: row.id,
                 display_id: self.display_id(row.id),
                 status: validate_status(&row.status)?,
@@ -2452,11 +2626,15 @@ impl Store {
     pub fn show_task(&mut self, raw_id: &str) -> Result<TaskDetail, AppError> {
         let id = self.resolve_ref(raw_id)?;
         let snapshot = self.conn.unchecked_transaction()?;
-        let task = self
+        let mut task = self
             .read_show_task(id)?
             .ok_or_else(|| self.task_not_found(&[id]))?;
+        task.attachments = crate::attachment::db::retained_attachments(&snapshot, &[id])?
+            .remove(&id)
+            .unwrap_or_default();
         let rule = self.project_rules()?;
         let detail = TaskDetail {
+            attachments: task.attachments,
             priority: task.priority,
             labels: task.labels,
             id,
@@ -2516,7 +2694,7 @@ impl Store {
                 0
             };
             for &id in &ids {
-                let task_bytes:u64=self.conn.query_row("SELECT coalesce((SELECT length(CAST(body AS BLOB))+length(CAST(title AS BLOB))+256 FROM tasks WHERE id=?1),0) + coalesce((SELECT sum(length(CAST(p.title AS BLOB))+128) FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=?1),0) + coalesce((SELECT sum(length(CAST(label AS BLOB))+32) FROM task_labels WHERE task_id=?1),0)",[id],|r|r.get(0))?;
+                let task_bytes:u64=self.conn.query_row("SELECT coalesce((SELECT length(CAST(body AS BLOB))+length(CAST(title AS BLOB))+256 FROM tasks WHERE id=?1),0) + coalesce((SELECT sum(length(CAST(p.title AS BLOB))+128) FROM dependencies d JOIN tasks p ON p.id=d.depends_on_id WHERE d.task_id=?1),0) + coalesce((SELECT sum(length(CAST(label AS BLOB))+32) FROM task_labels WHERE task_id=?1),0) + coalesce((SELECT sum(length(CAST(name AS BLOB))+length(CAST(media_type AS BLOB))+512) FROM task_attachments WHERE task_id=?1 AND detached_event_id IS NULL),0)",[id],|r|r.get(0))?;
                 bytes = bytes.saturating_add(task_bytes);
                 if bytes > max_bytes {
                     return Err(AppError::ResponseLimit("show contains too much text for one response. Split the request into fewer task IDs; read shared rules separately if needed".into()));
@@ -2533,6 +2711,10 @@ impl Store {
         }
         if !missing.is_empty() {
             return Err(self.task_not_found(&missing));
+        }
+        let mut attachments = crate::attachment::db::retained_attachments(&snapshot, &ids)?;
+        for task in &mut tasks {
+            task.attachments = attachments.remove(&task.id).unwrap_or_default();
         }
         let rules = if include_rules {
             Some(self.project_rules()?)
@@ -2577,6 +2759,7 @@ impl Store {
             return Ok(None);
         };
         Ok(Some(ShowTask {
+            attachments: Vec::new(),
             priority: priority.parse().map_err(AppError::Validation)?,
             id,
             display_id: self.display_id(id),
@@ -2890,6 +3073,7 @@ impl Store {
             "deps": deps,
             "labels": labels,
             "priority": priority,
+            "attachments": [],
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
@@ -3118,6 +3302,7 @@ impl Store {
             "deps": Self::task_dependencies_from(&tx, id)?,
             "labels": next_labels,
             "priority": next_priority,
+            "attachments": crate::attachment::db::references(&crate::attachment::db::retained_attachments(&tx, &[id])?.remove(&id).unwrap_or_default()),
         });
         tx.execute(
             "INSERT INTO events(task_id,entity_type,operation,resulting_version,created_ms,snapshot_json,attribution_json)
@@ -3425,7 +3610,8 @@ impl Store {
                             "version": 1,
                             "labels": task.labels,
                             "priority": task.priority,
-                            "deps": task.deps
+                            "deps": task.deps,
+                            "attachments": []
                         })
                         .to_string(), self.attribution_json
                     ],
@@ -3507,7 +3693,10 @@ impl Store {
     pub fn write_markdown(&mut self, out: &mut impl std::io::Write) -> Result<usize, AppError> {
         let snapshot = self.conn.unchecked_transaction()?;
         let rules = self.project_rules()?;
-        out.write_all(b"# Task Backlog\n\n> Snapshot export; the SQLite database is the recovery authority.\n\nTask schema: 1\n\n")?;
+        out.write_all(b"# Task Backlog\n\n> Snapshot export; the SQLite database is the recovery authority.\n")?;
+        let (attachment_count, task_count): (u64,u64) = self.conn.query_row("SELECT count(*),count(DISTINCT task_id) FROM task_attachments WHERE detached_event_id IS NULL", [], |r|Ok((r.get(0)?,r.get(1)?)))?;
+        writeln!(out, "> Snapshot export omits attachment bytes; {attachment_count} attachment(s) on {task_count} task(s) are listed as metadata.")?;
+        out.write_all(b"\nTask schema: 1\n\n")?;
         write!(out, "Project: {}\n\n## Rules\n\n", self.project_id)?;
         write_canonical_frame(out, "rules", &rules.body)?;
         out.write_all(b"\n\n")?;
@@ -3552,6 +3741,24 @@ impl Store {
                 }
                 write!(out, "Priority: {priority}\nBody:\n")?;
                 write_canonical_frame(out, "body", &body)?;
+                let attachments = crate::attachment::db::retained_attachments(&snapshot, &[id])?
+                    .remove(&id)
+                    .unwrap_or_default();
+                if !attachments.is_empty() {
+                    writeln!(
+                        out,
+                        "<!-- tasks-cli:canonical-v1:attachments count={} -->",
+                        attachments.len()
+                    )?;
+                    for a in attachments {
+                        writeln!(
+                            out,
+                            "- A{} {} ({}, {} bytes, sha256 {})",
+                            a.id, a.name, a.media_type, a.original_size, a.sha256
+                        )?;
+                    }
+                    writeln!(out, "<!-- tasks-cli:canonical-v1:end-attachments -->")?;
+                }
                 out.write_all(b"\n")?;
                 count += 1;
             }
@@ -3643,6 +3850,9 @@ impl Store {
             if current < 8 {
                 create_receipt_schema(&tx)?;
             }
+            if current < 9 {
+                crate::attachment::db::create_schema(&tx)?;
+            }
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
             validate_current_schema(&tx, &self.project_id, &self.db_path)?;
             let mut foreign_rows = tx.prepare("PRAGMA foreign_key_check")?;
@@ -3663,6 +3873,113 @@ impl Store {
         })?;
         restore_result?;
         Ok((current, CURRENT_SCHEMA_VERSION, Some(pre_upgrade)))
+    }
+
+    /// Input is already validated; header-only preflight runs before the write lock.
+    pub fn attach(
+        &mut self,
+        task_id: u64,
+        expect_version: u64,
+        items: Vec<crate::attachment::db::PreparedItem>,
+        limits: &crate::attachment::Limits,
+    ) -> Result<crate::model::AttachResult, AppError> {
+        crate::attachment::db::validate_items(&items, limits)?;
+        let effective_limits = crate::attachment::Limits {
+            project_stored_bytes: crate::attachment::db::project_quota(limits)?,
+            ..*limits
+        };
+        // This pragma cannot change inside a transaction. Server receipt owners
+        // must configure it before beginning their outer write transaction.
+        if self.conn.is_autocommit() {
+            self.conn.pragma_update(None, "temp_store", "MEMORY")?;
+        }
+        let tx = WriteTransaction::begin(&mut self.conn)?;
+        let result = crate::attachment::db::attach(
+            &tx,
+            task_id,
+            expect_version,
+            items,
+            &effective_limits,
+            sqlite_now_ms(),
+            &self.attribution_json,
+        )?;
+        maybe_precommit_fail("attach")?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn detach(
+        &mut self,
+        task_id: u64,
+        expect_version: u64,
+        attachment_ids: &[u64],
+    ) -> Result<crate::model::DetachResult, AppError> {
+        let tx = WriteTransaction::begin(&mut self.conn)?;
+        let result = crate::attachment::db::detach(
+            &tx,
+            task_id,
+            expect_version,
+            attachment_ids,
+            sqlite_now_ms(),
+            &self.attribution_json,
+        )?;
+        if result.event_id.is_some() {
+            maybe_precommit_fail("detach")?;
+        }
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn list_attachments(
+        &mut self,
+        task_id: u64,
+        all: bool,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Pagination<crate::model::AttachmentRecord>, AppError> {
+        let size = validate_limit(limit)?;
+        let snapshot = self.conn.unchecked_transaction()?;
+        if !snapshot.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+            [task_id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(self.task_not_found(&[task_id]));
+        }
+        let mut items =
+            crate::attachment::db::list(&snapshot, task_id, all, after.unwrap_or(0), size + 1)?;
+        let has_more = items.len() > size;
+        items.truncate(size);
+        let next_after = if has_more {
+            items.last().map(|a| a.attachment.id)
+        } else {
+            None
+        };
+        snapshot.commit()?;
+        Ok(Pagination {
+            items,
+            has_more,
+            next_after,
+        })
+    }
+
+    pub fn read_envelope(
+        &mut self,
+        task_id: u64,
+        attachment_id: u64,
+    ) -> Result<(crate::model::AttachmentRecord, Vec<u8>), AppError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let result = crate::attachment::db::read_envelope(&snapshot, task_id, attachment_id)?;
+        snapshot.commit()?;
+        Ok(result)
+    }
+
+    /// C1 wires these fields into the doctor command payload.
+    pub fn attachment_usage(&self) -> Result<crate::model::AttachmentUsage, AppError> {
+        crate::attachment::db::usage(
+            &self.conn,
+            crate::attachment::db::project_quota(&crate::attachment::Limits::PRODUCTION)?,
+        )
     }
 
     pub fn doctor(&mut self) -> Result<(String, String, i32, String), AppError> {

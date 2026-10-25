@@ -71,3 +71,76 @@ fn mapped_sections_are_explicit_and_malformed_content_is_rejected_without_change
         TaskStatus::InProgress
     );
 }
+
+#[test]
+fn attachment_export_is_metadata_only_and_imports_tasks_with_one_warning() {
+    use tasks_cli::attachment::{db::PreparedItem, envelope, Limits};
+    let (_root, mut source) = store();
+    source
+        .create_task(
+            "task",
+            "body\n<!-- fake marker -->",
+            TaskStatus::Ready,
+            vec![],
+        )
+        .unwrap();
+    let item = PreparedItem {
+        name: "log (copy).txt".into(),
+        envelope: envelope::encode(&b"hello"[..], "log (copy).txt", &Limits::PRODUCTION).unwrap(),
+    };
+    source
+        .attach(1, 1, vec![item], &Limits::PRODUCTION)
+        .unwrap();
+    let (text, count) = source.markdown_snapshot().unwrap();
+    assert_eq!(count, 1);
+    assert!(text.contains("> Snapshot export omits attachment bytes; 1 attachment(s) on 1 task(s) are listed as metadata."));
+    assert!(text.contains("<!-- tasks-cli:canonical-v1:attachments count=1 -->\n- A1 log (copy).txt (text/plain; charset=utf-8, 5 bytes, sha256 "));
+    assert!(!text.contains("TASKATT1"));
+    let parsed = markdown::parse("export.md", text.clone().into_bytes(), None).unwrap();
+    assert!(
+        parsed.parse_problems.is_empty(),
+        "{:?}",
+        parsed.parse_problems
+    );
+    assert!(!parsed.has_unknown_content);
+    assert_eq!(parsed.warnings(),vec!["1 attachment reference(s) on 1 task(s) were not imported; Markdown exports omit attachment bytes"]);
+    let (_root, mut target) = store();
+    let hash = parsed.source_hash.clone();
+    target.import_apply(parsed, Some(&hash)).unwrap();
+    let old = source.show_task("1").unwrap();
+    let new = target.show_task("1").unwrap();
+    assert_eq!(
+        (new.title, new.body, new.status, new.deps),
+        (old.title, old.body, old.status, old.deps)
+    );
+    assert!(new.attachments.is_empty());
+    for malformed in [
+        text.replace("attachments count=1", "attachments count=2"),
+        text.replace("end-attachments", "end-bogus"),
+        text.replace("sha256 2cf24dba", "sha256 NOTHEX!!"),
+        text.replace("- A1 log (copy).txt", "- A0 log (copy).txt"),
+    ] {
+        let parsed = markdown::parse("malformed.md", malformed.into_bytes(), None).unwrap();
+        assert!(!parsed.parse_problems.is_empty());
+        let (_root, mut target) = store();
+        let hash = parsed.source_hash.clone();
+        assert!(target.import_apply(parsed, Some(&hash)).is_err());
+    }
+    let without = text
+        .lines()
+        .filter(|line| !line.contains("Snapshot export omits attachment bytes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let begin = without
+        .find("<!-- tasks-cli:canonical-v1:attachments")
+        .unwrap();
+    let end = without[begin..]
+        .find("<!-- tasks-cli:canonical-v1:end-attachments -->")
+        .unwrap()
+        + begin
+        + "<!-- tasks-cli:canonical-v1:end-attachments -->".len();
+    let old = format!("{}{}", &without[..begin], &without[end..]);
+    let parsed = markdown::parse("old.md", old.into_bytes(), None).unwrap();
+    assert!(parsed.warnings().is_empty());
+    assert!(parsed.parse_problems.is_empty());
+}

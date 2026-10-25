@@ -277,6 +277,8 @@ impl ProblemCounts {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSummary {
     #[serde(default)]
+    pub attachment_count: u64,
+    #[serde(default)]
     pub priority: Priority,
     pub id: u64,
     /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
@@ -292,6 +294,8 @@ pub struct TaskSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDetail {
+    #[serde(default)]
+    pub attachments: Vec<AttachmentSummary>,
     #[serde(default)]
     pub priority: Priority,
     pub id: u64,
@@ -314,6 +318,7 @@ pub struct TaskDetail {
 /// rules, which the payload carries at most once when requested.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShowTask {
+    pub attachments: Vec<AttachmentSummary>,
     pub priority: Priority,
     pub id: u64,
     /// Display form (`KEY-001` or `T-001`); JSON keeps the numeric `id`.
@@ -721,6 +726,59 @@ pub fn parse_ledger_task_id(input: &str, key: Option<&str>) -> Result<u64, Strin
         ));
     }
     parse_task_id(input)
+}
+
+/// Retained attachment metadata. Content bytes never enter task JSON or snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentSummary {
+    pub id: u64,
+    pub display_id: String,
+    pub name: String,
+    pub kind: String,
+    pub media_type: String,
+    pub original_size: u64,
+    pub stored_size: u64,
+    pub sha256: String,
+    pub added_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentRecord {
+    #[serde(flatten)]
+    pub attachment: AttachmentSummary,
+    pub detached_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddedAttachment {
+    #[serde(flatten)]
+    pub attachment: AttachmentSummary,
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachResult {
+    pub id: u64,
+    pub status: TaskStatus,
+    pub version: u64,
+    pub event_id: Option<u64>,
+    pub attachments: Vec<AddedAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachResult {
+    pub id: u64,
+    pub status: TaskStatus,
+    pub version: u64,
+    pub event_id: Option<u64>,
+    pub detached: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttachmentUsage {
+    pub attachment_blobs: u64,
+    pub attachment_stored_bytes: u64,
+    pub attachment_quota_bytes: u64,
 }
 
 #[cfg(test)]

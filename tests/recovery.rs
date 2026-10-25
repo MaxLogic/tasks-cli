@@ -179,18 +179,21 @@ fn explicit_migration_keeps_a_verified_pre_upgrade_backup() {
         .join(id.to_string())
         .join("TASKS.sqlite");
     let raw = Connection::open(&db).expect("raw db");
-    raw.execute_batch("DROP TRIGGER tasks_fts_insert; DROP TRIGGER tasks_fts_update; DROP TRIGGER tasks_fts_delete; DROP TABLE tasks_fts; DROP TABLE task_labels; DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json;").unwrap();
+    raw.execute_batch("DROP TRIGGER tasks_fts_insert; DROP TRIGGER tasks_fts_update; DROP TRIGGER tasks_fts_delete; DROP TABLE tasks_fts; DROP TABLE task_labels; DROP TABLE task_attachments; DROP TABLE attachment_blobs; DROP TABLE mutation_receipts; DROP TABLE metadata_events; ALTER TABLE events DROP COLUMN attribution_json;").unwrap();
     raw.pragma_update(None, "user_version", 0i64)
         .expect("old schema");
     drop(raw);
     let mut store = Store::open_for_migration(temp.path(), &id.to_string()).expect("old open");
     let (from, to, backup_path) = store.migrate().expect("migrate");
-    assert_eq!((from, to), (0, 8));
+    assert_eq!((from, to), (0, tasks_cli::store::CURRENT_SCHEMA_VERSION));
     let backup_path = backup_path.expect("backup path");
     assert!(backup_path.is_file());
     assert!(backup_path
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("v0-pre-migrate-")));
-    assert_eq!(store.doctor().expect("doctor").2, 8);
+    assert_eq!(
+        store.doctor().expect("doctor").2,
+        tasks_cli::store::CURRENT_SCHEMA_VERSION
+    );
 }
