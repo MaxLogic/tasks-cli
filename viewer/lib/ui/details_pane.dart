@@ -16,6 +16,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../controllers/detail_controller.dart';
+import '../controllers/attachment_controller.dart';
+import '../data/cli_client.dart';
+import 'attachment_dialogs.dart';
 import '../controllers/editor_controller.dart';
 import '../data/editor_models.dart';
 import '../data/models.dart';
@@ -71,6 +74,69 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   /// Controller instance the local text controls are currently bound to.
   TaskDetailController? _boundController;
   String? _announcedNotice;
+  bool _attachmentsActive = false;
+  AttachmentController? _attachments;
+  String? _attachmentSelectionProject;
+  int? _attachmentSelectionTask;
+  final _attachmentTabFocus = FocusNode(debugLabel: 'Attachments tab');
+  final _attachmentPanelKey = GlobalKey<AttachmentPanelState>();
+  ViewerCliClient? get _attachmentClient =>
+      widget.model.readers.detail is ViewerCliClient
+      ? widget.model.readers.detail as ViewerCliClient
+      : null;
+  bool get _hasAttachments =>
+      _attachmentClient?.attachmentInfo?.supportsAttachments == true;
+  void _activateAttachments() {
+    if (_editor.isEditing) {
+      widget.api.announce('Save or cancel your edits first', dynamic: true);
+      return;
+    }
+    if (!_hasAttachments ||
+        widget.model.detail?.detailMatchesSelection != true) {
+      return;
+    }
+    setState(() => _attachmentsActive = true);
+    _attachmentTabFocus.requestFocus();
+  }
+
+  AttachmentController _attachmentController(TaskDetail detail) {
+    final project = widget.model.detail!.projectId;
+    if (_attachments == null ||
+        _attachments!.projectId != project ||
+        _attachments!.task.id != detail.id) {
+      _attachments?.dispose();
+      final boundDetail = widget.model.detail!;
+      _attachments = AttachmentController(
+        client: _attachmentClient!,
+        isCurrent: () => _attachmentContextMatches(project, detail.id),
+        projectId: project,
+        task: detail,
+        refresh: () async {
+          if (identical(widget.model.detail, boundDetail)) {
+            await widget.model.noteConfirmedRead();
+          } else {
+            await boundDetail.reload();
+          }
+        },
+        announce: (text) => widget.api.announce(text, dynamic: true),
+      );
+    }
+    _attachments!.task = detail;
+    _attachments!.editing = _editor.isEditing;
+    return _attachments!;
+  }
+
+  bool _attachmentContextMatches(String project, int taskId) =>
+      mounted &&
+      _attachmentsActive &&
+      _attachmentPanelKey.currentState?.mounted == true &&
+      widget.model.detail?.projectId == project &&
+      widget.model.detail?.taskId == taskId &&
+      widget.model.detail?.detailMatchesSelection == true;
+  bool get _canDispatchAttachment =>
+      _attachments != null &&
+      _attachmentContextMatches(_attachments!.projectId, _attachments!.task.id);
+
   String? _slowReadKey;
   Timer? _slowReadTimer;
 
@@ -101,6 +167,8 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     _editorFocus.dispose();
     _editActionFocus.dispose();
     _markDoneActionFocus.dispose();
+    _attachments?.dispose();
+    _attachmentTabFocus.dispose();
     _body.dispose();
     _find.dispose();
     _snapshot.dispose();
@@ -130,7 +198,59 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   }
 
   KeyEventResult _onScopeCommand(String id) {
+    if (_editor.isEditing &&
+        (id == 'details.tabAttachments' ||
+            id.startsWith('details.attachment'))) {
+      widget.api.announce('Save or cancel your edits first', dynamic: true);
+      return KeyEventResult.handled;
+    }
+    if (_hasAttachments &&
+        widget.model.detail?.detailMatchesSelection == true &&
+        !_attachmentsActive &&
+        id.startsWith('details.attachment') &&
+        id != 'details.attachmentList') {
+      widget.api.announce(
+        'Open the Attachments tab first (Alt+5)',
+        dynamic: true,
+      );
+      return KeyEventResult.handled;
+    }
     switch (id) {
+      case 'details.tabAttachments':
+        _activateAttachments();
+        return KeyEventResult.handled;
+      case 'details.attachmentList':
+        _activateAttachments();
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _attachmentPanelKey.currentState?.focusList(),
+        );
+        return KeyEventResult.handled;
+      case 'details.attachmentAdd':
+        if (_canDispatchAttachment) unawaited(_attachments?.addFiles());
+        return KeyEventResult.handled;
+      case 'details.attachmentPaste':
+        if (_canDispatchAttachment) {
+          unawaited(_attachmentPanelKey.currentState?.paste());
+        }
+        return KeyEventResult.handled;
+      case 'details.attachmentView':
+        if (_canDispatchAttachment) {
+          unawaited(_attachmentPanelKey.currentState?.view());
+        }
+        return KeyEventResult.handled;
+      case 'details.attachmentSave':
+        if (_canDispatchAttachment) {
+          final panel = _attachmentPanelKey.currentState;
+          if (panel?.item != null) {
+            unawaited(_attachments?.saveAs(panel!.item!));
+          }
+        }
+        return KeyEventResult.handled;
+      case 'details.attachmentDetach':
+        if (_canDispatchAttachment) {
+          unawaited(_attachmentPanelKey.currentState?.detach());
+        }
+        return KeyEventResult.handled;
       case 'details.tabDetails':
       case 'details.tabDependencies':
       case 'details.tabHistory':
@@ -209,6 +329,15 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   /// history snapshot, a wrap notice, and the slow-read announcement.
   void _syncExternalContent() {
     final state = widget.model.detail;
+    if (state?.projectId != _attachmentSelectionProject ||
+        state?.taskId != _attachmentSelectionTask) {
+      _attachmentSelectionProject = state?.projectId;
+      _attachmentSelectionTask = state?.taskId;
+      _attachments?.dispose();
+      _attachments = null;
+      _attachmentsActive = false;
+    }
+    _attachments?.editing = _editor.isEditing;
     if (!identical(state, _boundController)) {
       _boundController = state;
       _announcedNotice = null;
@@ -487,7 +616,9 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     final canonical = conflict.current.canonicalId;
     final decision = await widget.api.showModal<EditorConflictDecision>(
       CommandScope.conflict,
-      (context) => ViewerConflictDialog(conflict: conflict),
+      (context) => attachmentsOnlyConflict(conflict)
+          ? AttachmentOnlyConflictDialog(conflict: conflict)
+          : ViewerConflictDialog(conflict: conflict),
     );
     switch (decision) {
       case EditorConflictDecision.reloadAndDiscard:
@@ -499,11 +630,13 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
         );
         await widget.model.noteConfirmedRead();
       case EditorConflictDecision.review:
-        final choices = await widget.api
-            .showModal<Map<EditorField, EditorConflictChoice>>(
-              CommandScope.conflictReview,
-              (context) => ViewerConflictReviewDialog(conflict: conflict),
-            );
+        final choices = attachmentsOnlyConflict(conflict)
+            ? <EditorField, EditorConflictChoice>{}
+            : await widget.api
+                  .showModal<Map<EditorField, EditorConflictChoice>>(
+                    CommandScope.conflictReview,
+                    (context) => ViewerConflictReviewDialog(conflict: conflict),
+                  );
         if (choices == null) {
           widget.api.announce(
             'No choices applied. $canonical still conflicts with your draft.',
@@ -711,6 +844,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
 
   /// Activates one tab and leaves focus on its tab control.
   void _activateTab(TaskDetailTab tab) {
+    setState(() => _attachmentsActive = false);
     widget.model.showTab(tab);
     final node = _tabNodes[tab];
     if (node != null && node.context != null && node.canRequestFocus) {
@@ -782,6 +916,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   /// access key that switches views has to wait for the frame that builds it
   /// (design.md section 9).
   void _revealInPanel(TaskDetailTab tab, VoidCallback focus) {
+    setState(() => _attachmentsActive = false);
     final state = widget.model.detail;
     if (state == null) {
       return;
@@ -875,6 +1010,10 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   void _moveTabFocus(TaskDetailTab from, int delta) {
     final values = TaskDetailTab.values;
     final target = values.indexOf(from) + delta;
+    if (target == values.length && _hasAttachments) {
+      _attachmentTabFocus.requestFocus();
+      return;
+    }
     if (target < 0 || target >= values.length) {
       return;
     }
@@ -1198,7 +1337,69 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
             children: <Widget>[
               for (final tab in TaskDetailTab.values)
                 Expanded(child: _buildTab(context, state, tab)),
+              if (_hasAttachments)
+                Expanded(child: _buildAttachmentTab(context)),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAttachmentTab(BuildContext context) {
+    _attachmentTabFocus.skipTraversal = !_attachmentsActive;
+    return MergeSemantics(
+      child: Semantics(
+        role: SemanticsRole.tab,
+        selected: _attachmentsActive,
+        onTap: _activateAttachments,
+        child: Focus(
+          focusNode: _attachmentTabFocus,
+          onKeyEvent: (_, event) {
+            if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+              return KeyEventResult.ignored;
+            }
+            if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+              _tabNodes[TaskDetailTab.rules]?.requestFocus();
+              return KeyEventResult.handled;
+            }
+            if (event.logicalKey == LogicalKeyboardKey.enter ||
+                event.logicalKey == LogicalKeyboardKey.space) {
+              _activateAttachments();
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: InkWell(
+            onTap: _activateAttachments,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    width: 3,
+                    color: _attachmentsActive
+                        ? Theme.of(context).colorScheme.primary
+                        : Colors.transparent,
+                  ),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Attachments (${widget.model.detail?.detail?.attachments.length ?? 0})',
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: _attachmentsActive
+                          ? Theme.of(context).colorScheme.primary
+                          : null,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  Text('Alt+5', style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -1214,7 +1415,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     TaskDetailTab tab,
   ) {
     final theme = Theme.of(context);
-    final selected = state.tab == tab;
+    final selected = !_attachmentsActive && state.tab == tab;
     final shortcut = 'Alt+${TaskDetailTab.values.indexOf(tab) + 1}';
     final node = _tabNodes[tab];
     if (node != null) {
@@ -1273,12 +1474,25 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       role: SemanticsRole.tabPanel,
       container: true,
       explicitChildNodes: true,
-      child: switch (state.tab) {
-        TaskDetailTab.details => _buildDetailsPanel(context, state, detail),
-        TaskDetailTab.dependencies => _buildDependenciesPanel(context, state),
-        TaskDetailTab.history => _buildHistoryPanel(context, state),
-        TaskDetailTab.rules => _buildRulesPanel(context, detail),
-      },
+      child: _attachmentsActive && _hasAttachments
+          ? AttachmentPanel(
+              key: _attachmentPanelKey,
+              api: widget.api,
+              controller: _attachmentController(detail),
+            )
+          : switch (state.tab) {
+              TaskDetailTab.details => _buildDetailsPanel(
+                context,
+                state,
+                detail,
+              ),
+              TaskDetailTab.dependencies => _buildDependenciesPanel(
+                context,
+                state,
+              ),
+              TaskDetailTab.history => _buildHistoryPanel(context, state),
+              TaskDetailTab.rules => _buildRulesPanel(context, detail),
+            },
     );
   }
 

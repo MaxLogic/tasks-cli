@@ -89,6 +89,9 @@ HelpGroup? _helpGroupForScope(CommandScope scope) {
     case CommandScope.conflict:
     case CommandScope.conflictReview:
     case CommandScope.restoreDraft:
+    case CommandScope.attachmentAttach:
+    case CommandScope.attachmentDetach:
+    case CommandScope.attachmentPreview:
     case CommandScope.enrichmentPreview:
     case CommandScope.keyboardHelp:
     case CommandScope.slowSaveClose:

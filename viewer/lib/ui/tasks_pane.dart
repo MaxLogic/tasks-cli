@@ -939,7 +939,8 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             );
           }
           return AccessibleRowSemantics(
-            label: viewerTaskRowLabel(item),
+            label:
+                '${viewerTaskRowLabel(item)}${item.attachmentCount > 0 ? ', ${item.attachmentCount} ${item.attachmentCount == 1 ? 'attachment' : 'attachments'}' : ''}',
             value: viewerRowPosition(index, itemCount),
           );
         },

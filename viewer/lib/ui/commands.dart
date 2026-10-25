@@ -26,6 +26,9 @@ enum CommandScope {
   conflictReview,
   restoreDraft,
   enrichmentPreview,
+  attachmentAttach,
+  attachmentDetach,
+  attachmentPreview,
   keyboardHelp,
   statusBar,
   slowSaveClose,
@@ -40,6 +43,9 @@ bool isDialogScope(CommandScope scope) {
     case CommandScope.conflict:
     case CommandScope.conflictReview:
     case CommandScope.restoreDraft:
+    case CommandScope.attachmentAttach:
+    case CommandScope.attachmentDetach:
+    case CommandScope.attachmentPreview:
     case CommandScope.enrichmentPreview:
     case CommandScope.keyboardHelp:
     case CommandScope.slowSaveClose:
@@ -863,6 +869,40 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     description: 'Focus the read-only project rules text.',
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyR)],
   ),
+  CommandSpec(
+    id: 'details.tabAttachments',
+    scope: CommandScope.details,
+    group: HelpGroup.details,
+    label: 'Attachments tab',
+    description:
+        'Show retained attachments when the CLI and server support them.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.digit5)],
+  ),
+  for (final entry in <String, (String, LogicalKeyboardKey)>{
+    'attachmentList': ('Attachment list', LogicalKeyboardKey.keyA),
+    'attachmentAdd': ('Add files', LogicalKeyboardKey.keyF),
+    'attachmentPaste': ('Paste attachments', LogicalKeyboardKey.keyU),
+    'attachmentView': ('View attachment', LogicalKeyboardKey.keyW),
+    'attachmentSave': ('Save attachment as', LogicalKeyboardKey.keyS),
+    'attachmentDetach': ('Detach attachment', LogicalKeyboardKey.keyX),
+  }.entries)
+    CommandSpec(
+      id: 'details.${entry.key}',
+      scope: CommandScope.details,
+      group: HelpGroup.details,
+      label: entry.value.$1,
+      description: '${entry.value.$1} in the Attachments panel.',
+      activators: <ShortcutActivator>[_alt(entry.value.$2)],
+    ),
+  CommandSpec(
+    id: 'attachment.help',
+    scope: CommandScope.details,
+    group: HelpGroup.details,
+    label: 'Attachment preview and paste',
+    shortcutText: 'Ctrl+V; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
+    description:
+        'Paste on the attachment panel, Enter to view. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
+  ),
   // ---------------------------------------------------------------- editor
   CommandSpec(
     id: 'editor.title',
@@ -1273,6 +1313,34 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
   ),
 
   // --------------------------------------------------- enrichment preview
+  for (final entry in [
+    (
+      CommandScope.attachmentAttach,
+      'Attach files',
+      'Alt+A: Attach; Alt+C or Escape: Cancel',
+      'Attach the inspected files, or cancel without changing the task.',
+    ),
+    (
+      CommandScope.attachmentDetach,
+      'Detach attachment',
+      'Alt+D: Detach; Alt+C or Escape: Cancel (default)',
+      'Detach the selected attachment, or cancel and keep it.',
+    ),
+    (
+      CommandScope.attachmentPreview,
+      'Attachment preview',
+      'Alt+S: Save as; Alt+C or Escape: Close; Alt+H/T: Head/Tail; Ctrl+Plus/Minus: Zoom; Ctrl+0: Fit; Ctrl+1: Actual size; Arrows: Pan image or move text caret',
+      'Read the verified file, save a copy, or adjust the image view.',
+    ),
+  ])
+    CommandSpec(
+      id: '${entry.$1.name}.help',
+      scope: entry.$1,
+      group: HelpGroup.dialogs,
+      label: entry.$2,
+      description: entry.$4,
+      shortcutText: entry.$3,
+    ),
   CommandSpec(
     id: 'enrichmentPreview.original',
     scope: CommandScope.enrichmentPreview,

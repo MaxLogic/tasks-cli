@@ -305,6 +305,87 @@ class ViewerCliClient
     return decoded;
   }
 
+  ViewerInfo? get attachmentInfo => _info;
+
+  Future<ViewerEnvelope> attachmentCommand(
+    String projectId,
+    List<String> command, {
+    bool mutation = false,
+    bool clipboard = false,
+  }) async {
+    if (!_probePassed) throw const ViewerProbeRequiredFailure();
+    if (_info?.supportsAttachments != true) {
+      throw const ViewerCliErrorFailure(
+        code: 'remote_capability',
+        message: 'Attachments are unavailable in this CLI or server.',
+        exitCode: 5,
+      );
+    }
+    final remote = mutation && (_info?.isRemote ?? false);
+    if (remote || clipboard) _requireNoPendingReceipt();
+    final requestId = remote ? _newRequestId() : null;
+    final operation = 'attachment_${command.first}';
+    if (requestId != null) {
+      _pendingReceipts.add(
+        ViewerPendingReceipt(
+          requestId,
+          projectId,
+          operation,
+          taskId: int.tryParse(command[1]),
+        ),
+      );
+    }
+    try {
+      final envelope = await _runViewerCommand(
+        scopeKey: clipboard
+            ? 'attachment-clipboard'
+            : 'attachment-${command.first}',
+        arguments: [
+          '--data-root',
+          _requireDataRoot('working with attachments'),
+          if (!clipboard) ...['--project', projectId],
+          '--format',
+          'json',
+          'attachment',
+          ...command,
+          if (requestId != null) ...['--request-id', requestId],
+        ],
+        request: null,
+        expectedCommands: {operation},
+        cancellable: !mutation && !clipboard,
+        originalWriteId: requestId,
+        localMutation: mutation || clipboard,
+        waitForLocalWriter: !clipboard,
+        timeout: command.first == 'get' ? const Duration(seconds: 120) : null,
+      );
+      if (!clipboard) _requireProjectEcho(envelope, projectId);
+      if (mutation &&
+          (envelope.data['id'] != int.tryParse(command[1]) ||
+              envelope.data['version'] !=
+                  int.parse(command[command.indexOf('--expect-version') + 1]) +
+                      (envelope.data['event_id'] == null ? 0 : 1))) {
+        throw const ViewerMalformedResponseFailure(
+          'attachment mutation returned a mismatched task or version',
+        );
+      }
+      if (requestId != null) await _acknowledge(requestId);
+      return envelope;
+    } on ViewerCliErrorFailure catch (error) {
+      if (requestId != null) await _settleRemoteWriteError(requestId, error);
+      rethrow;
+    } on ViewerProcessStartFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((r) => r.requestId == requestId);
+      }
+      rethrow;
+    } on ViewerExecutableNotFoundFailure {
+      if (requestId != null) {
+        _pendingReceipts.removeWhere((r) => r.requestId == requestId);
+      }
+      rethrow;
+    }
+  }
+
   /// Loads one page of the project catalog.
   @override
   Future<ProjectPage> fetchProjects(ProjectQuery query) async {
@@ -911,6 +992,14 @@ class ViewerCliClient
             'reconciled task ID differs',
           );
         }
+      } else if (receipt.operation == 'attachment_add' ||
+          receipt.operation == 'attachment_detach') {
+        if (envelope.data['id'] != receipt.taskId ||
+            envelope.data['version'] is! int) {
+          throw const ViewerMalformedResponseFailure(
+            'reconciled attachment task differs',
+          );
+        }
       } else if (receipt.operation == 'archive') {
         final archivedAt = envelope.data['archived_at_ms'];
         if (archivedAt != null && archivedAt is! int) {
@@ -1036,6 +1125,7 @@ class ViewerCliClient
     String? originalWriteId,
     bool localMutation = false,
     bool waitForLocalWriter = false,
+    Duration? timeout,
   }) async {
     final resolution = resolveExecutable();
     final executable = resolution.executable;
@@ -1062,7 +1152,7 @@ class ViewerCliClient
       _activeReads[scopeKey]?.cancel();
       _activeReads[scopeKey] = active;
     }
-    final budget = readTimeout;
+    final budget = timeout ?? readTimeout;
     final elapsed = Stopwatch()..start();
     Duration remainingBudget() {
       final remaining = budget - elapsed.elapsed;

@@ -682,6 +682,7 @@ final class ViewerInfo {
     required this.editableFieldLimits,
     this.backend = 'local',
     this.receiptRecovery = false,
+    this.attachmentLimits = const {},
   });
 
   final int protocolVersion;
@@ -692,6 +693,13 @@ final class ViewerInfo {
   final ViewerEditableFieldLimits editableFieldLimits;
   final String backend;
   final bool receiptRecovery;
+  final Map<String, Object?> attachmentLimits;
+  bool get supportsAttachments => const [
+    'attachment-add',
+    'attachment-get',
+    'attachment-detach',
+    'attachment-clipboard',
+  ].every(operations.contains);
 
   bool get isRemote => backend == 'remote';
 
@@ -700,6 +708,12 @@ final class ViewerInfo {
     String path = r'$.data',
   }) {
     return ViewerInfo(
+      attachmentLimits: json['attachment_limits'] == null
+          ? const {}
+          : _requireObject(
+              json['attachment_limits'],
+              '$path.attachment_limits',
+            ),
       protocolVersion: _requireProtocolVersion(json, path),
       operations: _requireStringList(json, 'operations', path),
       statuses: _requireStringList(json, 'statuses', path),
@@ -1342,6 +1356,7 @@ final class TaskItem {
     required this.dependencyCount,
     required this.waitingDependencyCount,
     this.verifyingDependencyCount = 0,
+    this.attachmentCount = 0,
     required this.createdMs,
     required this.updatedMs,
   });
@@ -1363,6 +1378,7 @@ final class TaskItem {
   /// Prerequisites in `to-verify`. They are part of [waitingDependencyCount]
   /// because they still block completion, but they do not block starting.
   final int verifyingDependencyCount;
+  final int attachmentCount;
 
   /// Waiting prerequisites that also keep the task from starting, cancelled
   /// ones included.
@@ -1375,6 +1391,9 @@ final class TaskItem {
 
   factory TaskItem.fromJson(Map<String, Object?> json, {required String path}) {
     return TaskItem(
+      attachmentCount: json['attachment_count'] == null
+          ? 0
+          : _requireInt(json, 'attachment_count', path),
       id: _requireInt(json, 'id', path),
       displayId: _optionalString(json, 'display_id', path),
       title: _requireString(json, 'title', path),
@@ -1526,8 +1545,10 @@ final class TaskDetail {
     required this.rules,
     required this.createdMs,
     required this.updatedMs,
+    this.attachments = const [],
   });
 
+  final List<AttachmentSummary> attachments;
   final int id;
   final String title;
   final String body;
@@ -1564,6 +1585,7 @@ final class TaskDetail {
       '$path.dependency_summaries',
     );
     return TaskDetail(
+      attachments: attachmentItems(json['attachments'] ?? const []),
       id: _requireInt(json, 'id', path),
       projectKey: _optionalString(json, 'project_key', path),
       displayId: _optionalString(json, 'display_id', path),
@@ -2107,3 +2129,64 @@ int _requireProtocolVersion(Map<String, Object?> json, String path) {
   }
   return version;
 }
+
+/// Retained attachment metadata; bytes stay in CLI-owned files.
+final class AttachmentSummary {
+  const AttachmentSummary({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.mediaType,
+    required this.originalSize,
+    required this.storedSize,
+    required this.sha256,
+    required this.addedMs,
+  });
+  final int id, originalSize, storedSize, addedMs;
+  final String name, kind, mediaType, sha256;
+  String get displayId => 'A$id';
+  String get sizeLabel => attachmentSizeLabel(originalSize);
+  String get rowLabel =>
+      '$name, $kind, $mediaType, $sizeLabel, added ${DateTime.fromMillisecondsSinceEpoch(addedMs).toLocal()}';
+  factory AttachmentSummary.fromJson(Map<String, Object?> json) =>
+      AttachmentSummary(
+        id: _requireInt(json, 'id', 'attachment'),
+        name: _requireString(json, 'name', 'attachment'),
+        kind: _requireString(json, 'kind', 'attachment'),
+        mediaType: _requireString(json, 'media_type', 'attachment'),
+        originalSize: _requireInt(json, 'original_size', 'attachment'),
+        storedSize: _requireInt(json, 'stored_size', 'attachment'),
+        sha256: _requireString(json, 'sha256', 'attachment'),
+        addedMs: _requireInt(json, 'added_ms', 'attachment'),
+      );
+}
+
+List<AttachmentSummary> attachmentItems(Object? raw) {
+  final items = _requireList(raw, 'attachments');
+  return List.unmodifiable(
+    items.map(
+      (item) => AttachmentSummary.fromJson(_requireObject(item, 'attachment')),
+    ),
+  );
+}
+
+final class AttachmentClipboard {
+  AttachmentClipboard.fromJson(Map<String, Object?> json)
+    : token = _requireString(json, 'token', 'clipboard'),
+      items = _requireList(
+        json['items'],
+        'clipboard.items',
+      ).map((v) => _requireObject(v, 'clipboard.item')).toList(),
+      skipped = _requireList(
+        json['skipped'],
+        'clipboard.skipped',
+      ).map((v) => _requireObject(v, 'clipboard.skipped')).toList();
+  final String token;
+  final List<Map<String, Object?>> items, skipped;
+}
+
+String attachmentSizeLabel(int size) => size < 1024
+    ? '$size bytes'
+    : size < 1024 * 1024
+    ? '${(size / 1024).toStringAsFixed(1)} KB'
+    : '${(size / (1024 * 1024)).toStringAsFixed(1)} MB';
