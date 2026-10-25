@@ -1,3 +1,4 @@
+pub mod attachment;
 pub mod attribution;
 pub mod backup;
 pub mod bulk;

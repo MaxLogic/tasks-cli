@@ -4,6 +4,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("{message}")]
+    Coded {
+        code: &'static str,
+        exit: u8,
+        message: String,
+    },
     #[error("usage: {0}")]
     Usage(String),
     #[error("not found: {0}")]
@@ -95,9 +101,20 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
+impl From<crate::attachment::AttachmentError> for AppError {
+    fn from(value: crate::attachment::AttachmentError) -> Self {
+        Self::Coded {
+            code: value.code(),
+            exit: value.exit_code() as u8,
+            message: value.to_string(),
+        }
+    }
+}
+
 impl AppError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Coded { code, .. } => code,
             Self::Usage(_) => "usage",
             Self::NotFound(_) | Self::NotFoundCode(_) => "not_found",
             Self::VersionConflict { .. } => "version_conflict",
@@ -120,6 +137,7 @@ impl AppError {
 
     pub fn exit_code(&self) -> i32 {
         match self {
+            Self::Coded { exit, .. } => i32::from(*exit),
             Self::Usage(_) => 2,
             Self::NotFound(_) | Self::NotFoundCode(_) => 3,
             Self::VersionConflict { .. } => 4,
@@ -239,6 +257,71 @@ impl AppError {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn attachment_error_mapping_preserves_code_exit_and_message() {
+        use crate::attachment::AttachmentError;
+        for (error, code, exit) in [
+            (
+                AttachmentError::TooLarge {
+                    measured: 21,
+                    limit: 20,
+                },
+                "attachment_too_large",
+                2,
+            ),
+            (
+                AttachmentError::OriginalTooLarge {
+                    measured: 257,
+                    limit: 256,
+                },
+                "attachment_original_too_large",
+                2,
+            ),
+            (
+                AttachmentError::Integrity("SHA-256 mismatch"),
+                "attachment_integrity",
+                6,
+            ),
+            (
+                AttachmentError::Name("invalid name".into()),
+                "validation",
+                2,
+            ),
+            (AttachmentError::Codec("encoder failed".into()), "io", 6),
+            (
+                AttachmentError::Io(std::io::Error::other("read failed")),
+                "io",
+                6,
+            ),
+        ] {
+            let message = error.to_string();
+            let mapped = AppError::from(error);
+            assert_eq!(mapped.code(), code);
+            assert_eq!(mapped.exit_code(), exit);
+            assert_eq!(mapped.to_string(), message);
+            let json: serde_json::Value = serde_json::from_str(&mapped.json()).unwrap();
+            assert_eq!(json["error"]["code"], code);
+            assert_eq!(json["error"]["message"], message);
+        }
+    }
+
+    #[test]
+    fn coded_error_uses_existing_json_and_text_rendering() {
+        let error = AppError::Coded {
+            code: "attachment_batch_too_large",
+            exit: 2,
+            message: "33 files; the limit is 32".into(),
+        };
+        assert_eq!(error.code(), "attachment_batch_too_large");
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(error.to_string(), "33 files; the limit is 32");
+        let json: serde_json::Value = serde_json::from_str(&error.json()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"schema_version": 1, "error": {"code": "attachment_batch_too_large", "message": "33 files; the limit is 32"}})
+        );
+    }
 
     #[test]
     fn io_path_names_the_operation_and_the_path() {
