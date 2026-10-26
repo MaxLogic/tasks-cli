@@ -3,7 +3,7 @@ name: task-ledger
 description: "Access a project's shared SQLite task backlog with the MaxLogic tasks-cli executable. Use for project identity, selected task queries, versioned mutations, dependency readiness, and task history. Pair with create-task for formulation or resolve-task for execution. Do not bootstrap, migrate, or edit a Markdown ledger implicitly."
 metadata:
   author: Pawel Piotrowski
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # Task Ledger
@@ -98,6 +98,33 @@ counts as satisfied for default list and `unlocks` only. Distinguish direct depe
 become immediately runnable after completion; `unlocks` is scheduling evidence,
 not permission to close a prerequisite. Lower P number means higher priority;
 P0 through P3 are supported and P2 is the default. Priority never bypasses deps.
+
+## Attachments
+
+`show ID` lists attachment metadata only. Retrieve relevant content before
+using it as evidence:
+
+```text
+tasks attachment get ID A1 [--out PATH] [--overwrite]
+```
+
+The command returns a local path. Open images with the image tool, read text
+with the Read tool, or inspect logs with `rg`/`tail`. Existing output files
+require explicit `--overwrite`. `attachment list ID` pages retained metadata.
+
+The coordinator performs attachment writes with the current task version:
+
+```text
+tasks attachment add ID --expect-version N --file PATH [--name NAME]
+tasks attachment add ID --expect-version N --file - --name NAME
+tasks attachment add ID --expect-version N --clipboard
+tasks attachment detach ID A1 --expect-version N
+```
+
+Repeat `--file` for a batch; stdin requires `--name`. Detach retains bytes and
+audit history. Limits: 20 MiB compressed/stored payload per file; 32 retained
+files and 50 MiB total stored bytes per task. A stale write exits 4; follow
+the ownership and conflict rules below.
 
 ## Mutations and ownership
 
