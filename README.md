@@ -243,7 +243,7 @@ refuse the whole get before writing.
 Limits are 20 MiB per file after compression, 32 retained attachments/50 MiB
 stored per task and 1 GiB unique stored bytes per project, including detached
 content. Technical decode bounds are 256 MiB original per file and 512 MiB
-original per add command (maximum 32 files). <!-- owner confirmation pending: L2/L6 -->
+original per add command (maximum 32 files).
 Clipboard inspection returns a token; callers may pass --clipboard-token to add
 to detect a changed capture. Helpers have a 10 s deadline plus a bounded 500 ms
 shutdown grace. Remote servers must advertise attachments-v1; a missing

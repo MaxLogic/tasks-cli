@@ -6,7 +6,10 @@ use super::{
     OwnedServer, ServiceError,
 };
 use crate::{
-    attachment::{db::PreparedItem, envelope, frame, Limits},
+    attachment::{
+        db::{self, BorrowedPreparedItem},
+        frame, Limits,
+    },
     model::Attribution,
     output::CommandPayload,
     store::Store,
@@ -112,25 +115,15 @@ pub(super) fn upload(
 fn prepare(
     bytes: &[u8],
     frame: frame::UploadFrame,
-) -> Result<(frame::UploadMetadata, Vec<PreparedItem>), AppError> {
-    let mut prepared = Vec::with_capacity(frame.ranges.len());
-    for (item, range) in frame.metadata.items.iter().zip(frame.ranges) {
-        #[cfg(feature = "test-hooks")]
-        if let Some(log) = std::env::var_os("TASKS_TEST_DECODE_LOG") {
-            use std::io::Write;
-            writeln!(
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log)?,
-                "decode"
-            )?;
-        }
-        prepared.push(PreparedItem {
-            name: item.name.clone(),
-            envelope: envelope::validate(bytes[range].to_vec(), &item.name, &Limits::PRODUCTION)?,
-        });
-    }
+) -> Result<(frame::UploadMetadata, Vec<BorrowedPreparedItem<'_>>), AppError> {
+    let items = frame
+        .metadata
+        .items
+        .iter()
+        .zip(frame.ranges)
+        .map(|(item, range)| (item.name.clone(), &bytes[range]))
+        .collect();
+    let prepared = db::prepare_borrowed(items, &Limits::PRODUCTION)?;
     Ok((frame.metadata, prepared))
 }
 fn execute(
@@ -139,7 +132,7 @@ fn execute(
     task: u64,
     identity: &ReceiptIdentity,
     bytes: &[u8],
-    prepared: Result<(frame::UploadMetadata, Vec<PreparedItem>), AppError>,
+    prepared: Result<(frame::UploadMetadata, Vec<BorrowedPreparedItem<'_>>), AppError>,
 ) -> Result<ReceiptResponse, ServiceError> {
     let mut store = Store::open_rw(server.data_root(), &project.to_string())?;
     store.conn.pragma_update(None, "temp_store", "MEMORY")?;
@@ -148,7 +141,8 @@ fn execute(
     }
     Ok(receipts::execute(store, identity, bytes, |store| {
         let (metadata, items) = prepared?;
-        let result = store.attach(task, metadata.expect_version, items, &Limits::PRODUCTION)?;
+        let result =
+            store.attach_borrowed(task, metadata.expect_version, &items, &Limits::PRODUCTION)?;
         api::output(
             store,
             CommandPayload::AttachmentAdd {
@@ -162,7 +156,13 @@ fn execute(
         )
     })?)
 }
-pub(crate) fn download(server: &OwnedServer, uri: &Uri) -> Result<Vec<u8>, AppError> {
+pub(crate) struct Download {
+    pub metadata: frame::DownloadMetadata,
+    pub prefix: Vec<u8>,
+    pub envelope: Vec<u8>,
+}
+
+pub(crate) fn download(server: &OwnedServer, uri: &Uri) -> Result<Download, AppError> {
     let (project, task) = route(uri)?;
     if !api::catalogued(server, project)
         .map_err(|_| AppError::Database("server catalog unavailable".into()))?
@@ -182,13 +182,23 @@ pub(crate) fn download(server: &OwnedServer, uri: &Uri) -> Result<Vec<u8>, AppEr
     }
     let mut store = Store::open_readonly(server.data_root(), &project.to_string())?;
     let (record, bytes) = store.read_envelope(task, id)?;
-    frame::download(
-        &frame::DownloadMetadata {
-            format: 1,
-            project_id: project,
-            task_id: task,
-            attachment: record.attachment,
-        },
-        &bytes,
-    )
+    let metadata = frame::DownloadMetadata {
+        format: 1,
+        project_id: project,
+        task_id: task,
+        attachment: record.attachment,
+    };
+    // Keep the existing bounded SQLite read, but do not copy its full BLOB into
+    // another frame Vec. The transport sends this prefix and envelope in order.
+    let prefix = frame::download(&metadata, &[])?;
+    if bytes.len() > frame::MAX_DOWNLOAD_BYTES.saturating_sub(prefix.len()) {
+        return Err(AppError::validation(
+            "attachment download exceeds its frame bound",
+        ));
+    }
+    Ok(Download {
+        metadata,
+        prefix,
+        envelope: bytes,
+    })
 }

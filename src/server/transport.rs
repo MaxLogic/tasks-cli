@@ -25,6 +25,31 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_OPERATIONS: usize = 8;
 pub const MAX_TRANSFERS: usize = 2;
 
+/// Hyper's collected body can retain every incoming chunk while allocating a
+/// second contiguous copy. Uploads have a signed, preflighted Content-Length:
+/// copy each chunk once into that exact bounded allocation instead.
+async fn upload_body(mut body: axum::body::Body, length: usize) -> Result<axum::body::Bytes, ()> {
+    use http_body_util::BodyExt;
+    if length > crate::attachment::frame::MAX_UPLOAD_BYTES {
+        return Err(());
+    }
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length).map_err(|_| ())?;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| ())?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > length.saturating_sub(bytes.len()) {
+                return Err(());
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+    if bytes.len() != length {
+        return Err(());
+    }
+    Ok(bytes.into())
+}
+
 /// Per-connection cancellation wakes Hyper even when a peer never reads again.
 #[derive(Clone, Debug, Default)]
 pub struct ConnectionControl(Arc<ConnectionCancellation>);
@@ -231,6 +256,42 @@ async fn handler(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn upload_collection_checks_actual_length_across_fragments_and_body_errors() {
+        for length in [3, 4, 5] {
+            let (mut sender, body) =
+                http_body_util::channel::Channel::<axum::body::Bytes, io::Error>::new(2);
+            tokio::spawn(async move {
+                let _ = sender
+                    .send_data(axum::body::Bytes::from_static(b"ab"))
+                    .await;
+                let _ = sender
+                    .send_data(axum::body::Bytes::from_static(b"cd"))
+                    .await;
+            });
+            let collected = upload_body(axum::body::Body::new(body), length).await;
+            if length == 4 {
+                assert_eq!(collected.unwrap().as_ref(), b"abcd");
+            } else {
+                assert!(collected.is_err(), "declared length {length} must fail");
+            }
+        }
+        let (sender, body) =
+            http_body_util::channel::Channel::<axum::body::Bytes, io::Error>::new(2);
+        sender.abort(io::Error::other("broken body"));
+        assert!(upload_body(axum::body::Body::new(body), 4).await.is_err());
+        assert!(upload_body(
+            axum::body::Body::empty(),
+            crate::attachment::frame::MAX_UPLOAD_BYTES + 1
+        )
+        .await
+        .is_err());
+        assert!(upload_body(axum::body::Body::empty(), 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn response_buffers_keep_admission_until_every_clone_is_released() {
         let semaphore = Arc::new(Semaphore::new(1));
@@ -356,18 +417,20 @@ async fn dispatch(
                 return ServiceError::Storage(failure.into()).into_response();
             }
         }
-        let limit = if upload {
-            crate::attachment::frame::MAX_UPLOAD_BYTES
-        } else {
-            MAX_BODY_BYTES
-        };
         let deadline = if upload {
             Duration::from_secs(30 + length.unwrap_or(0) / (64 * 1024))
                 .min(Duration::from_secs(600))
         } else {
             Duration::from_secs(15)
         };
-        let bytes = match tokio::time::timeout(deadline, to_bytes(body, limit)).await {
+        let read_body = async {
+            if upload {
+                upload_body(body, length.unwrap_or(0) as usize).await
+            } else {
+                to_bytes(body, MAX_BODY_BYTES).await.map_err(|_| ())
+            }
+        };
+        let bytes = match tokio::time::timeout(deadline, read_body).await {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(_)) => {
                 return error(
@@ -459,7 +522,7 @@ async fn dispatch(
             )
         })
         .await;
-        let (bytes, transfer, server) = match result {
+        let (download, transfer, server) = match result {
             Ok((Ok(bytes), transfer, server)) => (bytes, transfer, server),
             Ok((Err(error), _, _)) => {
                 return match super::receipts::refusal(&error) {
@@ -478,29 +541,22 @@ async fn dispatch(
         let (sender, body) =
             http_body_util::channel::Channel::<axum::body::Bytes, std::io::Error>::new(2);
         let mut download_log = log.handoff();
-        // The server generated this bounded frame; this inspection does no decode.
-        if let Some(metadata) = bytes
-            .get(8..12)
-            .and_then(|v| v.try_into().ok())
-            .map(u32::from_le_bytes)
-            .and_then(|len| bytes.get(12..12 + len as usize))
-            .and_then(|json| {
-                serde_json::from_slice::<crate::attachment::frame::DownloadMetadata>(json).ok()
-            })
-        {
-            download_log.attachment_sizes(
-                1,
-                metadata.attachment.stored_size,
-                metadata.attachment.original_size,
-            );
-        }
+        download_log.attachment_sizes(
+            1,
+            download.metadata.attachment.stored_size,
+            download.metadata.attachment.original_size,
+        );
         tokio::task::spawn(async move {
             let _server = server;
             let transfer = Arc::new(transfer);
             let released = Arc::new(tokio::sync::Notify::new());
             let started = std::time::Instant::now();
             let mut sender = sender;
-            for chunk in bytes.chunks(256 * 1024) {
+            for chunk in download
+                .prefix
+                .chunks(256 * 1024)
+                .chain(download.envelope.chunks(256 * 1024))
+            {
                 let timeout = Duration::from_secs(600)
                     .saturating_sub(started.elapsed())
                     .min(Duration::from_secs(15));
@@ -527,7 +583,7 @@ async fn dispatch(
             // send_data means queued, not consumed by the socket. Keep the
             // same deadlines over final buffered chunks after closing the queue.
             drop(sender);
-            drop(bytes);
+            drop(download);
             while Arc::strong_count(&transfer) > 1 {
                 let timeout = Duration::from_secs(600)
                     .saturating_sub(started.elapsed())

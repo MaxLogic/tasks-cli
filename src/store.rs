@@ -3884,6 +3884,21 @@ impl Store {
         limits: &crate::attachment::Limits,
     ) -> Result<crate::model::AttachResult, AppError> {
         crate::attachment::db::validate_items(&items, limits)?;
+        let borrowed: Vec<_> = items
+            .iter()
+            .map(crate::attachment::db::BorrowedPreparedItem::from)
+            .collect();
+        self.attach_borrowed(task_id, expect_version, &borrowed, limits)
+    }
+
+    pub(crate) fn attach_borrowed(
+        &mut self,
+        task_id: u64,
+        expect_version: u64,
+        items: &[crate::attachment::db::BorrowedPreparedItem<'_>],
+        limits: &crate::attachment::Limits,
+    ) -> Result<crate::model::AttachResult, AppError> {
+        crate::attachment::db::validate_borrowed_items(items, limits)?;
         let effective_limits = crate::attachment::Limits {
             project_stored_bytes: crate::attachment::db::project_quota(limits)?,
             ..*limits

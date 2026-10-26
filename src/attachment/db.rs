@@ -20,6 +20,58 @@ pub struct PreparedItem {
     pub envelope: ValidatedEnvelope,
 }
 
+/// A validated view into an immutable, digest-verified transport body. The bytes
+/// remain borrowed through COMMIT; only small, recomputed metadata is owned.
+pub(crate) struct BorrowedPreparedItem<'a> {
+    name: String,
+    bytes: &'a [u8],
+    metadata: envelope::Metadata,
+}
+
+impl<'a> From<&'a PreparedItem> for BorrowedPreparedItem<'a> {
+    fn from(item: &'a PreparedItem) -> Self {
+        Self {
+            name: item.name.clone(),
+            bytes: item.envelope.bytes(),
+            metadata: item.envelope.metadata().clone(),
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn prepare_borrowed<'a>(
+    items: Vec<(String, &'a [u8])>,
+    limits: &Limits,
+) -> Result<Vec<BorrowedPreparedItem<'a>>, AppError> {
+    // Complete batch admission must precede the first decoder invocation.
+    preflight(items.iter().map(|(_, bytes)| *bytes), limits)?;
+    for (display_name, _) in &items {
+        name::validate(display_name, limits)?;
+    }
+    items
+        .into_iter()
+        .map(|(name, bytes)| {
+            #[cfg(feature = "test-hooks")]
+            if let Some(log) = std::env::var_os("TASKS_TEST_DECODE_LOG") {
+                use std::io::Write;
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log)?,
+                    "decode"
+                )?;
+            }
+            let metadata = envelope::decode_to(bytes, &name, std::io::sink(), limits)?;
+            Ok(BorrowedPreparedItem {
+                name,
+                bytes,
+                metadata,
+            })
+        })
+        .collect()
+}
+
 pub fn create_schema(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(include_str!("../attachment_schema.sql"))?;
     Ok(())
@@ -306,7 +358,7 @@ pub(crate) fn attach(
     conn: &Connection,
     id: u64,
     expected: u64,
-    items: Vec<PreparedItem>,
+    items: &[BorrowedPreparedItem<'_>],
     limits: &Limits,
     now: i64,
     attribution: &str,
@@ -328,8 +380,8 @@ pub(crate) fn attach(
         |r| r.get(0),
     )?;
     let mut new_bytes = 0u64;
-    for item in &items {
-        let hash = item.envelope.sha256();
+    for item in items {
+        let hash = item.metadata.sha256.as_str();
         let existing = match known.get(hash) {
             Some(v) => Some(*v),
             None => conn
@@ -347,7 +399,7 @@ pub(crate) fn attach(
                 .checked_add(1)
                 .filter(|v| *v <= i64::MAX as u64)
                 .ok_or_else(|| AppError::Database("attachment blob IDs exhausted".into()))?;
-            let size = item.envelope.bytes().len() as u64;
+            let size = item.bytes.len() as u64;
             new_bytes = new_bytes.checked_add(size).ok_or_else(|| {
                 quota_error(
                     "project_attachment_quota",
@@ -415,7 +467,7 @@ pub(crate) fn attach(
     let mut added = Vec::with_capacity(items.len());
     for (item, resolved) in items.iter().zip(&resolved) {
         if !resolved.deduplicated {
-            conn.execute("INSERT INTO attachment_blobs(blob_id,content_sha256,original_size,codec,stored_size,created_ms,envelope) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![resolved.blob_id,item.envelope.sha256(),item.envelope.original_size(),item.envelope.codec().as_str(),resolved.stored_size,now,item.envelope.bytes()])?;
+            conn.execute("INSERT INTO attachment_blobs(blob_id,content_sha256,original_size,codec,stored_size,created_ms,envelope) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![resolved.blob_id,item.metadata.sha256,item.metadata.original_size,item.metadata.codec.as_str(),resolved.stored_size,now,item.bytes])?;
         }
         next_id = next_id
             .checked_add(1)
@@ -425,11 +477,11 @@ pub(crate) fn attach(
             id: next_id,
             display_id: format!("A{next_id}"),
             name: item.name.clone(),
-            kind: item.envelope.kind().as_str().into(),
-            media_type: item.envelope.media_type().into(),
-            original_size: item.envelope.original_size(),
+            kind: item.metadata.kind.as_str().into(),
+            media_type: item.metadata.media_type.into(),
+            original_size: item.metadata.original_size,
             stored_size: resolved.stored_size,
-            sha256: item.envelope.sha256().into(),
+            sha256: item.metadata.sha256.clone(),
             added_ms: now,
         };
         retained.push(attachment.clone());
@@ -515,6 +567,17 @@ pub(crate) fn detach(
 
 pub fn validate_items(items: &[PreparedItem], limits: &Limits) -> Result<(), AppError> {
     preflight(items.iter().map(|i| i.envelope.bytes()), limits)?;
+    for item in items {
+        name::validate(&item.name, limits)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_borrowed_items(
+    items: &[BorrowedPreparedItem<'_>],
+    limits: &Limits,
+) -> Result<(), AppError> {
+    preflight(items.iter().map(|i| i.bytes), limits)?;
     for item in items {
         name::validate(&item.name, limits)?;
     }
