@@ -10,6 +10,13 @@ needs one, record its task-specific cadence exception. A broad command outside
 the schedule needs an escalation reason such as a shared runner, storage,
 lifecycle, security, or public-contract change.
 
+For Delphi/DUnitX category filtering, resolve the installed `tdd` skill to its
+canonical source and read `references/delphi-dunitx.md` there when defining fast
+subsets. If that reference is unavailable, use verified repository commands and
+report the missing guidance. Record the filtered command and affected slow
+targets in the existing schedule; required slow coverage and batch/final gates
+still apply. A filtered pass certifies only the selected subset.
+
 ## Establish the acceptance path
 
 Before broad certification, identify the command or public entry point that
