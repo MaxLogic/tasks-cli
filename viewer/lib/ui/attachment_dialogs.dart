@@ -195,6 +195,8 @@ class AttachmentPanelState extends State<AttachmentPanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Wrap(
+            spacing: 8,
+            runSpacing: 4,
             children: [
               TextButton(
                 onPressed: c.enabled ? c.addFiles : null,
@@ -351,7 +353,12 @@ class AttachmentDialogFrame extends StatelessWidget {
             const SizedBox(height: 8),
             Flexible(child: content),
             const SizedBox(height: 8),
-            Wrap(alignment: WrapAlignment.end, children: actions),
+            Wrap(
+              alignment: WrapAlignment.end,
+              spacing: 8,
+              runSpacing: 4,
+              children: actions,
+            ),
           ],
         ),
       ),

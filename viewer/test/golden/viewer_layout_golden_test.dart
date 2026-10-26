@@ -9,6 +9,7 @@
 library;
 
 import 'dart:io';
+import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 
@@ -38,6 +39,9 @@ const String _goldenBaseline = String.fromEnvironment(
   'TASKS_VIEWER_GOLDEN_BASELINE',
   defaultValue: 'windows-11',
 );
+
+// Optional retained before/after renders, without replacing checked-in goldens.
+const String _evidenceRoot = String.fromEnvironment('TASKS_VIEWER_RENDER_ROOT');
 
 bool get _hostHasFonts =>
     Platform.isWindows && _segoeFiles.every((path) => File(path).existsSync());
@@ -122,7 +126,11 @@ const Set<_Scene> _narrowScenes = <_Scene>{
 /// scenes need only the smaller reference size.
 List<Size> _sizes(_Scene scene) => _narrowScenes.contains(scene)
     ? const <Size>[Size(1280, 720)]
-    : const <Size>[Size(2000, 800), Size(1280, 720)];
+    : <Size>[
+        const Size(2000, 800),
+        const Size(1280, 720),
+        if (_evidenceRoot.isNotEmpty) const Size(2000, 830),
+      ];
 
 /// A 6-character key with 5-digit IDs: the widest keyed ID the CLI renders.
 FakeWorkspaceReads _keyedReads() {
@@ -428,6 +436,20 @@ void main() {
             // With the real font every selected-project action is on screen
             // inside the Projects pane, even at 720 pixels.
             final pane = tester.getRect(find.byType(ViewerProjectsPane));
+            if (size == const Size(2000, 830)) {
+              final sampled = find.text('Sampled');
+              final scroll = find
+                  .ancestor(
+                    of: sampled,
+                    matching: find.byType(SingleChildScrollView),
+                  )
+                  .first;
+              expect(
+                tester.getRect(sampled).bottom,
+                lessThanOrEqualTo(tester.getRect(scroll).bottom),
+                reason: 'Sampled remains fully visible above project actions',
+              );
+            }
             for (final label in <String>[
               'Copy project ID (Alt+Y)',
               'Enrich clipboard (Alt+E)',
@@ -445,8 +467,65 @@ void main() {
             }
             await expectLater(
               find.byType(TasksViewerApp),
-              matchesGoldenFile('$goldenDirectory/$name.png'),
+              matchesGoldenFile(
+                _evidenceRoot.isEmpty
+                    ? Uri.parse('$goldenDirectory/$name.png')
+                    : Uri.file('$_evidenceRoot/$name.png'),
+              ),
             );
+            for (final control
+                in find
+                    .byWidgetPredicate(
+                      (widget) =>
+                          widget is ButtonStyleButton || widget is IconButton,
+                    )
+                    .evaluate()) {
+              expect(
+                tester.getSize(find.byWidget(control.widget)).height,
+                greaterThanOrEqualTo(32),
+                reason: control.widget.toStringShort(),
+              );
+            }
+            if (scene == _Scene.taskOpen) {
+              final actions = tester.widget<Wrap>(
+                find
+                    .ancestor(
+                      of: find.widgetWithText(TextButton, 'Edit'),
+                      matching: find.byType(Wrap),
+                    )
+                    .first,
+              );
+              expect(actions.crossAxisAlignment, WrapCrossAlignment.start);
+              final filters = find.widgetWithText(TextButton, 'Filters');
+              expect(
+                find.descendant(of: filters, matching: find.byType(Container)),
+                findsNothing,
+                reason:
+                    'The scope is plain text inside one button, not a nested pill',
+              );
+              final semantics = tester.ensureSemantics();
+              for (final label in ['Edit', 'Mark done', 'Copy reference']) {
+                final button = find.widgetWithText(TextButton, label);
+                final node = tester.getSemantics(button);
+                expect(node.label, label);
+                expect(node.flagsCollection.isButton, isTrue);
+                expect(node.flagsCollection.isEnabled, Tristate.isTrue);
+              }
+              semantics.dispose();
+              if (_evidenceRoot.isNotEmpty) {
+                tester
+                    .widget<TextButton>(find.widgetWithText(TextButton, 'Edit'))
+                    .focusNode!
+                    .requestFocus();
+                await tester.pumpAndSettle();
+                await expectLater(
+                  find.byType(TasksViewerApp),
+                  matchesGoldenFile(
+                    Uri.file('$_evidenceRoot/${name}_focus.png'),
+                  ),
+                );
+              }
+            }
           },
           skip: skip,
           variant: TargetPlatformVariant.only(TargetPlatform.windows),

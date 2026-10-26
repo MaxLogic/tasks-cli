@@ -966,15 +966,18 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 Expanded(
                   child: ExcludeSemantics(child: _TaskRowTile(item: item)),
                 ),
-                Tooltip(
-                  message: 'Actions for ${item.canonicalId}',
-                  excludeFromSemantics: true,
-                  child: IconButton(
-                    icon: Icon(
-                      Icons.more_horiz,
-                      semanticLabel: 'Actions for ${item.canonicalId}',
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: Tooltip(
+                    message: 'Actions for ${item.canonicalId}',
+                    excludeFromSemantics: true,
+                    child: IconButton(
+                      icon: Icon(
+                        Icons.more_horiz,
+                        semanticLabel: 'Actions for ${item.canonicalId}',
+                      ),
+                      onPressed: () => unawaited(_showTaskMenu(item, index)),
                     ),
-                    onPressed: () => unawaited(_showTaskMenu(item, index)),
                   ),
                 ),
               ],
@@ -1112,21 +1115,11 @@ class _FiltersButtonLabel extends StatelessWidget {
             ),
           ],
           const SizedBox(width: ViewerSpace.s),
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: ViewerSpace.s,
-              vertical: 2,
-            ),
-            decoration: BoxDecoration(
-              border: Border.all(color: colors.outline),
-              borderRadius: BorderRadius.circular(ViewerSpace.s),
-            ),
-            child: Text(
-              scope,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
-            ),
+          Text(
+            scope,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
           ),
         ],
       ),

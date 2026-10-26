@@ -1243,7 +1243,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
             Wrap(
               spacing: 8,
               runSpacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.start,
               children: <Widget>[
                 Tooltip(
                   message: 'F4',

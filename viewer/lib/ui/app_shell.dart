@@ -1045,6 +1045,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
               icon: const Icon(Icons.refresh, semanticLabel: 'Refresh (F5)'),
             ),
           ),
+          const SizedBox(width: 8),
           Tooltip(
             message: 'Settings (Ctrl+,)',
             excludeFromSemantics: true,
@@ -1056,6 +1057,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
               ),
             ),
           ),
+          const SizedBox(width: 8),
           Tooltip(
             message: 'Hotkey help (F10)',
             excludeFromSemantics: true,

@@ -258,6 +258,8 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
           child: Column(
             children: [
               Wrap(
+                spacing: 8,
+                runSpacing: 4,
                 children: [
                   TextButton(
                     onPressed: () => _zoom(zoom * 1.25),
@@ -329,6 +331,8 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
     children: [
       if (widget.item.originalSize > attachmentTextPreviewLimit)
         Wrap(
+          spacing: 8,
+          runSpacing: 4,
           children: [
             TextButton(
               onPressed: () => setState(() => _read(false)),

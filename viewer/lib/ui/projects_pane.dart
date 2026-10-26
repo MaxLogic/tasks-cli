@@ -751,7 +751,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.fromLTRB(
                     ViewerSpace.m,
-                    ViewerSpace.s,
+                    ViewerSpace.xs,
                     ViewerSpace.m,
                     ViewerSpace.xs,
                   ),
@@ -769,7 +769,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                     ViewerSpace.m,
                     ViewerSpace.xs,
                     ViewerSpace.m,
-                    ViewerSpace.s,
+                    ViewerSpace.xs,
                   ),
                   child: _buildClipboardActions(context, projects, item),
                 ),
@@ -880,7 +880,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       children: <Widget>[
         Wrap(
           spacing: ViewerSpace.s,
-          runSpacing: ViewerSpace.s,
+          runSpacing: ViewerSpace.xs,
           children: <Widget>[
             // One primary action; the rest are tonal, and every label names
             // its shortcut.

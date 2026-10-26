@@ -17,6 +17,7 @@ import 'data/settings_store.dart';
 import 'platform/viewer_startup.dart';
 import 'platform/window_state.dart';
 import 'ui/app_shell.dart';
+import 'ui/button_theme.dart';
 import 'ui/prototype_workspace.dart';
 import 'ui/real_workspace.dart';
 import 'ui/workspace_model.dart';
@@ -234,21 +235,24 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
   }
 
   ThemeData _theme(Brightness brightness, {bool highContrast = false}) =>
-      ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.indigo,
-          brightness: brightness,
-          contrastLevel: highContrast ? 1 : 0,
+      viewerButtonTheme(
+        ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.indigo,
+            brightness: brightness,
+            contrastLevel: highContrast ? 1 : 0,
+          ),
+          dividerTheme: DividerThemeData(thickness: highContrast ? 2 : 1),
+          // The viewer's type scale: 13px secondary text stays readable on a
+          // dense ultrawide layout, titles step down so three pane headings
+          // fit. Row extents read these sizes (viewerRowExtent).
+          textTheme: const TextTheme(
+            bodySmall: TextStyle(fontSize: 13),
+            bodyMedium: TextStyle(fontSize: 14),
+            titleLarge: TextStyle(fontSize: 20),
+          ),
         ),
-        dividerTheme: DividerThemeData(thickness: highContrast ? 2 : 1),
-        // The viewer's type scale: 13px secondary text stays readable on a
-        // dense ultrawide layout, titles step down so three pane headings
-        // fit. Row extents read these sizes (viewerRowExtent).
-        textTheme: const TextTheme(
-          bodySmall: TextStyle(fontSize: 13),
-          bodyMedium: TextStyle(fontSize: 14),
-          titleLarge: TextStyle(fontSize: 20),
-        ),
+        highContrast: highContrast,
       );
 }
 

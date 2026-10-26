@@ -8,6 +8,7 @@
 library;
 
 import 'dart:async';
+import 'dart:ui' show Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -43,6 +44,45 @@ Future<RealViewerHarness> pumpTaskBrowser(
 }
 
 void main() {
+  testWidgets('Tab reaches the task row actions with room for its focus ring', (
+    tester,
+  ) async {
+    final harness = await pumpTaskBrowser(tester);
+    final semantics = tester.ensureSemantics();
+    harness.shell.handlesFor(ViewerRegion.tasks).list.focusRegion();
+    await tester.pumpAndSettle();
+    final actions = find.byTooltip('Actions for T-001');
+    final button = find.descendant(
+      of: actions,
+      matching: find.byType(IconButton),
+    );
+    var reached = false;
+    for (var step = 0; step < 40; step++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      if (tester.getSemantics(button).flagsCollection.isFocused ==
+          Tristate.isTrue) {
+        reached = true;
+        break;
+      }
+    }
+    expect(
+      reached,
+      isTrue,
+      reason: 'Tab must reach the selected task row action',
+    );
+    final row = find.ancestor(of: actions, matching: find.byType(Row)).first;
+    final material = find.descendant(
+      of: button,
+      matching: find.byType(Material),
+    );
+    expect(
+      tester.getRect(row).right - tester.getRect(material).right,
+      greaterThanOrEqualTo(6),
+      reason: 'Separate the outer focus ring from the selection border',
+    );
+    semantics.dispose();
+  });
   for (final entry in {
     'blocked': LogicalKeyboardKey.keyB,
     'cancelled': LogicalKeyboardKey.keyX,

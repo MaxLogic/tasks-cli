@@ -13,6 +13,7 @@ import '../data/editor_models.dart';
 import '../data/settings_store.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
+import 'button_theme.dart';
 
 /// The interactive half of the editor flow: the modal questions and the
 /// spoken confirmations that need a live shell.
@@ -170,6 +171,7 @@ class ViewerUnsavedChangesDialog extends StatelessWidget {
                 child: const Text('Save (Alt+S)'),
               ),
               OutlinedButton(
+                style: viewerDestructiveButtonStyle(context),
                 onPressed: () => _close(context, EditorLeaveDecision.discard),
                 child: const Text('Discard (Alt+D)'),
               ),
@@ -240,6 +242,7 @@ class ViewerMarkDoneDirtyDialog extends StatelessWidget {
                 child: const Text('Save changes and mark done (Alt+S)'),
               ),
               OutlinedButton(
+                style: viewerDestructiveButtonStyle(context),
                 onPressed: () =>
                     _close(context, MarkDoneDirtyDecision.discardAndMarkDone),
                 child: const Text('Discard changes and mark done (Alt+D)'),
@@ -381,6 +384,7 @@ class ViewerConflictDialog extends StatelessWidget {
                 child: const Text('Review against current (Alt+V)'),
               ),
               OutlinedButton(
+                style: viewerDestructiveButtonStyle(context),
                 onPressed: () =>
                     _close(context, EditorConflictDecision.reloadAndDiscard),
                 child: const Text('Reload current and discard draft (Alt+R)'),
@@ -661,6 +665,7 @@ class ViewerRestoreDraftDialog extends StatelessWidget {
                 child: const Text('Restore draft (Alt+R)'),
               ),
               TextButton(
+                style: viewerDestructiveButtonStyle(context),
                 onPressed: () => close(EditorRestoreDecision.discard),
                 child: const Text('Discard (Alt+D)'),
               ),
