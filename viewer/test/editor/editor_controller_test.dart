@@ -8,6 +8,8 @@
 /// a real task store or the real settings folder.
 library;
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/controllers/editor_controller.dart';
 import 'package:tasks_viewer/data/editor_models.dart';
@@ -25,6 +27,22 @@ const int fixedClockMs = 1700000000000;
 
 /// Short autosave delay; the shipped 500 ms default is pinned separately.
 const Duration fastAutosave = Duration(milliseconds: 20);
+
+/// Signals entry and holds the fake write until the test explicitly releases it.
+class ControlledTaskWriter extends FakeTaskWriter {
+  final entered = Completer<void>();
+  final completion = Completer<void>();
+
+  @override
+  Future<ViewerUpdateResult> updateTask(
+    String projectId,
+    ViewerUpdateRequest request,
+  ) async {
+    entered.complete();
+    await completion.future;
+    return super.updateTask(projectId, request);
+  }
+}
 
 /// One confirmed record for the editor fixtures.
 TaskDetail editorDetail({
@@ -87,11 +105,12 @@ class EditorHarness {
 /// Builds a harness and, when [detail] is given, mirrors it into the editor.
 EditorHarness editorHarness({
   TaskDetail? detail,
+  FakeTaskWriter? writer,
   Duration autosaveDelay = fastAutosave,
   DateTime Function()? clock,
 }) {
   final harness = EditorHarness(
-    writer: FakeTaskWriter(),
+    writer: writer ?? FakeTaskWriter(),
     reads: fakeWorkspaceReads(),
     drafts: MemoryDraftSink(),
     autosaveDelay: autosaveDelay,
@@ -505,17 +524,21 @@ void main() {
     });
 
     test('isSaving covers exactly the in-flight write', () async {
-      final harness = editorHarness(detail: editorDetail());
+      final writer = ControlledTaskWriter();
+      final harness = editorHarness(detail: editorDetail(), writer: writer);
       final controller = harness.controller;
       controller.beginEdit();
       controller.setField(EditorField.title, 'Review parser v2');
-      harness.writer.latency = const Duration(milliseconds: 40);
-
       final pending = controller.save();
-      await pumpEventQueue();
-
-      expect(controller.isSaving, isTrue);
-      expect(controller.saveEnabled, isFalse);
+      await writer.entered.future;
+      try {
+        expect(controller.isSaving, isTrue);
+        expect(controller.saveEnabled, isFalse);
+      } finally {
+        writer.completion.complete();
+        // Drain the write even when a busy-state assertion fails.
+        await pending;
+      }
 
       final result = await pending;
 
