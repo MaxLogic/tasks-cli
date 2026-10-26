@@ -1,5 +1,5 @@
-// Reviewer-supplied state/dialog render, retained as an opt-in evidence fixture.
-// Pass PROBE_OUT and --update-goldens to retain all four themes and focus roles.
+// Exercise all four themes and focus roles in the normal suite.
+// Optionally pass PROBE_OUT and --update-goldens to retain review renders.
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -150,21 +150,29 @@ void main() {
           ),
         );
         await t.pumpAndSettle();
-        await expectLater(
-          find.byType(MaterialApp),
-          matchesGoldenFile(Uri.file('$_out/dialog_${name}_cancel_focus.png')),
-        );
+        if (_out.isNotEmpty) {
+          await expectLater(
+            find.byType(MaterialApp),
+            matchesGoldenFile(
+              Uri.file('$_out/dialog_${name}_cancel_focus.png'),
+            ),
+          );
+        }
         // Focus each node in turn is impossible simultaneously; capture with one focus per pass.
         for (var i = 0; i < 5; i++) {
           f[i].requestFocus();
           await t.pumpAndSettle();
-          await expectLater(
-            find.byType(MaterialApp),
-            matchesGoldenFile(Uri.file('$_out/states_${name}_f$i.png')),
-          );
+          expect(f[i].hasFocus, isTrue);
+          expect(t.takeException(), isNull);
+          if (_out.isNotEmpty) {
+            await expectLater(
+              find.byType(MaterialApp),
+              matchesGoldenFile(Uri.file('$_out/states_${name}_f$i.png')),
+            );
+          }
         }
       },
-      skip: _out.isEmpty || !Platform.isWindows,
+      skip: !Platform.isWindows,
       variant: TargetPlatformVariant.only(TargetPlatform.windows),
     );
   }

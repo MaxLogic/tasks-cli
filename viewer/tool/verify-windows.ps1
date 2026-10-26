@@ -25,9 +25,8 @@ clipboard:
      with the fixture passed through `--dart-define`;
   5. runs the end-to-end viewer cases that drive the real widgets over that
      real store (`test/integration/viewer_e2e_headless_test.dart`);
-  6. rebuilds the CLI with `--features test-hooks`, closes the one known skip in
-     `test/integration/real_cli_editor_test.dart` and rebuilds the plain
-     binary; both Flutter runs get that CLI through `--dart-define`;
+  6. builds isolated test-hooks CLI/server binaries and a plain server; passes
+     all integration defines to the full suite, preserving the shipped CLI;
   7. builds the Windows release and packages it with `package.ps1`, which
      launch-tests the copy from a path with spaces and non-ASCII characters;
   8. launches the packaged release and checks its external Windows UIA tree;
@@ -411,6 +410,54 @@ function Get-FlutterTestCount {
         Failed  = $failed
         Succeeded = $Text.Contains('All tests passed!', [System.StringComparison]::Ordinal)
     }
+}
+
+function Assert-FlutterSkippedTest {
+    <#
+    .SYNOPSIS
+    Rejects every skipped test except a named environment-impossible console probe.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ReportPath,
+        [Parameter(Mandatory)][int]$SkippedCount,
+        [Parameter(Mandatory)][bool]$HasConsoleWindow
+    )
+    $suites = @{}
+    $tests = @{}
+    $skipped = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in [System.IO.File]::ReadLines($ReportPath)) {
+        $reportEvent = ConvertFrom-Json -InputObject $line -AsHashtable
+        switch ($reportEvent.type) {
+            'suite' { $suites[$reportEvent.suite.id] = $reportEvent.suite.path.Replace('\', '/') }
+            'testStart' { $tests[$reportEvent.test.id] = $reportEvent.test }
+            'testDone' {
+                if ($reportEvent.skipped) {
+                    $test = $tests[$reportEvent.testID]
+                    if ($null -eq $test -or -not $suites.ContainsKey($test.suiteID)) {
+                        throw 'Skipped test has no suite/test identity in the JSON report.'
+                    }
+                    $skipped.Add([pscustomobject]@{ Path = $suites[$test.suiteID]; Name = $test.name })
+                }
+            }
+        }
+    }
+    if ($skipped.Count -ne $SkippedCount) {
+        throw "JSON/expanded reporter skip count mismatch: $($skipped.Count) versus $SkippedCount."
+    }
+    foreach ($test in $skipped) {
+        # Named allow-list: this control needs an inherited interactive console.
+        # Hosted runners have none; decision 2026-09-29 keeps desktop proof separate.
+        $allowed = -not $HasConsoleWindow -and
+            $test.Path.EndsWith('/test/data/system_launcher_console_test.dart', [System.StringComparison]::Ordinal) -and
+            $test.Name -ceq 'SystemProcessLauncher gives a console child no console window'
+        if (-not $allowed) {
+            throw "Unexpected skipped test: $($test.Path): $($test.Name)"
+        }
+    }
+    if ($skipped.Count -eq 1) {
+        return 'unproven: no interactive console; named SystemProcessLauncher console probe unavailable (TSK-008)'
+    }
+    return 'passed'
 }
 
 function Test-HasConsoleWindow {
@@ -967,9 +1014,9 @@ function Invoke-VerifyWindows {
 
     .DESCRIPTION
     The gate order matters: the throwaway store is seeded by the plain release
-    binary, the full Flutter suite runs against that binary (one documented
-    `test-hooks` skip), the `test-hooks` build then closes that skip in its own
-    focused run, the plain binary is rebuilt and re-checked before the packaged
+    binary, and the full Flutter suite gets that binary plus isolated hook
+    binaries and servers. Only the named console probe may skip on a headless
+    host. The plain binary's hash is re-checked before the packaged
     release is built, and the end-to-end viewer cases run against the shipped
     binary. G11 checks external UIA on the packaged release using a separate
     synthetic store. Every log lands in the evidence root and every unrun
@@ -1039,11 +1086,22 @@ function Invoke-VerifyWindows {
     if ([string]::IsNullOrWhiteSpace($CliExecutable)) {
         $CliExecutable = Join-Path -Path $cliTargetDir -ChildPath 'release/tasks.exe'
     }
-    $plainBuildArgs = @('build', '--release', '--locked', '--target-dir', $cliTargetDir)
-    $hookBuildArgs = $plainBuildArgs + @('--features', 'test-hooks')
+    $plainBuildArgs = @('build', '--release', '--locked', '--bin', 'tasks', '--target-dir', $cliTargetDir)
+    $serverBuildArgs = @('build', '--release', '--locked', '--bin', 'tasks-server', '--features', 'server', '--target-dir', $cliTargetDir)
+    $hookTargetDir = Assert-ToolOutputPath -Path "$cliTargetDir-test-hooks"
+    $hookCli = Join-Path $hookTargetDir 'release/tasks.exe'
+    $hookServer = Join-Path $hookTargetDir 'release/tasks-server.exe'
+    $plainServer = Join-Path $cliTargetDir 'release/tasks-server.exe'
+    $hookBuildArgs = @('build', '--release', '--locked', '--bin', 'tasks', '--bin', 'tasks-server', '--features', 'server,test-hooks', '--target-dir', $hookTargetDir)
     $plainBuildCommand = "cargo $($plainBuildArgs -join ' ')"
     $hookBuildCommand = "cargo $($hookBuildArgs -join ' ')"
     $cliDefine = "TASKS_VIEWER_TEST_CLI=$CliExecutable"
+    $integrationDefines = @(
+        "--dart-define=TASKS_VIEWER_TEST_HOOK_CLI=$hookCli",
+        "--dart-define=TASKS_VIEWER_TEST_CLIPBOARD_CLI=$hookCli",
+        "--dart-define=TASKS_VIEWER_TEST_SERVER=$plainServer",
+        "--dart-define=TASKS_VIEWER_TEST_HOOK_SERVER=$hookServer"
+    )
     if ([string]::IsNullOrWhiteSpace($PackageToolPath)) {
         $PackageToolPath = Join-Path -Path $viewerFull -ChildPath 'tool/package.ps1'
     }
@@ -1096,11 +1154,6 @@ function Invoke-VerifyWindows {
     $windowedLog = $null
     $uiaStatus = 'not-run'
     $uiaLog = $null
-    $hookSkipMarker = 'has no TASKS_PRECOMMIT_READY_FILE test hook'
-    # Decision 2026-09-29 (spec.md section 11): matched by the test's own
-    # skip reason, never by count alone.
-    $consoleSkipMarker = 'this runner has no console window; run from an ' +
-    'interactive console to prove CREATE_NO_WINDOW'
     $hasConsoleWindow = Test-HasConsoleWindow
     $consoleWindowProof = 'not run'
 
@@ -1182,75 +1235,60 @@ function Invoke-VerifyWindows {
         Add-VerifyGate -Gates $gates -Id 'G04' -Name 'flutter analyze' -Status 'passed' `
             -Command 'flutter pub get; flutter analyze --no-pub --fatal-infos' -Log $analyzeLog
 
+        foreach ($build in @(
+                @{ Arguments = $serverBuildArgs; Log = '01-cargo-build-server.txt'; Files = @($plainServer) }
+                @{ Arguments = $hookBuildArgs; Log = '06-cargo-build-test-hooks.txt'; Files = @($hookCli, $hookServer) }
+            )) {
+            $command = "cargo $($build.Arguments -join ' ')"
+            Write-VerifyMessage -Message "verify: $command"
+            $result = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $build.Arguments `
+                -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
+            $log = Write-GateLog -EvidenceRoot $evidence -Name $build.Log `
+                -Text (Format-GateLog -Command $command -Result $result)
+            if ($result.TimedOut -or $result.ExitCode -ne 0) {
+                throw "$command failed with exit code $($result.ExitCode); see $log"
+            }
+            foreach ($file in $build.Files) {
+                if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                    throw "The integration build did not produce '$file'."
+                }
+            }
+        }
+        $hookedCliText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($hookCli))
+        foreach ($hook in @('TASKS_PRECOMMIT_READY_FILE', 'TASKS_HOLD_PRECOMMIT_MS')) {
+            if (-not $hookedCliText.Contains($hook, [System.StringComparison]::Ordinal)) {
+                throw "The test-hooks build at '$hookCli' still has no $hook string."
+            }
+        }
         $fixtureDefine = "TASKS_VIEWER_E2E_FIXTURE=$($fixture.ManifestPath)"
         $goldenDefine = "TASKS_VIEWER_GOLDEN_BASELINE=$GoldenBaseline"
+        $fullJsonReport = Join-Path $evidence '05-flutter-test-events.json'
         Write-VerifyMessage -Message 'verify: flutter test (full suite against the shipped CLI)'
         $fullResult = Invoke-FlutterCommand -Launcher $launcher `
-            -Arguments @('test', '--reporter', 'expanded', "--dart-define=$fixtureDefine", "--dart-define=$cliDefine", "--dart-define=$goldenDefine") `
+            -Arguments (@('test', '--reporter', 'expanded', '--file-reporter', "json:$fullJsonReport", "--dart-define=$fixtureDefine", "--dart-define=$cliDefine", "--dart-define=$goldenDefine") + $integrationDefines) `
             -WorkingDirectory $viewerFull -TimeoutSeconds $GateTimeoutSeconds
         $fullLog = Write-GateLog -EvidenceRoot $evidence -Name '05-flutter-test-full.txt' `
-            -Text (Format-GateLog -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine" -Result $fullResult)
+            -Text (Format-GateLog -Command "flutter test --reporter expanded --file-reporter json:$fullJsonReport --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine $($integrationDefines -join ' ')" -Result $fullResult)
         $fullCounts = Get-FlutterTestCount -Text ($fullResult.StdOut + "`n" + $fullResult.StdErr)
         if ($fullResult.TimedOut) {
             throw "The full Flutter suite did not finish within $GateTimeoutSeconds s; see $fullLog"
         }
-        if ($fullCounts.Failed -gt 0 -or -not $fullCounts.Succeeded -or $fullCounts.Passed -eq 0) {
+        if ($fullResult.ExitCode -ne 0 -or $fullCounts.Failed -gt 0 -or -not $fullCounts.Succeeded -or $fullCounts.Passed -eq 0) {
             throw "The full Flutter suite failed (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
         }
-        $fullLogText = $fullResult.StdOut + "`n" + $fullResult.StdErr
-        $hookSkipSeen = $fullLogText.Contains($hookSkipMarker, [System.StringComparison]::Ordinal)
-        $consoleSkipSeen = $fullLogText.Contains($consoleSkipMarker, [System.StringComparison]::Ordinal)
-        if ($hasConsoleWindow -and $consoleSkipSeen) {
-            throw ("The full Flutter suite skipped the console-window CREATE_NO_WINDOW case (" +
-                "system_launcher_console_test.dart) although this run has an interactive console; " +
-                "decision 2026-09-29 (spec.md section 11) requires it to pass here; see $fullLog")
-        }
-        $expectedSkipped = if ($hasConsoleWindow) { 1 } else { 2 }
-        if ($fullCounts.Skipped -eq 0) {
-            $fullDetail = "passed $($fullCounts.Passed), skipped 0: the CLI already carries the test hooks"
-            $consoleWindowProof = if ($hasConsoleWindow) { 'passed' } else { 'unproven: no interactive console in this run (decision 2026-09-29, pending TSK-008)' }
-        }
-        elseif ($fullCounts.Skipped -eq $expectedSkipped -and $hookSkipSeen -and ($hasConsoleWindow -or $consoleSkipSeen)) {
-            if ($hasConsoleWindow) {
-                $fullDetail = "passed $($fullCounts.Passed), skipped 1: the documented acknowledgement-loss case, closed by G06"
-                $consoleWindowProof = 'passed'
-            }
-            else {
-                $fullDetail = "passed $($fullCounts.Passed), skipped 2: the documented acknowledgement-loss case (closed by G06) and the console-window CREATE_NO_WINDOW case (no interactive console in this run; decision 2026-09-29, pending TSK-008)"
-                $consoleWindowProof = 'unproven: no interactive console in this run (decision 2026-09-29, pending TSK-008)'
-            }
-        }
-        else {
-            throw "The full Flutter suite skipped $($fullCounts.Skipped) cases and only the documented test-hooks skip, plus the console-window skip when this run has no interactive console, is accepted here (+$($fullCounts.Passed) ~$($fullCounts.Skipped) -$($fullCounts.Failed)); see $fullLog"
-        }
+        $consoleWindowProof = Assert-FlutterSkippedTest -ReportPath $fullJsonReport `
+            -SkippedCount $fullCounts.Skipped -HasConsoleWindow $hasConsoleWindow
+        $fullDetail = "passed $($fullCounts.Passed); skipped $($fullCounts.Skipped); named skip report: $fullJsonReport"
         Add-VerifyGate -Gates $gates -Id 'G05' -Name 'flutter test (full suite)' -Status 'passed' `
-            -Command "flutter test --reporter expanded --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine" -Log $fullLog `
+            -Command "flutter test --reporter expanded --file-reporter json:$fullJsonReport --dart-define=$fixtureDefine --dart-define=$cliDefine --dart-define=$goldenDefine $($integrationDefines -join ' ')" -Log $fullLog `
             -Detail "$fullDetail; golden_baseline: $GoldenBaseline; console_window_proof: $consoleWindowProof"
 
-        Write-VerifyMessage -Message "verify: $hookBuildCommand"
-        $hookBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $hookBuildArgs `
-            -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
-        $hookBuildLog = Write-GateLog -EvidenceRoot $evidence -Name '06-cargo-build-test-hooks.txt' `
-            -Text (Format-GateLog -Command $hookBuildCommand -Result $hookBuild -Header "repository: $repositoryFull")
-        if ($hookBuild.TimedOut -or $hookBuild.ExitCode -ne 0) {
-            throw "$hookBuildCommand failed with exit code $($hookBuild.ExitCode); see $hookBuildLog"
-        }
-        $hookedCliText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($CliExecutable))
-        foreach ($hook in @('TASKS_PRECOMMIT_READY_FILE', 'TASKS_HOLD_PRECOMMIT_MS')) {
-            if (-not $hookedCliText.Contains($hook, [System.StringComparison]::Ordinal)) {
-                throw "The test-hooks build at '$CliExecutable' still has no $hook string."
-            }
-        }
         Write-VerifyMessage -Message 'verify: the acknowledgement-loss case with the test-hooks CLI'
         $hookResult = Invoke-FlutterCommand -Launcher $launcher `
-            -Arguments @('test', 'test/integration/real_cli_editor_test.dart', '--reporter', 'expanded', "--dart-define=$cliDefine") `
+            -Arguments (@('test', 'test/integration/real_cli_editor_test.dart', '--reporter', 'expanded', "--dart-define=$cliDefine") + $integrationDefines) `
             -WorkingDirectory $viewerFull -TimeoutSeconds $GateTimeoutSeconds
         $hookLog = Write-GateLog -EvidenceRoot $evidence -Name '07-flutter-test-test-hooks.txt' `
-            -Text (@(
-                (Format-GateLog -Command $hookBuildCommand -Result $hookBuild)
-                ''
-                (Format-GateLog -Command "flutter test test/integration/real_cli_editor_test.dart --reporter expanded --dart-define=$cliDefine" -Result $hookResult)
-            ) -join "`n")
+            -Text (Format-GateLog -Command "flutter test test/integration/real_cli_editor_test.dart --reporter expanded --dart-define=$cliDefine $($integrationDefines -join ' ')" -Result $hookResult)
         $hookCounts = Get-FlutterTestCount -Text ($hookResult.StdOut + "`n" + $hookResult.StdErr)
         if ($hookResult.TimedOut -or $hookResult.ExitCode -ne 0 -or $hookCounts.Failed -gt 0 -or -not $hookCounts.Succeeded -or $hookCounts.Passed -eq 0) {
             throw "The test-hooks run failed (+$($hookCounts.Passed) ~$($hookCounts.Skipped) -$($hookCounts.Failed), exit $($hookResult.ExitCode)); see $hookLog"
@@ -1258,30 +1296,18 @@ function Invoke-VerifyWindows {
         if ($hookCounts.Skipped -ne 0) {
             throw "The test-hooks run still skipped $($hookCounts.Skipped) case(s); see $hookLog"
         }
-        Add-VerifyGate -Gates $gates -Id 'G06' -Name 'test-hooks CLI closes the skip' -Status 'passed' `
-            -Command "$hookBuildCommand; flutter test test/integration/real_cli_editor_test.dart --dart-define=$cliDefine" `
+        Add-VerifyGate -Gates $gates -Id 'G06' -Name 'isolated test-hooks editor proof' -Status 'passed' `
+            -Command "$hookBuildCommand; flutter test test/integration/real_cli_editor_test.dart --dart-define=$cliDefine $($integrationDefines -join ' ')" `
             -Log $hookLog -Detail "passed $($hookCounts.Passed), skipped 0"
 
-        Write-VerifyMessage -Message 'verify: restoring the plain release CLI'
-        $restoreBuild = Invoke-CapturedProcess -FilePath 'cargo' -Arguments $plainBuildArgs `
-            -WorkingDirectory $repositoryFull -TimeoutSeconds $GateTimeoutSeconds
-        $restoreText = Format-GateLog -Command $plainBuildCommand -Result $restoreBuild -Header 'restoring the shipped CLI after the test-hooks build'
-        if ($restoreBuild.TimedOut -or $restoreBuild.ExitCode -ne 0) {
-            throw "The restoring $plainBuildCommand failed with exit code $($restoreBuild.ExitCode)."
-        }
         $restoredCliHash = Get-FileSha256 -Path $CliExecutable
-        $restoredBytesText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($CliExecutable))
-        if ($restoredBytesText.Contains('TASKS_PRECOMMIT_READY_FILE', [System.StringComparison]::Ordinal)) {
-            throw "The restored release CLI at '$CliExecutable' still contains the test-hooks string."
-        }
-        $restoreDetail = "sha256 $restoredCliHash"
         if ($restoredCliHash -ne $plainCliHash) {
-            $restoreDetail += " (the first build hashed $plainCliHash)"
+            throw 'The shipped CLI changed while building the isolated test-hooks binaries.'
         }
         $restoreLog = Write-GateLog -EvidenceRoot $evidence -Name '08-cargo-build-release-restore.txt' `
-            -Text ($restoreText + "`ncli_sha256_after_restore: $restoredCliHash`ncli_sha256_before_test_hooks: $plainCliHash")
-        Add-VerifyGate -Gates $gates -Id 'G07' -Name 'shipped CLI restored' -Status 'passed' `
-            -Command $plainBuildCommand -Log $restoreLog -Detail $restoreDetail
+            -Text "The plain release CLI was never overwritten. sha256: $restoredCliHash"
+        Add-VerifyGate -Gates $gates -Id 'G07' -Name 'shipped CLI unchanged' -Status 'passed' `
+            -Command 'SHA256 comparison before/after isolated integration builds' -Log $restoreLog -Detail "sha256 $restoredCliHash"
 
         Write-VerifyMessage -Message "verify: seeding the pristine end-to-end store in '$e2eFixtureResolved'"
         $e2eFixture = Initialize-ViewerVerifyFixture -FixtureRoot $e2eFixtureResolved -CliExecutable $CliExecutable `

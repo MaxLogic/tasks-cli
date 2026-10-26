@@ -1,4 +1,7 @@
-//! Required WSL gate with real Linux tasks and this lane's test tasks.exe.
+//! Explicit WSL gate with real Linux tasks and this lane's test tasks.exe.
+//! Native Linux has neither wslpath nor a Windows executable backend. Run this
+//! target in WSL with TASKS_TEST_WINDOWS_EXE and TASKS_TEST_WINDOWS_TEMP set:
+//! cargo test --locked --test attachment_delegation -- --ignored
 #![cfg(target_os = "linux")]
 mod support;
 use serde_json::Value;
@@ -159,6 +162,7 @@ impl Fixture {
 }
 
 #[test]
+#[ignore = "requires WSL, a lane test tasks.exe and Windows-owned scratch; run explicitly with --ignored"]
 fn real_binaries_convert_file_stdin_default_cache_and_linux_out_in_both_formats() {
     let f = Fixture::new();
     f.add();
@@ -217,6 +221,7 @@ fn real_binaries_convert_file_stdin_default_cache_and_linux_out_in_both_formats(
 }
 
 #[test]
+#[ignore = "requires WSL, a lane test tasks.exe and Windows-owned scratch; run explicitly with --ignored"]
 fn reverse_conversion_failure_emits_no_stdout_and_names_the_written_windows_path() {
     let f = Fixture::new();
     f.add();
@@ -264,6 +269,7 @@ fn reverse_conversion_failure_emits_no_stdout_and_names_the_written_windows_path
 }
 
 #[test]
+#[ignore = "requires WSL, a lane test tasks.exe and Windows-owned scratch; run explicitly with --ignored"]
 fn clipboard_inspection_and_token_add_run_in_the_windows_backend() {
     let f = Fixture::new();
     let fixture = f.windows_root.path().join("clipboard");

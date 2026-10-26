@@ -364,11 +364,10 @@ String? _missingReleaseBinary() {
 /// The hold is a `test-hooks` build feature (`src/store.rs`); a default build
 /// ignores both variables, so the acknowledgement-loss case cannot run at all.
 String? _missingPrecommitHooks() {
-  final missingBinary = _missingReleaseBinary();
-  if (missingBinary != null) {
-    return missingBinary;
+  final path = _hookExecutablePath();
+  if (!File(path).existsSync()) {
+    return 'The test-hooks CLI is missing: $path';
   }
-  final path = _releaseExecutablePath();
   final text = String.fromCharCodes(File(path).readAsBytesSync());
   const hooks = <String>[
     'TASKS_PRECOMMIT_READY_FILE',
@@ -382,6 +381,12 @@ String? _missingPrecommitHooks() {
     }
   }
   return null;
+}
+
+/// Separate hook CLI for the acknowledgement-loss case; other cases use release.
+String _hookExecutablePath() {
+  const override = String.fromEnvironment('TASKS_VIEWER_TEST_HOOK_CLI');
+  return override.isEmpty ? _releaseExecutablePath() : override;
 }
 
 /// Absolute path of the release CLI this run must exercise.
@@ -663,7 +668,9 @@ final class _Slice5Harness {
     Duration? precommitHold,
     Duration readResponseDelay = Duration.zero,
   }) async {
-    final executable = _releaseExecutablePath();
+    final executable = precommitHold == null
+        ? _releaseExecutablePath()
+        : _hookExecutablePath();
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final root = Directory.systemTemp.createTempSync(
       'tasks-viewer-slice5-int-$stamp-',

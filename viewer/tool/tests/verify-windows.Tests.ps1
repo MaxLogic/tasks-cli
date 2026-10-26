@@ -288,3 +288,39 @@ Describe 'verify-windows.ps1 gate log rendering' {
         (Format-GateLog -Command 'flutter test' -Result $result) | Should -BeLike '*timed_out: true*'
     }
 }
+
+Describe 'verify-windows.ps1 named skip allow-list' {
+    BeforeEach {
+        $script:ReportRoot = New-VerifyTestRoot
+        $script:ReportPath = Join-Path $script:ReportRoot 'events.json'
+        $script:Events = @(
+            @{ type = 'suite'; suite = @{ id = 0; path = 'D:/repo/viewer/test/data/system_launcher_console_test.dart' } }
+            @{ type = 'testStart'; test = @{ id = 1; suiteID = 0; name = 'SystemProcessLauncher gives a console child no console window' } }
+            @{ type = 'testDone'; testID = 1; skipped = $true }
+        )
+    }
+    AfterEach { Remove-Item -LiteralPath $script:ReportRoot -Recurse -Force }
+    It 'admits only the named console test on a headless host' {
+        $script:Events | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 8 } | Set-Content $script:ReportPath
+        $result = Assert-FlutterSkippedTest -ReportPath $script:ReportPath -SkippedCount 1 -HasConsoleWindow $false
+        $result | Should -BeLike '*no interactive console*'
+    }
+    It 'rejects an unrelated skip even when its count is one' {
+        $script:Events[1].test.name = 'an attachment integration test'
+        $script:Events | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 8 } | Set-Content $script:ReportPath
+        { Assert-FlutterSkippedTest -ReportPath $script:ReportPath -SkippedCount 1 -HasConsoleWindow $false } | Should -Throw '*Unexpected skipped test*'
+    }
+    It 'rejects a console skip when console proof is possible' {
+        $script:Events | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 8 } | Set-Content $script:ReportPath
+        { Assert-FlutterSkippedTest -ReportPath $script:ReportPath -SkippedCount 1 -HasConsoleWindow $true } | Should -Throw '*Unexpected skipped test*'
+    }
+    It 'rejects a matching name from a different suite' {
+        $script:Events[0].suite.path = 'D:/repo/viewer/test/another_test.dart'
+        $script:Events | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress -Depth 8 } | Set-Content $script:ReportPath
+        { Assert-FlutterSkippedTest -ReportPath $script:ReportPath -SkippedCount 1 -HasConsoleWindow $false } | Should -Throw '*Unexpected skipped test*'
+    }
+    It 'rejects missing skip events rather than trusting the count' {
+        $script:Events[0] | ConvertTo-Json -Compress -Depth 8 | Set-Content $script:ReportPath
+        { Assert-FlutterSkippedTest -ReportPath $script:ReportPath -SkippedCount 1 -HasConsoleWindow $false } | Should -Throw '*skip count*'
+    }
+}

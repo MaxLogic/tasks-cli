@@ -221,10 +221,10 @@ fn get_cache_explicit_file_directory_reuse_overwrite_and_text() {
             .join(&f.project)
             .join(format!("A{}", i + 1))
             .join(name);
-        assert_eq!(
-            Path::new(get["items"][i]["path"].as_str().unwrap()),
-            expected
-        );
+        // The CLI resolves the cache root. Windows temp paths can use an 8.3
+        // alias (RUNNER~1 on CI), so compare the actual file, not its spelling.
+        let actual = Path::new(get["items"][i]["path"].as_str().unwrap());
+        assert!(same_file::is_same_file(actual, &expected).unwrap());
         assert_eq!(fs::read(&expected).unwrap(), name.as_bytes());
     }
     let first = get["items"][0]["path"].as_str().unwrap();
@@ -280,10 +280,10 @@ fn get_cache_explicit_file_directory_reuse_overwrite_and_text() {
         .output()
         .unwrap();
     assert!(text.status.success());
-    assert_eq!(
-        String::from_utf8(text.stdout).unwrap(),
-        format!("{}\n", Path::new(&dir).join("one.txt").display())
-    );
+    let printed = String::from_utf8(text.stdout).unwrap();
+    assert!(printed.ends_with('\n'));
+    assert_eq!(printed.lines().count(), 1);
+    assert!(same_file::is_same_file(printed.trim_end(), Path::new(&dir).join("one.txt")).unwrap());
     no_temps(f.root.path());
 }
 
