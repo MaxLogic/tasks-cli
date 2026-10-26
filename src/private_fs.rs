@@ -151,6 +151,17 @@ pub(crate) fn create_output_file(path: &Path) -> Result<File, AppError> {
 }
 
 pub fn open_file(path: &Path) -> Result<File, AppError> {
+    open_file_with_sharing(path, false)
+}
+
+/// Credential readers may coexist, but Windows writers and deletion/rotation
+/// must remain excluded for the lifetime of this validated handle.
+#[cfg(feature = "remote")]
+pub(crate) fn open_credential_file(path: &Path) -> Result<File, AppError> {
+    open_file_with_sharing(path, true)
+}
+
+fn open_file_with_sharing(path: &Path, _share_read: bool) -> Result<File, AppError> {
     validate_dir(path.parent().ok_or_else(insecure)?)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -162,7 +173,10 @@ pub fn open_file(path: &Path) -> Result<File, AppError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0).custom_flags(0x00200000);
+        const FILE_SHARE_READ: u32 = 1;
+        options
+            .share_mode(if _share_read { FILE_SHARE_READ } else { 0 })
+            .custom_flags(0x00200000);
     }
     let file = options.open(path)?;
     validate_file(&file)?;
@@ -278,5 +292,45 @@ mod windows {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows, feature = "remote"))]
+mod tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn credential_reader_shares_only_reads_and_mutable_files_stay_exclusive() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("keys");
+        crate::remote::credentials::generate_key(&directory).unwrap();
+        let path = directory.join("signing-key.pem");
+        let reader = open_credential_file(&path).unwrap();
+        let second_reader = open_credential_file(&path).unwrap();
+        // Even a writer willing to share all access must be rejected. Merely
+        // checking our exclusive opener would not detect FILE_SHARE_WRITE.
+        for access in [0x40000000, 0x00010000] {
+            // GENERIC_WRITE, DELETE
+            let error = OpenOptions::new()
+                .access_mode(access)
+                .share_mode(7)
+                .open(&path)
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(32));
+        }
+        assert!(matches!(open_file(&path), Err(AppError::Io(e)) if e.raw_os_error() == Some(32)));
+        drop((reader, second_reader));
+        let exclusive = open_file(&path).unwrap();
+        assert!(
+            matches!(open_credential_file(&path), Err(AppError::Io(e)) if e.raw_os_error() == Some(32))
+        );
+        assert!(matches!(open_file(&path), Err(AppError::Io(e)) if e.raw_os_error() == Some(32)));
+        drop(exclusive);
+        let mutable_path = directory.join("mutable");
+        let _mutable = create_file(&mutable_path).unwrap();
+        assert!(
+            matches!(open_credential_file(&mutable_path), Err(AppError::Io(e)) if e.raw_os_error() == Some(32))
+        );
     }
 }

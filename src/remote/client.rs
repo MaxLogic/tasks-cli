@@ -40,6 +40,34 @@ fn invalid_reply() -> AppError {
         request_id: None,
     }
 }
+
+fn credential_error(error: AppError) -> AppError {
+    use std::io::ErrorKind;
+    let detail = match &error {
+        AppError::Io(cause)
+            if cfg!(windows) && matches!(cause.raw_os_error(), Some(32 | 33)) =>
+        {
+            "key file is locked by another process; wait for the key writer or rotation to finish, then retry the command".into()
+        }
+        AppError::Io(cause) if cause.kind() == ErrorKind::NotFound => {
+            "key file or parent directory is missing; check credential_file in client.toml and restore the protected installation key".into()
+        }
+        AppError::Io(cause) if cause.kind() == ErrorKind::PermissionDenied => {
+            "access to the key file or parent directory was denied; check owner-only file and directory permissions for the current user".into()
+        }
+        AppError::Io(cause) if cause.kind() == ErrorKind::InvalidData => {
+            "key encoding is not valid UTF-8; restore a valid Ed25519 PKCS#8 PEM installation key".into()
+        }
+        // These causes contain validation/OS diagnostics, never key contents.
+        // Preserve ACL, reparse, PEM and size refusals instead of masking them.
+        _ => format!("{error}; restore a valid Ed25519 PKCS#8 PEM key of at most 16 KiB and use owner-only file and directory permissions"),
+    };
+    AppError::Remote {
+        code: "remote_credential",
+        message: format!("cannot load the protected installation key: {detail}"),
+        request_id: None,
+    }
+}
 pub fn parse_reply(reply: HttpResponse) -> Result<Value, AppError> {
     let value: Value = serde_json::from_slice(&reply.body).map_err(|_| invalid_reply())?;
     parse_value(reply.status, value)
@@ -92,7 +120,7 @@ impl RemoteClient {
             return Err(invalid_reply());
         };
         profile.validate()?;
-        let key = credentials::load_key(credential_file).map_err(|_| AppError::Remote { code: "remote_credential", message: "cannot load the protected installation key; check its file permissions and encoding".into(), request_id: None })?;
+        let key = credentials::load_key(credential_file).map_err(credential_error)?;
         let identity = SigningIdentity {
             server_id: *server_id,
             credential_id: *credential_id,

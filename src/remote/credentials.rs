@@ -24,7 +24,7 @@ pub fn generate_key(directory: &Path) -> Result<[u8; 32], AppError> {
 }
 
 pub fn load_key(path: &Path) -> Result<SigningKey, AppError> {
-    let file = private_fs::open_file(path)?;
+    let file = private_fs::open_credential_file(path)?;
     if file.metadata()?.len() > 16384 {
         return Err(AppError::Database(
             "private key exceeds the 16 KiB limit".into(),
