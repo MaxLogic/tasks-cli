@@ -6,6 +6,80 @@ use support::remote_fixture::{command, ok, run, Fixture};
 use tasks_cli::remote::pending::PendingStore;
 
 #[test]
+fn malformed_receipt_never_echoes_private_payload_in_errors_or_diagnostics() {
+    use support::https::{Reply, TlsFixture};
+    use tasks_cli::remote::{client::RemoteClient, config::Profile, pending::PendingWrite};
+
+    const SENTINEL: &str = "PRIVATE_PAYLOAD_SENTINEL";
+    let f = Fixture::new();
+    let mut profile = tasks_cli::remote::config::load(&f.clients[0]).unwrap();
+    let Profile::Remote {
+        server_url,
+        server_id,
+        credential_id,
+        private_ca,
+        ..
+    } = &mut profile
+    else {
+        panic!("fixture must configure a remote profile");
+    };
+    let request = PendingWrite::new(
+        *server_id,
+        *credential_id,
+        "POST",
+        "/v1/projects",
+        json!({}),
+    )
+    .unwrap();
+    let gateway = TlsFixture::new(
+        "localhost",
+        false,
+        Reply::JsonRoutes(vec![(
+            "/v1/projects".into(),
+            json!({"receipt":{
+                "request_id":request.request_id,
+                "route":"POST /v1/projects",
+                "payload_sha256":request.payload_sha256().unwrap(),
+                "status":SENTINEL
+            }}),
+        )]),
+    );
+    *server_url = gateway.url();
+    *private_ca = gateway.options().private_ca;
+    tasks_cli::remote::config::save(&f.clients[0], &profile).unwrap();
+    PendingStore::new(&f.clients[0])
+        .unwrap()
+        .save(&request)
+        .unwrap();
+    let client = RemoteClient::new(&profile).unwrap();
+    let error = client
+        .reconcile(&f.clients[0], request.request_id)
+        .unwrap_err();
+    assert!(
+        !format!("{error}\n{error:?}").contains(SENTINEL),
+        "private receipt value leaked through an error representation"
+    );
+    let output = run(
+        &f.clients[0],
+        &["remote", "reconcile", &request.request_id.to_string()],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    for stream in [&output.stdout, &output.stderr] {
+        assert!(
+            !String::from_utf8_lossy(stream).contains(SENTINEL),
+            "private receipt value leaked through CLI output"
+        );
+    }
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "unknown_write_outcome");
+    #[cfg(feature = "test-hooks")]
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("[stage=receipt_json: malformed_receipt_json]"));
+}
+
+#[test]
 fn intermediary_json_error_after_commit_keeps_the_original_recovery_request() {
     let f = Fixture::new();
     let project = f.project();
@@ -28,6 +102,14 @@ fn intermediary_json_error_after_commit_keeps_the_original_recovery_request() {
     let error: Value = serde_json::from_slice(&response.stderr).unwrap();
     assert_eq!(error["error"]["code"], "unknown_write_outcome");
     let receipt = error["error"]["request_id"].as_str().unwrap();
+    let original_message = format!("remote service: write outcome is unknown; run tasks remote reconcile {receipt} with this profile before another mutation");
+    #[cfg(not(feature = "test-hooks"))]
+    assert_eq!(error["error"]["message"], original_message);
+    #[cfg(feature = "test-hooks")]
+    assert_eq!(
+        error["error"]["message"],
+        format!("{original_message} [stage=receipt_missing: missing_receipt]")
+    );
     assert_eq!(
         PendingStore::new(&f.clients[0])
             .unwrap()

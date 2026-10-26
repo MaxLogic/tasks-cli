@@ -64,6 +64,13 @@ fn attachment_recovery_after_lost_response(detach: bool) {
     assert_eq!(lost.status.code(), Some(5));
     let error: Value = serde_json::from_slice(&lost.stderr).unwrap();
     assert_eq!(error["error"]["code"], "unknown_write_outcome");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("[stage=transport:"),
+        "lost reply must identify the failed stage: {error}"
+    );
     let operation = if detach {
         "attachment_detach"
     } else {
@@ -709,7 +716,7 @@ fn signed_content_types_digest_and_early_length_guards() {
     for (length, expected) in [(Some(54_525_953), 413), (None, 411)] {
         let mut socket = std::net::TcpStream::connect(s.address).unwrap();
         socket
-            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .set_read_timeout(Some(support::https::FIXTURE_IO_TIMEOUT))
             .unwrap();
         write!(
             socket,
@@ -1083,7 +1090,7 @@ fn open_transfer(
         .unwrap();
     let mut socket = std::net::TcpStream::connect(s.address).unwrap();
     socket
-        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .set_read_timeout(Some(support::https::FIXTURE_IO_TIMEOUT))
         .unwrap();
     write!(socket, "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\nConnection: close\r\n").unwrap();
     for (name, value) in &headers {

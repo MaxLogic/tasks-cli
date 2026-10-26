@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use http::Method;
 use tasks_cli::remote::https::ClientOptions;
+// Fixture I/O must allow for loaded test hosts without becoming unbounded.
+pub const FIXTURE_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub struct HttpBackend {
     pub address: std::net::SocketAddr,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -29,9 +31,7 @@ impl HttpBackend {
                 });
         });
         Self {
-            address: address
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap(),
+            address: address.recv_timeout(FIXTURE_IO_TIMEOUT).unwrap(),
             stop: Some(stop),
             worker: Some(worker),
         }
@@ -128,12 +128,8 @@ impl TlsFixture {
                 // Accepted sockets inherit nonblocking mode on Windows. TLS
                 // fixture I/O is synchronous and bounded by socket timeouts.
                 stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(std::time::Duration::from_secs(3)))
-                    .unwrap();
+                stream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();
+                stream.set_write_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();
                 let connection = rustls::ServerConnection::new(Arc::new(config.clone())).unwrap();
                 let mut stream = rustls::StreamOwned::new(connection, stream);
                 let mut request = Vec::new();
@@ -191,11 +187,9 @@ impl TlsFixture {
                     }
                     Reply::Proxy(address) | Reply::ProxyWithLoss { address, .. } => {
                         let mut upstream = std::net::TcpStream::connect(address).unwrap();
+                        upstream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();
                         upstream
-                            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
-                            .unwrap();
-                        upstream
-                            .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+                            .set_write_timeout(Some(FIXTURE_IO_TIMEOUT))
                             .unwrap();
                         write!(upstream, "{method} {uri} HTTP/1.1\r\nConnection: close\r\n")
                             .unwrap();

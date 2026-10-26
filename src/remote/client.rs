@@ -306,8 +306,17 @@ impl RemoteClient {
         retain: bool,
     ) -> Result<ApiOutput, AppError> {
         request.check_destination(self.server_id, self.credential_id)?;
-        let unknown = || {
-            AppError::Remote { code:"unknown_write_outcome", message:format!("write outcome is unknown; run tasks remote reconcile {} with this profile before another mutation",request.request_id), request_id:Some(request.request_id) }
+        // Diagnostic categories must be fixed literals, never error Display
+        // text: deserialization and I/O errors can include private input.
+        let unknown = |_stage: &'static str, _category: &'static str| {
+            let message = format!("write outcome is unknown; run tasks remote reconcile {} with this profile before another mutation", request.request_id);
+            #[cfg(feature = "test-hooks")]
+            let message = format!("{message} [stage={_stage}: {_category}]");
+            AppError::Remote {
+                code: "unknown_write_outcome",
+                message,
+                request_id: Some(request.request_id),
+            }
         };
         let method = Method::from_bytes(request.method.as_bytes()).map_err(|_| invalid_reply())?;
         let reply = if request.body.is_some() {
@@ -340,38 +349,52 @@ impl RemoteClient {
                 Some(request.request_id),
             )
         }
-        .map_err(|_| unknown())?;
-        let value: Value = serde_json::from_slice(&reply.body).map_err(|_| unknown())?;
-        let receipt: super::protocol::RequestReceipt =
-            serde_json::from_value(value.get("receipt").cloned().ok_or_else(unknown)?)
-                .map_err(|_| unknown())?;
+        .map_err(|_| unknown("transport", "transport"))?;
+        let value: Value = serde_json::from_slice(&reply.body)
+            .map_err(|_| unknown("response_json", "malformed_response_json"))?;
+        let receipt: super::protocol::RequestReceipt = serde_json::from_value(
+            value
+                .get("receipt")
+                .cloned()
+                .ok_or_else(|| unknown("receipt_missing", "missing_receipt"))?,
+        )
+        .map_err(|_| unknown("receipt_json", "malformed_receipt_json"))?;
         if receipt.request_id != request.request_id
             || receipt.route != format!("{} {}", request.method, request.target)
             || receipt.payload_sha256 != request.payload_sha256()?
             || receipt.status != reply.status
             || !matches!(reply.status, 200 | 400 | 404 | 409 | 413)
         {
-            return Err(unknown());
+            return Err(unknown("receipt_validation", "receipt_mismatch"));
         }
         match parse_value(reply.status, value) {
             Ok(value) => {
-                let output = api_output(value).map_err(|_| unknown())?;
+                let output =
+                    api_output(value).map_err(|_| unknown("api_output", "malformed_api_output"))?;
                 if retain {
-                    store.confirm(request, &receipt).map_err(|_| unknown())?;
+                    store
+                        .confirm(request, &receipt)
+                        .map_err(|_| unknown("confirm_success", "pending_store"))?;
                 } else {
-                    store.remove(request.request_id).map_err(|_| unknown())?;
+                    store
+                        .remove(request.request_id)
+                        .map_err(|_| unknown("remove_success", "pending_store"))?;
                 }
                 Ok(output)
             }
             Err(error @ AppError::RemoteReply { .. }) => {
                 if retain {
-                    store.confirm(request, &receipt).map_err(|_| unknown())?;
+                    store
+                        .confirm(request, &receipt)
+                        .map_err(|_| unknown("confirm_refusal", "pending_store"))?;
                 } else {
-                    store.remove(request.request_id).map_err(|_| unknown())?;
+                    store
+                        .remove(request.request_id)
+                        .map_err(|_| unknown("remove_refusal", "pending_store"))?;
                 }
                 Err(error)
             }
-            Err(_) => Err(unknown()),
+            Err(_) => Err(unknown("response_value", "invalid_response_value")),
         }
     }
 }

@@ -29,6 +29,7 @@ pub fn command(root: &Path, args: &[&str]) -> Command {
     }
     command
 }
+#[track_caller]
 pub fn ok(output: Output) -> Value {
     assert!(
         output.status.success(),
