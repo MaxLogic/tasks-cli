@@ -12,7 +12,8 @@ use std::{
 
 pub const HEADER_BYTES: usize = 52;
 pub const DECODER_MEMLIMIT: u64 = 16 * 1024 * 1024;
-const BLOCK_BYTES: u64 = 8 * 1024 * 1024;
+const BLOCK_BYTES: u64 = 4 * 1024 * 1024;
+const DICTIONARY_BYTES: u32 = 8 * 1024 * 1024;
 const ENCODER_MEMLIMIT: u64 = 1024 * 1024 * 1024;
 const BUFFER_BYTES: usize = 64 * 1024;
 
@@ -282,7 +283,7 @@ impl Encoder {
         #[cfg(test)]
         ENCODER_INVOCATIONS.with(|count| count.set(count.get() + 1));
         let mut options = LzmaOptions::new_preset(9 | PRESET_EXTREME).map_err(codec_error)?;
-        options.dict_size(BLOCK_BYTES as u32);
+        options.dict_size(DICTIONARY_BYTES);
         let mut filters = Filters::new();
         filters.lzma2(&options);
         let mut builder = MtStreamBuilder::new();
@@ -510,6 +511,8 @@ mod tests {
         source.truncate(20 * 1024 * 1024);
         let one = encode_with_threads(&source[..], "log.txt", &Limits::PRODUCTION, 1).unwrap();
         let many = encode_with_threads(&source[..], "log.txt", &Limits::PRODUCTION, 8).unwrap();
+        assert_eq!(one.codec(), Codec::Xz);
+        assert_eq!(many.codec(), Codec::Xz);
         assert_eq!(one.bytes(), many.bytes());
         for envelope in [one, many] {
             let mut out = Vec::new();

@@ -1,5 +1,5 @@
 use liblzma::{
-    stream::{Check, Filters, LzmaOptions, Stream},
+    stream::{Check, Filters, LzmaOptions, MtStreamBuilder, Stream, PRESET_EXTREME},
     write::XzEncoder,
 };
 use sha2::{Digest, Sha256};
@@ -56,6 +56,55 @@ fn xz(source: &[u8], dict_size: u32) -> Vec<u8> {
     let mut encoder = XzEncoder::new_stream(Vec::new(), stream);
     encoder.write_all(source).unwrap();
     encoder.finish().unwrap()
+}
+
+// Fixed contract parameters, independent of the production encoder constants.
+fn policy_xz(source: &[u8], block_bytes: u64) -> Vec<u8> {
+    let mut options = LzmaOptions::new_preset(9 | PRESET_EXTREME).unwrap();
+    options.dict_size(8 * 1024 * 1024);
+    let mut filters = Filters::new();
+    filters.lzma2(&options);
+    let stream = MtStreamBuilder::new()
+        .filters(filters)
+        .block_size(block_bytes)
+        .check(Check::Crc64)
+        .threads(1)
+        .encoder()
+        .unwrap();
+    let mut encoder = XzEncoder::new_stream(Vec::new(), stream);
+    encoder.write_all(source).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn multiblock_log() -> Vec<u8> {
+    let mut source = b"INFO worker completed request with status 200\n".repeat(220_000);
+    // Cross both the old and new block boundaries, including a partial tail.
+    source.truncate(9 * 1024 * 1024 + 1);
+    source
+}
+
+#[test]
+fn encoder_uses_4mib_blocks_with_8mib_dictionary_and_preset_9e() {
+    let source = multiblock_log();
+    let expected = policy_xz(&source, 4 * 1024 * 1024);
+    let encoded = round_trip(&source, "blocks.log");
+    assert_eq!(encoded.codec(), Codec::Xz);
+    assert_eq!(&encoded.bytes()[envelope::HEADER_BYTES..], expected);
+}
+
+#[test]
+fn previous_8mib_block_envelope_still_decodes() {
+    let source = multiblock_log();
+    let payload = policy_xz(&source, 8 * 1024 * 1024);
+    let bytes = frame(&source, 1, &payload);
+    let mut decoded = Vec::new();
+    let metadata =
+        envelope::decode_to(&bytes, "legacy.log", &mut decoded, &Limits::PRODUCTION).unwrap();
+    assert_eq!(metadata.codec, Codec::Xz);
+    assert_eq!(metadata.original_size, source.len() as u64);
+    assert_eq!(metadata.sha256, format!("{:x}", Sha256::digest(&source)));
+    assert_eq!(decoded, source);
+    envelope::validate(bytes, "legacy.log", &Limits::PRODUCTION).unwrap();
 }
 
 fn round_trip(bytes: &[u8], name: &str) -> envelope::ValidatedEnvelope {
