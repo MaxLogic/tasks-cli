@@ -247,7 +247,8 @@ fn parallel_cli_readers_and_mutations_tolerate_held_cache_and_preserve_errors() 
     for sharing in [Some(0), Some(1), Some(5), None] {
         ok(run(&f.clients[0], &["viewer", "info"]));
         // Hold across the whole batch. Modes 0/1 also force best-effort
-        // publication/invalidation; mode 5 allows normal atomic replacement.
+        // publication/invalidation; mode 5 allows deletion but
+        // still refuses replacement, so publication stays best-effort.
         let held = sharing.map(|mode| {
             OpenOptions::new()
                 .read(true)

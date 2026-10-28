@@ -161,9 +161,9 @@ pub(crate) fn open_credential_file(path: &Path) -> Result<File, AppError> {
     open_file_with_sharing(path, 1)
 }
 
-/// Discovery is disposable and atomically replaced. Readers may coexist and
-/// keep reading their old object after replacement/deletion, but never share
-/// in-place writes. Apply the same reparse and owner/ACL checks as other files.
+/// Discovery is disposable. Readers may coexist and the file may be deleted
+/// while read; replacement is refused while a reader is open, so publication
+/// stays best-effort. Readers never share in-place writes. Apply the same reparse and owner/ACL checks as other files.
 #[cfg(feature = "remote")]
 pub(crate) fn open_cache_file(path: &Path) -> Result<File, AppError> {
     open_file_with_sharing(path, 1 | 4) // FILE_SHARE_READ | FILE_SHARE_DELETE
