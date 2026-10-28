@@ -19,5 +19,5 @@ Visual C++ Redistributable linked in its quickstart.
 macOS and other architectures have not been built or tested. Task assignment
 is coordinated by the architect; there is no built-in assignee or task lease.
 
-Start with the [installation guide](https://github.com/MaxLogic/tasks-cli/blob/main/installation.md)
-and [architect walkthrough](https://github.com/MaxLogic/tasks-cli/blob/main/integration/architect-workflow.md).
+Start with the installation guide (`installation.md`) and the architect
+walkthrough (`integration/architect-workflow.md`) in the tasks-cli source.

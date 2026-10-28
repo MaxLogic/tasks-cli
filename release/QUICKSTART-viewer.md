@@ -19,8 +19,7 @@ after a move.
 Updates are manual: close the viewer, extract a new bundle into a new directory,
 and launch it. Your task database and settings remain outside the bundle.
 
-Keyboard controls and NVDA verification:
-https://github.com/MaxLogic/tasks-cli/blob/main/viewer/README.md.
+Keyboard controls and NVDA verification: `viewer/README.md` in the tasks-cli source.
 Flutter dependency notices are in `THIRD_PARTY_NOTICES-flutter.txt` and in the
 application's Flutter license registry. CLI notices are included separately.
 Audio attribution and provenance are in `AUDIO-NOTICE.md` and the assets.
