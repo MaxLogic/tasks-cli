@@ -19,6 +19,91 @@ fn signed_fixture() -> (tempfile::TempDir, OwnedServer, SigningIdentity) {
 }
 
 #[test]
+fn download_authentication_preserves_the_legacy_signed_length_profile() {
+    use axum::http::HeaderMap;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use ed25519_dalek::Signer;
+
+    let (_root, server, signer) = signed_fixture();
+    let uri: Uri = "/v1/projects/11111111-1111-4111-8111-111111111111/tasks/1/attachments/1"
+        .parse()
+        .unwrap();
+    // Construct the legacy wire profile independently of the client signer and
+    // shared signature-base builder so future client changes cannot rewrite it.
+    let headers = |signed_length: bool| {
+        let component = if signed_length {
+            " \"content-length\""
+        } else {
+            ""
+        };
+        let parameters = format!(
+            "(\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\"{component});created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"{}\"",
+            signer.credential_id
+        );
+        let length_line = if signed_length {
+            "\"content-length\": 0\n"
+        } else {
+            ""
+        };
+        let base = format!(
+            "\"@method\": GET\n\"@path\": {uri}\n\"@query\": ?\n\"content-type\": application/json\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"x-tasks-server-id\": {}\n{length_line}\"@signature-params\": {parameters}",
+            signer.server_id
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert(
+            "content-digest",
+            HeaderValue::from_static("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"),
+        );
+        headers.insert(
+            "x-tasks-server-id",
+            signer.server_id.to_string().parse().unwrap(),
+        );
+        headers.insert("content-length", HeaderValue::from_static("0"));
+        headers.insert(
+            "signature-input",
+            format!("tasks={parameters}").parse().unwrap(),
+        );
+        headers.insert(
+            "signature",
+            format!(
+                "tasks=:{}:",
+                STANDARD.encode(signer.key.sign(base.as_bytes()).to_bytes())
+            )
+            .parse()
+            .unwrap(),
+        );
+        headers
+    };
+
+    let legacy = headers(true);
+    let mut stripped = legacy.clone();
+    stripped.remove("content-length");
+    for (case, headers) in [
+        ("stripped signed length", stripped),
+        ("unsigned length", headers(false)),
+    ] {
+        let error = server
+            .authenticate(&Method::GET, &uri, &headers, 1000)
+            .err()
+            .expect("mismatched download components must be rejected");
+        assert!(
+            matches!(
+                error,
+                ServiceError::Unauthorized("unexpected signed components")
+            ),
+            "{case}: {error}"
+        );
+    }
+    // Refused variants must not consume the nonce of the valid legacy request.
+    server
+        .authenticate(&Method::GET, &uri, &legacy, 1000)
+        .unwrap()
+        .check_body(b"")
+        .unwrap();
+}
+
+#[test]
 fn empty_get_signature_matches_an_independently_written_rfc_base() {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use ed25519_dalek::Signer;

@@ -60,6 +60,9 @@ pub enum Reply {
     Stall,
     Authenticate(tasks_cli::server::OwnedServer),
     Proxy(std::net::SocketAddr),
+    // HTTP intermediaries may omit Content-Length on an empty GET. Preserve
+    // every other header and byte so this exercises the signed wire profile.
+    ProxyWithoutEmptyGetLength(std::net::SocketAddr),
     ProxyWithLoss {
         address: std::net::SocketAddr,
         drop_next_mutation: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -185,7 +188,9 @@ impl TlsFixture {
                         let _ =
                             std::io::copy(&mut std::io::repeat(b'x').take(16777217), &mut stream);
                     }
-                    Reply::Proxy(address) | Reply::ProxyWithLoss { address, .. } => {
+                    Reply::Proxy(address)
+                    | Reply::ProxyWithoutEmptyGetLength(address)
+                    | Reply::ProxyWithLoss { address, .. } => {
                         let mut upstream = std::net::TcpStream::connect(address).unwrap();
                         upstream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();
                         upstream
@@ -194,7 +199,11 @@ impl TlsFixture {
                         write!(upstream, "{method} {uri} HTTP/1.1\r\nConnection: close\r\n")
                             .unwrap();
                         for (name, value) in &headers {
-                            if name != "connection" {
+                            let omit_length = matches!(reply, Reply::ProxyWithoutEmptyGetLength(_))
+                                && method == Method::GET
+                                && name == "content-length"
+                                && value == "0";
+                            if name != "connection" && !omit_length {
                                 write!(upstream, "{name}: {}\r\n", value.to_str().unwrap())
                                     .unwrap();
                             }

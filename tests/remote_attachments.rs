@@ -579,15 +579,20 @@ impl Server {
             .signer
             .sign_now_with_content_type(&method, &target.parse().unwrap(), body, id, kind)
             .unwrap();
-        let response = reqwest::blocking::Client::builder()
+        let empty_download = body.is_empty()
+            && tasks_cli::remote::signing::is_download(&method, &target.parse().unwrap());
+        let request = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap()
             .request(method, format!("http://{}{target}", self.address))
-            .headers(headers)
-            .body(body.to_vec())
-            .send()
-            .unwrap();
+            .headers(headers);
+        let request = if empty_download {
+            request
+        } else {
+            request.body(body.to_vec())
+        };
+        let response = request.send().unwrap();
         (
             response.status().as_u16(),
             response.bytes().unwrap().to_vec(),
@@ -1092,7 +1097,14 @@ fn open_transfer(
     socket
         .set_read_timeout(Some(support::https::FIXTURE_IO_TIMEOUT))
         .unwrap();
-    write!(socket, "{method} {target} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\nConnection: close\r\n").unwrap();
+    write!(
+        socket,
+        "{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    )
+    .unwrap();
+    if !(method == http::Method::GET && signed_body.is_empty() && declared == 0) {
+        write!(socket, "Content-Length: {declared}\r\n").unwrap();
+    }
     for (name, value) in &headers {
         if name != "content-length" {
             write!(socket, "{name}: {}\r\n", value.to_str().unwrap()).unwrap();

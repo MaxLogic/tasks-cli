@@ -312,7 +312,12 @@ fn concurrent_inits_with_one_key_have_exactly_one_winner() {
             stderr(&a),
             stderr(&b)
         );
-        assert!(codes.contains(&Some(2)), "round {round}: {codes:?}");
+        assert!(
+            codes.contains(&Some(2)),
+            "round {round}: exit codes {codes:?}\nfirst stderr: {}\nsecond stderr: {}",
+            stderr(&a),
+            stderr(&b)
+        );
         assert_eq!(env.project_dirs(), 1, "round {round}");
         assert_eq!(env.bindings(), 1, "round {round}");
         let keyed = tasks_cli::keys::scan(&env.data(), true).unwrap();

@@ -185,7 +185,11 @@ impl SigningIdentity {
             format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body))),
         )?;
         insert("x-tasks-server-id", self.server_id.to_string())?;
-        if is_upload(method, uri) || is_download(method, uri) {
+        // Empty GETs need no framing header. Proxies may legitimately omit
+        // Content-Length: 0, which would invalidate a signature covering it.
+        // Keep length mandatory for uploads and signed for any download body;
+        // the signed digest still binds an empty download request to no bytes.
+        if is_upload(method, uri) || (is_download(method, uri) && !body.is_empty()) {
             insert("content-length", body.len().to_string())?;
         }
         if let Some(id) = idempotency {

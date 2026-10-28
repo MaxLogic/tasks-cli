@@ -193,14 +193,20 @@ impl HttpsClient {
             .identity
             .sign_now_with_content_type(&method, &uri, body, receipt, content_type)
             .map_err(|_| ClientError::Signature)?;
-        let response = self
+        let empty_download = body.is_empty() && super::signing::is_download(&method, &uri);
+        let request = self
             .client
             .request(method, url)
             .headers(headers)
-            .timeout(timeout)
-            .body(body.to_vec())
-            .send()
-            .map_err(|_| ClientError::Transport)?;
+            .timeout(timeout);
+        // An explicit empty reqwest body adds Content-Length: 0 on the wire.
+        // Empty downloads deliberately omit that proxy-sensitive signed field.
+        let request = if empty_download {
+            request
+        } else {
+            request.body(body.to_vec())
+        };
+        let response = request.send().map_err(|_| ClientError::Transport)?;
         if response.status().is_redirection() {
             return Err(ClientError::Redirect);
         }
