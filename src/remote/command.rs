@@ -82,6 +82,10 @@ fn query(
     )?)
 }
 pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppError> {
+    let result = setup_inner(cli, root, command);
+    super::capabilities::invalidate_on_error(root, result)
+}
+fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppError> {
     match command {
         RemoteCommand::Keygen { directory } => {
             if !directory.is_absolute() {
@@ -109,6 +113,7 @@ pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppE
             connect_timeout_seconds,
             request_timeout_seconds,
         } => {
+            super::capabilities::invalidate(root)?;
             let profile = Profile::Remote {
                 server_url: server_url.clone(),
                 server_id: *server_id,
@@ -119,7 +124,7 @@ pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppE
                 request_timeout_seconds: *request_timeout_seconds,
             };
             let client = RemoteClient::new(&profile)?;
-            client.info()?;
+            let info = client.info()?;
             std::fs::create_dir_all(root)?;
             let pending = PendingStore::new(root)?;
             let _lock = pending.lock()?;
@@ -142,12 +147,14 @@ pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppE
                 }
             }
             config::save(root, &profile)?;
+            client.remember_capabilities(root, &profile, &info)?;
             println!(
                 "{}",
                 json!({"backend":"remote","server_id":server_id,"credential_id":credential_id})
             );
         }
         RemoteCommand::Local => {
+            super::capabilities::invalidate(root)?;
             std::fs::create_dir_all(root)?;
             let pending = PendingStore::new(root)?;
             let _lock = pending.lock()?;
@@ -180,6 +187,7 @@ pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppE
     Ok(())
 }
 pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError> {
+    // Refuse server-local maintenance before opening even a credential file.
     if matches!(
         cli.command,
         Command::Import { .. }
@@ -188,18 +196,24 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
             | Command::Migrate
             | Command::Doctor
     ) {
-        return Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None });
+        return super::capabilities::invalidate_on_error(root, Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None }));
     }
-    let client = RemoteClient::new(profile)?;
+    let result = (|| {
+        let client = RemoteClient::with_state(profile, root)?;
+        execute_inner(cli, root, &client)
+    })();
+    super::capabilities::invalidate_on_error(root, result)
+}
+fn execute_inner(cli: &Cli, root: &Path, client: &RemoteClient) -> Result<(), AppError> {
     if let Command::Attachment(command @ crate::cli::AttachmentCommand::Clipboard) = &cli.command {
         print(
-            super::attachment::execute(&client, root, "", command)?,
+            super::attachment::execute(client, root, "", command)?,
             cli.format,
         );
         return Ok(());
     }
     if let Command::Viewer(command) = &cli.command {
-        return execute_viewer(cli, root, &client, command);
+        return execute_viewer(cli, root, client, command);
     }
     if let Command::Init {
         root: workspace,
@@ -231,7 +245,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         }
         let id = explicit.or(existing).unwrap_or_else(Uuid::new_v4);
         if explicit.is_some() || existing.is_some() {
-            match query(&client, &id.to_string(), ReadRequest::ProjectKey) {
+            match query(client, &id.to_string(), ReadRequest::ProjectKey) {
                 Ok(output) => {
                     if output.output["data"]["project_key"].as_str() != Some(key.as_str()) {
                         return Err(AppError::Validation(
@@ -285,7 +299,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         let id = Uuid::parse_str(id)
             .map_err(|_| AppError::Validation("invalid project UUID".into()))?
             .to_string();
-        query(&client, &id, ReadRequest::ProjectKey)?;
+        query(client, &id, ReadRequest::ProjectKey)?;
         registry::bind_remote_root(root, workspace, id.clone())?;
         envelope(
             Some(id.clone()),
@@ -300,7 +314,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
     let id = project(cli, root)?;
     if let Command::Attachment(command) = &cli.command {
         print(
-            super::attachment::execute(&client, root, &id, command)?,
+            super::attachment::execute(client, root, &id, command)?,
             cli.format,
         );
         return Ok(());
@@ -309,7 +323,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         cli.command,
         Command::Enrich { .. } | Command::EnrichClipboard
     ) {
-        return enrich(cli, &client, &id);
+        return enrich(cli, client, &id);
     }
     let request = match &cli.command {
         Command::List {
@@ -372,7 +386,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         _ => None,
     };
     if let Some(request) = request {
-        print(query(&client, &id, request)?, cli.format);
+        print(query(client, &id, request)?, cli.format);
         return Ok(());
     }
     let attribution = crate::attribution::current();
@@ -469,7 +483,7 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
         )?,
         Command::Export { out } => {
             export(
-                &client,
+                client,
                 Uuid::parse_str(&id)
                     .map_err(|_| AppError::Validation("invalid project UUID".into()))?,
                 out,

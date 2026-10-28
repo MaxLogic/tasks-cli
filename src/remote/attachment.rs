@@ -389,20 +389,23 @@ pub fn execute(
             expect_version,
             request_id,
         } => {
-            let task = crate::model::parse_task_ref(id)
-                .map_err(AppError::validation)?
-                .id;
-            // Resolve keyed input before sending a mutation whose route is numeric.
-            query(
-                client,
-                project,
-                ReadRequest::Attachments {
-                    id: id.clone(),
-                    all: false,
-                    after: None,
-                    limit: 1,
-                },
-            )?;
+            let reference = crate::model::parse_task_ref(id).map_err(AppError::validation)?;
+            let task = reference.id;
+            // Numeric IDs already select this project's route. Keyed input
+            // still needs authoritative resolution before a numeric mutation.
+            // Preserve typed read refusals for IDs outside the route range.
+            if reference.key.is_some() || task == 0 || task > i64::MAX as u64 {
+                query(
+                    client,
+                    project,
+                    ReadRequest::Attachments {
+                        id: id.clone(),
+                        all: false,
+                        after: None,
+                        limit: 1,
+                    },
+                )?;
+            }
             let target = format!("/v1/projects/{project}/tasks/{task}/attachments/detach");
             let payload = serde_json::to_value(DetachAttachments {
                 expect_version: *expect_version,

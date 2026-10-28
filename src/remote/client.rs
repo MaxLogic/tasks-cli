@@ -17,6 +17,7 @@ pub struct RemoteClient {
     pub http: HttpsClient,
     pub server_id: Uuid,
     pub credential_id: Uuid,
+    capabilities: Option<super::capabilities::Capabilities>,
 }
 pub fn transport_error(error: ClientError) -> AppError {
     let code = match error {
@@ -140,22 +141,57 @@ impl RemoteClient {
             http,
             server_id: *server_id,
             credential_id: *credential_id,
+            capabilities: None,
         })
     }
+    pub(super) fn with_state(profile: &Profile, root: &Path) -> Result<Self, AppError> {
+        let mut client = Self::new(profile)?;
+        client.capabilities = Some(super::capabilities::Capabilities::new(root, profile)?);
+        Ok(client)
+    }
+    pub(super) fn remember_capabilities(
+        &self,
+        root: &Path,
+        profile: &Profile,
+        info: &Value,
+    ) -> Result<(), AppError> {
+        super::capabilities::Capabilities::new(root, profile)?.save(info)
+    }
     fn service_info(&self) -> Result<Value, AppError> {
+        if let Some(cache) = &self.capabilities {
+            if let Some(info) = cache.get()? {
+                if let Ok(info) = self.validate_info(info) {
+                    return Ok(info);
+                }
+            }
+        }
         let reply = parse_reply(
             self.http
                 .send(Method::GET, "/v1/info", b"", None)
                 .map_err(transport_error)?,
         )?;
+        let reply = self.validate_info(reply)?;
+        if let Some(cache) = &self.capabilities {
+            cache.save(&reply)?;
+        }
+        Ok(reply)
+    }
+    fn validate_info(&self, reply: Value) -> Result<Value, AppError> {
         if reply["server_id"].as_str() != Some(self.server_id.to_string().as_str())
             || reply["ready"] != true
+            || reply["protocol_version"] != 1
+            || reply.get("capabilities").is_some_and(|value| {
+                !value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(Value::is_string))
+            })
         {
             return Err(invalid_reply());
         }
         Ok(reply)
     }
-    /// Mutation/configuration preflight retains the request-bound receipt gate.
+    /// Valid discovery retains the request-bound receipt gate. Configure uses
+    /// an uncached client so explicit setup always checks the live server.
     pub fn info(&self) -> Result<Value, AppError> {
         let reply = self.service_info()?;
         if !reply["capabilities"]
@@ -258,7 +294,8 @@ impl RemoteClient {
         request_id: Option<Uuid>,
         retain: bool,
     ) -> Result<ApiOutput, AppError> {
-        // Online preflight avoids collecting unsent work during a known outage.
+        // Require live or unexpired discovery before saving or sending work.
+        // A later outage still follows the existing unknown-outcome recovery.
         self.info()?;
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
