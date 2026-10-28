@@ -909,9 +909,9 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     group: HelpGroup.details,
     label: 'Attachment preview and paste',
     shortcutText:
-        'Ctrl+V; Ctrl+click; Shift+click/arrows; Ctrl+Space; Ctrl+A; Delete; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
+        'Ctrl+V; Ctrl+click; Shift+click/arrows/Home/End/PageUp/PageDown; Ctrl+Up/Down; Ctrl+Space; Ctrl+A; Delete; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
     description:
-        'Ctrl+V attaches images or files from the task list or any task details tab. Editable fields and dialogs keep native paste. On attachments, Ctrl+click toggles selection, Shift+click or Shift+Up/Down selects a range, Ctrl+Space toggles the focused row and Ctrl+A selects all. Delete or Alt+X detaches all selected files with one confirmation. View, double-click and Save as use the focused row. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
+        'Ctrl+V attaches images or files from the task list or any task details tab. Editable fields and dialogs keep native paste. On attachments, Ctrl+click toggles selection, Shift+click or Shift+arrows/Home/End/PageUp/PageDown selects a range, and Ctrl+Shift adds the range to the selection. Ctrl+Up/Down moves focus without selecting. Ctrl+Space toggles the focused row and Ctrl+A selects all. A check marks selected files; an arrow marks the View/Save as target, even when the list loses focus. Delete or Alt+X detaches all selected files with one confirmation. View, double-click and Save as use the focused row. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
   ),
   // ---------------------------------------------------------------- editor
   CommandSpec(

@@ -23,7 +23,7 @@ void main() {
       ];
       await tester.runAsync(h.controller.addFiles);
       ViewerSettingsDraft? saved;
-      await keyboard.mount(
+      final announcements = await keyboard.mount(
         tester,
         h,
         onSettingsChanged: (value) => saved = value,
@@ -52,7 +52,7 @@ void main() {
         () => tester.sendKeyEvent(LogicalKeyboardKey.delete),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Detach 3 attachments?'), findsOneWidget);
+      expect(find.text('Detach 3 attachments from ATT-001?'), findsOneWidget);
       await tester.tap(
         find.widgetWithText(CheckboxListTile, "Don't show this again (Alt+G)"),
       );
@@ -77,6 +77,10 @@ void main() {
       ]);
       expect(calls.where((args) => args.contains('show')), hasLength(1));
       expect(panel.list.focusedRowIndex, 0);
+      expect(
+        announcements.liveRegionText,
+        'Detached 3 attachments. Re-enable this confirmation in Settings > Confirmations.',
+      );
       expect(
         saved!.confirmationEnabled(ViewerConfirmation.attachmentDetach),
         isFalse,

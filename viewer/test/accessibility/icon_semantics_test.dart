@@ -50,7 +50,9 @@ void auditIcons(WidgetTester tester) {
         .toList();
     expect(icons, hasLength(1), reason: '$label has one leading glyph');
     expect(icons.single.semanticLabel, isNull, reason: label);
-    final name = tester.getSemantics(button).label;
+    // Read the platform-facing data: merged controls can keep their label on
+    // a child while the parent contributes the target-file hint.
+    final name = tester.getSemantics(button).getSemanticsData().label;
     final explicit = tester
         .widgetList<Semantics>(
           find.descendant(of: button, matching: find.byType(Semantics)),

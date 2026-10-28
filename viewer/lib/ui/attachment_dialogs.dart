@@ -270,7 +270,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
               AttachmentConfirmationDialog(
                 title: selected.length == 1
                     ? 'Detach ${selected.single.name} from ${c.task.canonicalId}?'
-                    : 'Detach ${selected.length} attachments?',
+                    : 'Detach ${selected.length} attachments from ${c.task.canonicalId}?',
                 content: selected.length == 1
                     ? "The file stays in the backlog's history."
                     : '${selected.map((item) => item.name).join('\n')}\n\nThe files stay in the backlog\'s history.',
@@ -341,6 +341,35 @@ class AttachmentPanelState extends State<AttachmentPanel> {
   String rowLabel(BuildContext context, AttachmentSummary item) =>
       '${item.name}, ${item.kind}, ${item.mediaType}, ${item.sizeLabel}, added ${viewerTimestamp(context, item.addedMs)}';
 
+  void _announceSelectionChange(VirtualListSelectionChange change) {
+    final count = change.indices.length;
+    final toggled = change.toggledIndex;
+    if (toggled != null) {
+      c.announce(
+        '${c.task.attachments[toggled].name} '
+        '${change.indices.contains(toggled) ? 'selected' : 'not selected'}, $count selected',
+      );
+    } else {
+      c.announce(
+        '$count ${count == 1 ? 'attachment' : 'attachments'} selected',
+      );
+    }
+  }
+
+  Widget _targetedAction(String action, Widget child) {
+    final target = item;
+    final hint = target == null
+        ? 'Select an attachment first'
+        : '$action ${target.name}';
+    return Tooltip(
+      message: hint,
+      excludeFromSemantics: true,
+      child: MergeSemantics(
+        child: Semantics(hint: hint, child: child),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     c.removeListener(_afterListUpdate);
@@ -389,21 +418,27 @@ class AttachmentPanelState extends State<AttachmentPanel> {
                 icon: const Icon(ViewerIcons.paste),
                 label: const Text('Paste (Alt+U)'),
               ),
-              TextButton.icon(
-                onPressed: view,
-                icon: const Icon(ViewerIcons.view),
-                label: const Text('View (Alt+W)'),
+              _targetedAction(
+                'View',
+                TextButton.icon(
+                  onPressed: view,
+                  icon: const Icon(ViewerIcons.view),
+                  label: const Text('View (Alt+W)'),
+                ),
               ),
-              TextButton.icon(
-                onPressed: () {
-                  if (item case final current?) {
-                    unawaited(c.saveAs(current));
-                  } else {
-                    c.noSelection();
-                  }
-                },
-                icon: const Icon(ViewerIcons.saveAs),
-                label: const Text('Save as (Alt+S)'),
+              _targetedAction(
+                'Save as',
+                TextButton.icon(
+                  onPressed: () {
+                    if (item case final current?) {
+                      unawaited(c.saveAs(current));
+                    } else {
+                      c.noSelection();
+                    }
+                  },
+                  icon: const Icon(ViewerIcons.saveAs),
+                  label: const Text('Save as (Alt+S)'),
+                ),
               ),
               Tooltip(
                 message:
@@ -445,9 +480,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
               child: AccessibleVirtualList(
                 controller: list,
                 multiSelect: true,
-                onSelectionChanged: (selected) => c.announce(
-                  '${selected.length} ${selected.length == 1 ? 'attachment' : 'attachments'} selected',
-                ),
+                onSelectionChanged: _announceSelectionChange,
                 itemCount: c.task.attachments.length,
                 motionKey: ListMotionKey(
                   scope: c.task.canonicalId,

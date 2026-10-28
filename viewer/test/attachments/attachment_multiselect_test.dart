@@ -71,9 +71,10 @@ void main() {
     }
   });
 
-  Future<void> mount(WidgetTester tester) async {
+  Future<void> mount(WidgetTester tester, {ThemeData? theme}) async {
     await tester.pumpWidget(
       MaterialApp(
+        theme: theme,
         home: Scaffold(body: AttachmentPanel(controller: rig.controller)),
       ),
     );
@@ -98,6 +99,210 @@ void main() {
           Tristate.isTrue)
         i,
   };
+
+  selectionTest(
+    'plain moves and programmatic selection do not announce counts',
+    (tester) async {
+      await mount(tester);
+      rig.announcements.clear();
+      await click(tester, 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      expect(rig.announcements, isEmpty);
+      await modified(
+        tester,
+        LogicalKeyboardKey.controlLeft,
+        () => click(tester, 4),
+      );
+      expect(rig.announcements.last, 'file-4.log selected, 2 selected');
+      await modified(
+        tester,
+        LogicalKeyboardKey.controlLeft,
+        () => tester.sendKeyEvent(LogicalKeyboardKey.space),
+      );
+      expect(rig.announcements.last, 'file-4.log not selected, 1 selected');
+      rig.announcements.clear();
+      await modified(
+        tester,
+        LogicalKeyboardKey.controlLeft,
+        () => tester.sendKeyEvent(LogicalKeyboardKey.arrowUp),
+      );
+      expect(panel.list.selectedIndices, {2});
+      expect(panel.item?.name, 'file-3.log');
+      expect(rig.announcements, isEmpty);
+      panel.list.selectIndex(1);
+      panel.list.goToIndex(0);
+      panel.focusList();
+      await tester.pumpAndSettle();
+      expect(rig.announcements, isEmpty);
+    },
+  );
+
+  selectionTest('Ctrl+Shift adds ranges and Shift navigation keeps an anchor', (
+    tester,
+  ) async {
+    await mount(tester);
+    await click(tester, 0);
+    await modified(
+      tester,
+      LogicalKeyboardKey.controlLeft,
+      () => click(tester, 3),
+    );
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await modified(
+      tester,
+      LogicalKeyboardKey.shiftLeft,
+      () => click(tester, 4),
+    );
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    expect(selected(tester), {0, 3, 4});
+    for (final key in [
+      LogicalKeyboardKey.home,
+      LogicalKeyboardKey.end,
+      LogicalKeyboardKey.pageUp,
+      LogicalKeyboardKey.pageDown,
+    ]) {
+      panel.list.goToIndex(2);
+      panel.focusList();
+      await tester.pumpAndSettle();
+      await modified(
+        tester,
+        LogicalKeyboardKey.shiftLeft,
+        () => tester.sendKeyEvent(key),
+      );
+      final lead = panel.list.selectedIndex!;
+      expect(lead, isNot(2));
+      expect(selected(tester), {
+        for (var i = 0; i < 5; i++)
+          if (i >= (lead < 2 ? lead : 2) && i <= (lead > 2 ? lead : 2)) i,
+      });
+    }
+  });
+
+  selectionTest(
+    'refresh insertion and reorder retain attachment IDs and lead',
+    (tester) async {
+      await mount(tester);
+      await click(tester, 1);
+      await modified(
+        tester,
+        LogicalKeyboardKey.controlLeft,
+        () => click(tester, 3),
+      );
+      final old = rig.controller.task.attachments.toList();
+      rig.controller.task.attachments
+        ..clear()
+        ..addAll([
+          old[3],
+          AttachmentSummary.fromJson({
+            ...att.metadata,
+            'id': 99,
+            'display_id': 'A99',
+            'name': 'new.log',
+          }),
+          old[4],
+          old[1],
+          old[0],
+          old[2],
+        ]);
+      await mount(tester);
+      expect(
+        panel.list.selectedIndices
+            .map((i) => panel.c.task.attachments[i].id)
+            .toSet(),
+        {13, 15},
+      );
+      expect(panel.item?.id, 15);
+      expect(panel.list.selectedIndex, 0);
+    },
+  );
+
+  for (final highContrast in [false, true]) {
+    selectionTest(
+      'selection lead and focus have independent non-colour cues highContrast=$highContrast',
+      (tester) async {
+        await mount(
+          tester,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.blue,
+              brightness: Brightness.light,
+              contrastLevel: highContrast ? 1 : 0,
+            ),
+          ),
+        );
+        Finder inside(int i, String key) =>
+            find.descendant(of: row(i), matching: find.byKey(ValueKey(key)));
+        Border outline(int i) =>
+            (tester
+                            .widget<DecoratedBox>(
+                              inside(i, 'multi-focus-outline'),
+                            )
+                            .decoration
+                        as BoxDecoration)
+                    .border!
+                as Border;
+        await click(tester, 0);
+        await modified(
+          tester,
+          LogicalKeyboardKey.controlLeft,
+          () => click(tester, 1),
+        );
+        expect(inside(1, 'multi-selection-check'), findsOneWidget);
+        expect(
+          tester.widget<Icon>(inside(1, 'multi-selection-check')).icon,
+          Icons.check,
+        );
+        expect(inside(1, 'multi-lead-marker'), findsOneWidget);
+        expect(
+          tester.widget<Icon>(inside(1, 'multi-lead-marker')).icon,
+          Icons.arrow_right,
+        );
+        expect(outline(1).top.width, greaterThan(0));
+        await modified(
+          tester,
+          LogicalKeyboardKey.controlLeft,
+          () => click(tester, 2),
+        );
+        expect(inside(2, 'multi-selection-check'), findsOneWidget);
+        expect(outline(2).top.width, greaterThan(0));
+        await modified(
+          tester,
+          LogicalKeyboardKey.controlLeft,
+          () => tester.sendKeyEvent(LogicalKeyboardKey.space),
+        );
+        expect(inside(2, 'multi-selection-check'), findsNothing);
+        expect(inside(2, 'multi-lead-marker'), findsOneWidget);
+        expect(outline(2).top.width, greaterThan(0));
+        expect(selected(tester), {0, 1});
+        final button = find.widgetWithText(TextButton, 'View (Alt+W)');
+        Focus.of(
+          tester.element(
+            find.descendant(of: button, matching: find.byType(Text)).last,
+          ),
+        ).requestFocus();
+        await tester.pumpAndSettle();
+        expect(outline(2).top.width, 0);
+        expect(inside(2, 'multi-lead-marker'), findsOneWidget);
+        expect(inside(1, 'multi-selection-check'), findsOneWidget);
+        expect(inside(1, 'multi-lead-marker'), findsNothing);
+        for (final action in ['View', 'Save as']) {
+          expect(find.byTooltip('$action file-2.log'), findsOneWidget);
+          final target = find.widgetWithText(
+            TextButton,
+            '$action (${action == 'View' ? 'Alt+W' : 'Alt+S'})',
+          );
+          final data = tester.getSemantics(target).getSemanticsData();
+          expect(data.hint, '$action file-2.log');
+          expect(
+            data.label,
+            '$action (${action == 'View' ? 'Alt+W' : 'Alt+S'})',
+          );
+          expect(data.flagsCollection.isButton, isTrue);
+        }
+      },
+    );
+  }
 
   selectionTest('Windows multi-selection gestures and row selected semantics', (
     tester,
@@ -185,7 +390,7 @@ void main() {
           );
         }
         await tester.pumpAndSettle();
-        expect(find.text('Detach 3 attachments?'), findsOneWidget);
+        expect(find.text('Detach 3 attachments from TSK-042?'), findsOneWidget);
         for (final i in [1, 2, 3]) {
           expect(find.textContaining('file-$i.log'), findsWidgets);
         }
@@ -213,6 +418,7 @@ void main() {
         expect(panel.list.focusedRowIndex, 1);
         expect(panel.item?.name, 'file-4.log');
         expect(panel.list.hasListFocus, isTrue);
+        expect(rig.announcements.last, 'Detached 3 attachments');
       },
     );
   }
@@ -348,7 +554,7 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.delete);
     await tester.pumpAndSettle();
-    expect(find.text('Detach 5 attachments?'), findsOneWidget);
+    expect(find.text('Detach 5 attachments from TSK-042?'), findsOneWidget);
     rig.mutation('attachment_detach');
     rig.controller.task.attachments.clear();
     await tester.tap(find.text('Detach (Alt+D)'));
@@ -382,6 +588,8 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('multi-selection-check')), findsNothing);
+      expect(find.byKey(const ValueKey('multi-lead-marker')), findsNothing);
       await click(tester, 1);
       await modified(
         tester,

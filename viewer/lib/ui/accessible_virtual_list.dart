@@ -24,6 +24,14 @@ class AccessibleRowSemantics {
   final String? value;
 }
 
+/// A user selection gesture worth announcing, separate from ordinary row focus
+/// speech and silent programmatic selection (for example after a detach).
+class VirtualListSelectionChange {
+  const VirtualListSelectionChange(this.indices, {this.toggledIndex});
+  final Set<int> indices;
+  final int? toggledIndex;
+}
+
 /// Imperative handle used by region shortcut handlers (F1/F2), End
 /// and post-save selection retention.
 class VirtualListController extends ChangeNotifier {
@@ -158,7 +166,10 @@ class AccessibleVirtualList extends StatefulWidget {
   /// Opt-in Windows selection gestures. Other lists retain their original
   /// focus-is-selection contract, including Ctrl+Space activation.
   final bool multiSelect;
-  final ValueChanged<Set<int>>? onSelectionChanged;
+
+  /// User selection changes requiring speech. Ordinary single-row moves and
+  /// programmatic selection/focus restoration never call this callback.
+  final ValueChanged<VirtualListSelectionChange>? onSelectionChanged;
 
   /// Allow embedded row actions to remain independently accessible.
   final bool excludeRowChildSemantics;
@@ -500,6 +511,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     bool extend = false,
     bool toggle = false,
     bool preserve = false,
+    bool additive = false,
+    bool userInitiated = false,
     required bool notify,
   }) {
     final before = _selection;
@@ -515,6 +528,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         );
         _rangeAnchor = anchor;
         _selectedIndices = {
+          if (additive) ..._selectedIndices,
           for (
             var i = math.min(anchor, index);
             i <= math.max(anchor, index);
@@ -537,8 +551,19 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       _notifiedIndex = index;
       widget.onSelectedIndexChanged?.call(index);
     }
-    if (notify && !setEquals(before, _selectedIndices)) {
-      widget.onSelectionChanged?.call(_selection);
+    if (notify &&
+        userInitiated &&
+        !setEquals(before, _selectedIndices) &&
+        (extend ||
+            toggle ||
+            before.length > 1 ||
+            _selectedIndices.length > 1)) {
+      widget.onSelectionChanged?.call(
+        VirtualListSelectionChange(
+          _selection,
+          toggledIndex: toggle ? index : null,
+        ),
+      );
     }
   }
 
@@ -547,6 +572,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     moveFocus: true,
     forceFocus: true,
     reveal: false,
+    userInitiated: true,
+    additive: widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
     extend: widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
     toggle:
         widget.multiSelect &&
@@ -562,6 +589,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     bool extend = false,
     bool toggle = false,
     bool preserveSelection = false,
+    bool additive = false,
+    bool userInitiated = false,
   }) {
     if (widget.itemCount == 0) {
       return;
@@ -576,6 +605,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         extend: extend,
         toggle: toggle,
         preserve: preserveSelection,
+        additive: additive,
+        userInitiated: userInitiated,
         notify: true,
       );
     } else {
@@ -622,19 +653,19 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       return;
     }
     final current = _selectedIndex ?? 0;
-    final target = current + delta;
+    final target = widget.multiSelect
+        ? (current + delta).clamp(0, widget.itemCount - 1)
+        : current + delta;
     if (target < 0 || target >= widget.itemCount) {
-      if (widget.multiSelect &&
-          !HardwareKeyboard.instance.isShiftPressed &&
-          !HardwareKeyboard.instance.isControlPressed) {
-        _setSelectedIndex(current, notify: true);
-      }
       return; // Stay in place at a boundary without repeated speech.
     }
     _requestIndex(
       target,
       moveFocus: true,
       extend: widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
+      additive:
+          widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+      userInitiated: true,
       preserveSelection:
           widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
     );
@@ -883,7 +914,12 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       if (key == LogicalKeyboardKey.space) {
         if (event is KeyDownEvent && _selectedIndex != null) {
           final index = _selectedIndex!;
-          _changeMultiSelection(index, toggle: true, notify: true);
+          _changeMultiSelection(
+            index,
+            toggle: true,
+            notify: true,
+            userInitiated: true,
+          );
         }
         return KeyEventResult.handled;
       }
@@ -894,7 +930,9 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
           _rememberSelection();
         });
         if (!setEquals(before, _selectedIndices)) {
-          widget.onSelectionChanged?.call(_selection);
+          widget.onSelectionChanged?.call(
+            VirtualListSelectionChange(_selection),
+          );
         }
         return KeyEventResult.handled;
       }
@@ -918,14 +956,34 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     if (key == LogicalKeyboardKey.home) {
       // A relative move can never reach row zero from inside the list, so ask
       // for the first row directly, exactly like End asks for the last one.
-      if (_selectedIndex != 0) {
-        _requestIndex(0, moveFocus: true);
+      if (_selectedIndex != 0 || widget.multiSelect) {
+        _requestIndex(
+          0,
+          moveFocus: true,
+          extend:
+              widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
+          additive:
+              widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+          preserveSelection:
+              widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+          userInitiated: true,
+        );
       }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.end) {
-      if (_selectedIndex != widget.itemCount - 1) {
-        _requestIndex(widget.itemCount - 1, moveFocus: true);
+      if (_selectedIndex != widget.itemCount - 1 || widget.multiSelect) {
+        _requestIndex(
+          widget.itemCount - 1,
+          moveFocus: true,
+          extend:
+              widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
+          additive:
+              widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+          preserveSelection:
+              widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+          userInitiated: true,
+        );
       }
       return KeyEventResult.handled;
     }
@@ -1133,7 +1191,8 @@ class _VirtualRowState extends State<_VirtualRow> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
-    final stroke = _focused ? 3.0 : (widget.selected ? 2.0 : 0.0);
+    final multi = widget.owner.widget.multiSelect;
+    final stroke = _focused ? 3.0 : (!multi && widget.selected ? 2.0 : 0.0);
     final borderColor = _focused ? colors.onSurface : colors.primary;
     return Focus(
       focusNode: _node,
@@ -1158,6 +1217,7 @@ class _VirtualRowState extends State<_VirtualRow> {
           widget.index,
           moveFocus: true,
           forceFocus: true,
+          userInitiated: true,
         ),
         child: Listener(
           onPointerDown: widget.owner.widget.activateOnDoubleTap
@@ -1209,6 +1269,7 @@ class _VirtualRowState extends State<_VirtualRow> {
                       ? colors.onSurface.withValues(alpha: .06)
                       : colors.onSurface.withValues(alpha: 0),
                   child: DecoratedBox(
+                    key: multi ? const ValueKey('multi-focus-outline') : null,
                     decoration: BoxDecoration(
                       border: Border(
                         left: stroke > 0
@@ -1230,7 +1291,59 @@ class _VirtualRowState extends State<_VirtualRow> {
                     ),
                     child: ExcludeSemantics(
                       excluding: widget.owner.widget.excludeRowChildSemantics,
-                      child: widget.child,
+                      child: multi
+                          ? Padding(
+                              padding: const EdgeInsets.all(4),
+                              child: ColoredBox(
+                                color: widget.selected
+                                    ? colors.primaryContainer
+                                    : colors.surface,
+                                child: DefaultTextStyle.merge(
+                                  style: TextStyle(
+                                    color: widget.selected
+                                        ? colors.onPrimaryContainer
+                                        : colors.onSurface,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      SizedBox(
+                                        width: 24,
+                                        child: widget.selected
+                                            ? Icon(
+                                                Icons.check,
+                                                key: const ValueKey(
+                                                  'multi-selection-check',
+                                                ),
+                                                size: 20,
+                                                color:
+                                                    colors.onPrimaryContainer,
+                                              )
+                                            : null,
+                                      ),
+                                      SizedBox(
+                                        width: 20,
+                                        child:
+                                            widget.index ==
+                                                widget.owner._selectedIndex
+                                            ? Icon(
+                                                Icons.arrow_right,
+                                                key: const ValueKey(
+                                                  'multi-lead-marker',
+                                                ),
+                                                size: 20,
+                                                color: widget.selected
+                                                    ? colors.onPrimaryContainer
+                                                    : colors.onSurface,
+                                              )
+                                            : null,
+                                      ),
+                                      Expanded(child: widget.child),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            )
+                          : widget.child,
                     ),
                   ),
                 ),
