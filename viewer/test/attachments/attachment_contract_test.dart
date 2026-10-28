@@ -576,6 +576,66 @@ void main() {
     expect(rig.args.last, 'clipboard');
     expect(rig.refreshes, 0);
   });
+  testWidgets('clipboard phase error offers an explicit retry of inspection', (
+    tester,
+  ) async {
+    await rig.probe();
+    const message =
+        'Clipboard did not respond while reading the image. Try again in a moment. (phase: reading_image)';
+    rig.launcher.exit = 6;
+    rig.launcher.stderrBytes = [
+      utf8.encode(
+        jsonEncode({
+          'schema_version': 1,
+          'error': {'code': 'interop', 'message': message},
+        }),
+      ),
+    ];
+    await rig.controller.paste(
+      (_) async => fail('must not confirm failed inspect'),
+    );
+    rig.controller.editing = true;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AttachmentPanel(controller: rig.controller)),
+      ),
+    );
+    expect(find.text(message), findsOneWidget);
+    final retry = find.widgetWithText(TextButton, 'Retry clipboard');
+    expect(retry, findsOneWidget);
+    expect(tester.widget<TextButton>(retry).onPressed, isNull);
+    await rig.controller.paste(
+      (_) async => fail('must not inspect while editing'),
+    );
+    expect(rig.launcher.launches.length, 2); // No automatic retries.
+    rig.controller.editing = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: AttachmentPanel(controller: rig.controller)),
+      ),
+    );
+    rig.launcher.exit = 0;
+    rig.launcher.stderrBytes = [];
+    rig.launcher.replyWith(
+      envelope('attachment_clipboard', {
+        'items': [],
+        'skipped': [],
+        'token': 'a' * 64,
+      }, project: false),
+    );
+    Focus.of(tester.element(find.text('Retry clipboard'))).requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(rig.args.last, 'clipboard');
+    expect(rig.launcher.launches.length, 3);
+    expect(find.text('Attach to TSK-042?'), findsOneWidget);
+    expect(find.text('Retry clipboard'), findsNothing);
+    await tester.tap(find.text('Cancel (Alt+C)'));
+    await tester.pumpAndSettle();
+    expect(rig.refreshes, 0);
+    expect(rig.launcher.launches.length, 3);
+  });
   for (final code in ['clipboard_empty', 'clipboard_changed']) {
     test('CLI $code is surfaced without resending', () async {
       await rig.probe();
@@ -598,6 +658,7 @@ void main() {
             : 'The clipboard changed; paste again',
       );
       expect(rig.launcher.launches.length, 2);
+      expect(rig.controller.clipboardRetryAvailable, isFalse);
     });
   }
   test(

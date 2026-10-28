@@ -35,6 +35,7 @@ class AttachmentController extends ChangeNotifier {
   bool _disposed = false;
   bool _dialogOpen = false;
   String? notice;
+  bool clipboardRetryAvailable = false;
   String? get pendingRequestId => client.pendingReceipts
       .where(
         (r) =>
@@ -80,6 +81,7 @@ class AttachmentController extends ChangeNotifier {
 
   Future<void> _write(List<String> command, String success) async {
     if (!enabled) return;
+    clipboardRetryAvailable = false;
     busy = true;
     _busyMessage = command.first == 'detach' ? 'Detaching...' : 'Attaching...';
     _notify();
@@ -165,6 +167,8 @@ class AttachmentController extends ChangeNotifier {
   Future<void> paste(Future<bool> Function(AttachmentClipboard) confirm) async {
     if (!enabled) return;
     final version = task.version;
+    clipboardRetryAvailable = false;
+    notice = null;
     _busyMessage = 'Reading clipboard...';
     busy = true;
     _notify();
@@ -176,6 +180,9 @@ class AttachmentController extends ChangeNotifier {
         ], clipboard: true)).data,
       );
     } on ViewerFailure catch (failure) {
+      clipboardRetryAvailable =
+          failure is ViewerTimeoutFailure ||
+          (failure is ViewerCliErrorFailure && failure.code == 'interop');
       _say(attachmentFailureMessage(failure));
     } finally {
       busy = false;

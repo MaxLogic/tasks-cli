@@ -237,6 +237,11 @@ class AttachmentPanelState extends State<AttachmentPanel> {
           ),
           if (c.disabledReason != null) Text(c.disabledReason!),
           if (c.notice != null) Text(c.notice!),
+          if (c.clipboardRetryAvailable)
+            TextButton(
+              onPressed: c.enabled ? paste : null,
+              child: const Text('Retry clipboard'),
+            ),
           if (c.pendingRequestId != null)
             TextButton.icon(
               onPressed: c.busy ? null : c.recover,
