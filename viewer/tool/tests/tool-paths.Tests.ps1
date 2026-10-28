@@ -82,7 +82,8 @@ Describe 'verification build routing' {
             -WorkingRoot $working -PackageToolPath "$PSScriptRoot/../package.ps1" -UiaProbeToolPath "$PSScriptRoot/../verify-release-uia.ps1" -SkipReleaseUia
         $result.Ok | Should -BeFalse
         Should -Invoke Invoke-CapturedProcess -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq 'cargo' -and $Arguments[3] -eq '--target-dir' -and $Arguments[4] -eq $cliTarget
+            $targetIndex = [array]::IndexOf($Arguments, '--target-dir')
+            $FilePath -eq 'cargo' -and $targetIndex -ge 0 -and $Arguments[$targetIndex + 1] -eq $cliTarget
         }
         Test-Path -LiteralPath $result.SummaryPath | Should -BeTrue
         @(Get-ChildItem -LiteralPath $repository -Recurse -File).Count | Should -Be 0

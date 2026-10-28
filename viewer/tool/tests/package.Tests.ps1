@@ -219,6 +219,150 @@ Describe 'package.ps1 bundle helpers' {
     }
 }
 
+Describe 'package.ps1 unnamed-stream copy' {
+    BeforeEach {
+        $script:Root = New-PackageTestRoot
+        $script:Source = Join-Path $script:Root 'source'
+        New-Item -ItemType Directory -Path $script:Source | Out-Null
+        $script:PayloadFile = Join-Path $script:Source 'payload.bin'
+        $script:Cli = Join-Path $script:Root 'tasks.exe'
+        Set-Content $script:PayloadFile 'validated payload'
+        Set-Content $script:Cli 'validated cli'
+    }
+    AfterEach { Remove-Item -LiteralPath $script:Root -Recurse -Force }
+
+    It 'copies only unnamed streams when ADS is added <Timing> stamping' -ForEach @(
+        @{ Timing = 'before' }
+        @{ Timing = 'after' }
+    ) {
+        if ($Timing -eq 'before') {
+            Set-Content -LiteralPath $script:PayloadFile -Stream unvalidated -Value 'secret payload stream'
+            Set-Content -LiteralPath $script:Cli -Stream unvalidated -Value 'secret cli stream'
+        }
+        @{ bundle_files = @(Get-PackageBundleManifest -Root $script:Source) } |
+            ConvertTo-Json | Set-Content (Join-Path $script:Source 'viewer-build-stamp.json')
+        if ($Timing -eq 'after') {
+            Set-Content -LiteralPath $script:PayloadFile -Stream unvalidated -Value 'secret payload stream'
+            Set-Content -LiteralPath $script:Cli -Stream unvalidated -Value 'secret cli stream'
+        }
+        $out = Join-Path $script:Root 'out'
+        Copy-PackageBundle -SourceRoot $script:Source -CliExecutable $script:Cli -DestinationRoot $out
+        foreach ($file in Get-ChildItem -LiteralPath $out -Recurse -File -Force) {
+            @(Get-Item -LiteralPath $file.FullName -Stream * | Where-Object Stream -NE ':$DATA').Count | Should -Be 0
+        }
+        (Get-FileHash (Join-Path $out 'payload.bin')).Hash | Should -Be (Get-FileHash $script:PayloadFile).Hash
+        (Get-FileHash (Join-Path $out 'tasks.exe')).Hash | Should -Be (Get-FileHash $script:Cli).Hash
+        # The source ADS really existed and has not been removed to make the test pass.
+        Get-Content -LiteralPath $script:PayloadFile -Stream unvalidated | Should -Be 'secret payload stream'
+        Get-Content -LiteralPath $script:Cli -Stream unvalidated | Should -Be 'secret cli stream'
+    }
+
+    It 'rejects a hash mismatch from the bytes actually copied' {
+        $out = Join-Path $script:Root 'copied.bin'
+        { Copy-PackageFile -SourcePath $script:PayloadFile -DestinationPath $out -ExpectedSha256 ('0' * 64) } |
+            Should -Throw '*copied bundle manifest mismatch*'
+    }
+
+    It 'refuses explicitly named stream paths for either side of the copy' {
+        Set-Content -LiteralPath $script:PayloadFile -Stream unvalidated -Value 'named bytes'
+        $out = Join-Path $script:Root 'copied.bin'
+        { Copy-PackageFile -SourcePath "$($script:PayloadFile):unvalidated" -DestinationPath $out `
+                -ExpectedSha256 (Get-FileHash $script:PayloadFile).Hash } | Should -Throw '*unnamed data stream*'
+        { Copy-PackageFile -SourcePath $script:PayloadFile -DestinationPath "$($out):unvalidated" `
+                -ExpectedSha256 (Get-FileHash $script:PayloadFile).Hash } | Should -Throw '*unnamed data stream*'
+        Test-Path $out | Should -BeFalse
+    }
+
+    It 'creates a new file instead of reusing a destination with an ADS' {
+        $out = Join-Path $script:Root 'existing.bin'
+        Set-Content $out 'existing'
+        Set-Content -LiteralPath $out -Stream unvalidated -Value 'existing ADS'
+        { Copy-PackageFile -SourcePath $script:PayloadFile -DestinationPath $out `
+                -ExpectedSha256 (Get-FileHash $script:PayloadFile).Hash } | Should -Throw '*already exists*'
+        Get-Content $out | Should -Be 'existing'
+        Get-Content -LiteralPath $out -Stream unvalidated | Should -Be 'existing ADS'
+    }
+}
+
+Describe 'package.ps1 exact bundle traversal' {
+    BeforeEach {
+        $script:Root = New-PackageTestRoot
+        $script:Links = @()
+        $script:Source = Join-Path $script:Root 'source'
+        $script:Payload = Join-Path $script:Root 'payload'
+        New-Item -ItemType Directory -Path $script:Source, $script:Payload | Out-Null
+        Set-Content (Join-Path $script:Payload 'payload.bin') 'original'
+        $script:Cli = Join-Path $script:Root 'tasks.exe'
+        Set-Content $script:Cli 'cli'
+    }
+    AfterEach {
+        foreach ($link in $script:Links) { Remove-Item -LiteralPath $link -Force }
+        Remove-Item -LiteralPath $script:Root -Recurse -Force
+    }
+    It 'refuses <Kind> during hashing and copying' -ForEach @(
+        @{ Kind = 'junction-backed replacement' }
+        @{ Kind = 'symlinked file' }
+        @{ Kind = 'nested junction' }
+        @{ Kind = 'ancestor junction' }
+    ) {
+        $link = Join-Path $script:Source 'data'
+        switch ($Kind) {
+            'junction-backed replacement' {
+                New-Item -ItemType Junction -Path $link -Target $script:Payload | Out-Null
+            }
+            'symlinked file' {
+                $link = Join-Path $script:Source 'payload.bin'
+                New-Item -ItemType SymbolicLink -Path $link -Target (Join-Path $script:Payload 'payload.bin') | Out-Null
+            }
+            'nested junction' {
+                New-Item -ItemType Directory -Path (Join-Path $script:Source 'nested') | Out-Null
+                $link = Join-Path $script:Source 'nested/data'
+                New-Item -ItemType Junction -Path $link -Target $script:Payload | Out-Null
+            }
+            'ancestor junction' {
+                $link = Join-Path $script:Root 'redirected'
+                New-Item -ItemType Junction -Path $link -Target $script:Root | Out-Null
+                $script:Source = Join-Path $link 'source'
+            }
+        }
+        $script:Links += $link
+        { Get-PackageBundleManifest -Root $script:Source } | Should -Throw '*bundle*reparse point*'
+        Set-Content (Join-Path $script:Payload 'payload.bin') 'replacement'
+        { Get-PackageBundleManifest -Root $script:Source } | Should -Throw '*bundle*reparse point*'
+        $out = Join-Path $script:Root 'out'
+        { Copy-PackageBundle -SourceRoot $script:Source -CliExecutable $script:Cli -DestinationRoot $out } |
+            Should -Throw '*bundle*reparse point*'
+        Test-Path $out | Should -BeFalse
+        { Invoke-PackageTool -ViewerRoot $script:Root -RepositoryRoot $script:Root -PackageSourceRoot $script:Source } |
+            Should -Throw '*bundle*reparse point*'
+    }
+
+    It 'copies exactly the manifested payload set over generated directory trees (seed 4702, 12 cases)' {
+        $random = [Random]::new(4702)
+        foreach ($case in 0..11) {
+            $source = Join-Path $script:Source "case-$case"
+            $out = Join-Path $script:Root "out-$case"
+            New-Item -ItemType Directory -Path $source | Out-Null
+            foreach ($index in 0..($random.Next(1, 12))) {
+                $relative = ('level-{0}/child {1}/file-{2}.bin' -f $random.Next(0, 4), $random.Next(0, 4), $index)
+                $path = Join-Path $source $relative
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+                $bytes = [byte[]]::new($random.Next(0, 1024))
+                $random.NextBytes($bytes)
+                [IO.File]::WriteAllBytes($path, $bytes)
+            }
+            Set-Content (Join-Path $source 'viewer-build-stamp.json') '{"fixture":true}'
+            $manifest = @(Get-PackageBundleManifest -Root $source -IncludeStamp)
+            Copy-PackageBundle -SourceRoot $source -CliExecutable $script:Cli -DestinationRoot $out
+            $copied = @(Get-PackageBundleManifest -Root $out -IncludeStamp | Where-Object { $_ -notlike '*  tasks.exe' })
+            $copied | Should -Be $manifest
+            $actualFiles = @(Get-ChildItem -LiteralPath $out -Recurse -File)
+            $actualFiles.Count | Should -Be ($manifest.Count + 1)
+            (Get-FileHash (Join-Path $out 'tasks.exe')).Hash | Should -Be (Get-FileHash $script:Cli).Hash
+        }
+    }
+}
+
 Describe 'package.ps1 launch probe' {
     BeforeEach {
         $script:Root = New-PackageTestRoot
@@ -259,9 +403,41 @@ Describe 'package.ps1 launch probe' {
     }
 }
 
+Describe 'package.ps1 source fingerprint' {
+    BeforeEach {
+        $script:Root = New-PackageTestRoot
+        Mock Get-FileSha256 { throw 'Fingerprint must work before the announcement tool is loaded.' }
+        & git -C $script:Root init --quiet
+        New-Item -ItemType Directory -Path (Join-Path $script:Root 'lib'), (Join-Path $script:Root 'windows') | Out-Null
+        Set-Content (Join-Path $script:Root 'pubspec.yaml') 'name: fixture'
+        Set-Content (Join-Path $script:Root 'lib/main.dart') 'original source'
+        Set-Content (Join-Path $script:Root 'windows/runner.cpp') 'original runner'
+        & git -C $script:Root add .
+    }
+    AfterEach { Remove-Item -LiteralPath $script:Root -Recurse -Force }
+    It 'changes for dirty Dart, pubspec, Windows and untracked source inputs' {
+        $previous = Get-ViewerSourceFingerprint -ViewerRoot $script:Root
+        foreach ($relative in @('lib/main.dart', 'pubspec.yaml', 'windows/runner.cpp', 'lib/new.dart')) {
+            Set-Content (Join-Path $script:Root $relative) 'changed source'
+            $current = Get-ViewerSourceFingerprint -ViewerRoot $script:Root
+            $current | Should -Not -Be $previous
+            $previous = $current
+        }
+    }
+    It 'ignores generated release output and is stable for unchanged sources' {
+        $before = Get-ViewerSourceFingerprint -ViewerRoot $script:Root
+        New-Item -ItemType Directory -Path (Join-Path $script:Root 'build') | Out-Null
+        Set-Content (Join-Path $script:Root 'build/output.exe') 'generated'
+        Get-ViewerSourceFingerprint -ViewerRoot $script:Root | Should -Be $before
+    }
+}
+
 Describe 'package.ps1 batch guards' {
     BeforeEach {
         $script:Root = New-PackageTestRoot
+        Mock Invoke-PackageFlutterBuild {}
+        Mock Get-ViewerSourceFingerprint { 'fixture-inputs' }
+        Mock Get-SourceIdentity { [pscustomobject]@{ Commit = 'fixture'; Dirty = $false } }
     }
 
     AfterEach {
@@ -269,6 +445,9 @@ Describe 'package.ps1 batch guards' {
     }
 
     It 'reports missing inputs instead of writing a bundle' {
+        $source = Join-Path $script:Root 'viewer/build/windows/x64/runner/Release'
+        New-Item -ItemType Directory -Force -Path $source | Out-Null
+        Set-Content (Join-Path $source 'tasks_viewer.exe') 'built stub'
         $outputRoot = Join-Path -Path $script:Root -ChildPath 'target/viewer-release'
         $result = Invoke-PackageTool -ViewerRoot (Join-Path $script:Root 'viewer') `
             -RepositoryRoot $script:Root -OutputRoot $outputRoot
@@ -277,13 +456,21 @@ Describe 'package.ps1 batch guards' {
         Test-Path -LiteralPath $outputRoot | Should -BeFalse
     }
 
-    It 'packages a selected source and CLI entirely under the lane roots' {
+    It 'packages under lane roots and preserves existing output on copy corruption: <CorruptCopy>, ADS <StreamTiming>' -ForEach @(
+        @{ CorruptCopy = 'none'; StreamTiming = 'none' }
+        @{ CorruptCopy = 'replacement'; StreamTiming = 'none' }
+        @{ CorruptCopy = 'missing'; StreamTiming = 'none' }
+        @{ CorruptCopy = 'extra'; StreamTiming = 'none' }
+        @{ CorruptCopy = 'source-during-copy'; StreamTiming = 'none' }
+        @{ CorruptCopy = 'none'; StreamTiming = 'before' }
+        @{ CorruptCopy = 'none'; StreamTiming = 'after' }
+    ) {
         $repository = Join-Path $script:Root 'repository'
         $viewer = Join-Path $repository 'viewer'
         $lane = Join-Path $script:Root 'lane'
         $source = Join-Path $lane 'flutter-release'
         $cliTarget = Join-Path $lane 'rust'
-        $output = Join-Path $lane 'viewer-release'
+        $output = Join-Path $lane 'nested/viewer-release'
         $evidence = Join-Path $lane 'evidence'
         New-FakeBundle -Root $source
         New-Item -ItemType Directory -Force -Path (Join-Path $cliTarget 'release'), (Join-Path $viewer 'assets/announcements') | Out-Null
@@ -297,12 +484,73 @@ Describe 'package.ps1 batch guards' {
         Mock Test-AnnouncementBundle { [pscustomobject]@{ Findings = @(); Verified = @([pscustomobject]@{ Bytes = 1 }) } }
         Mock Get-SourceIdentity { [pscustomobject]@{ Commit = 'fixture'; Dirty = $false } }
 
+        $streamTargets = @((Join-Path $source 'tasks_viewer.exe'), (Join-Path $source 'data/marker.txt'), (Join-Path $cliTarget 'release/tasks.exe'))
+        if ($StreamTiming -eq 'before') {
+            foreach ($target in $streamTargets) { Set-Content -LiteralPath $target -Stream unvalidated -Value 'before stamping' }
+        }
+        @{ source_commit = 'fixture'; source_fingerprint = 'fixture-inputs' } |
+            ConvertTo-Json | Set-Content (Join-Path $source 'viewer-build-stamp.json')
+        # Matching source fields alone must not admit arbitrary stub executables.
+        { Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $repository `
+                -CliTargetDirectory $cliTarget -PackageParentRoot $lane -PackageSourceRoot $source `
+                -OutputRoot $output -EvidenceRoot $evidence -WorkingRoot $script:Root -AnnouncementToolPath $announcementTool } |
+            Should -Throw '*prebuilt*bundle manifest*'
+        Test-Path -LiteralPath $output | Should -BeFalse
+        @{ source_commit = 'fixture'; source_fingerprint = 'fixture-inputs'
+            bundle_files = @(Get-PackageBundleManifest -Root $source) } |
+            ConvertTo-Json | Set-Content (Join-Path $source 'viewer-build-stamp.json')
+        if ($StreamTiming -eq 'after') {
+            foreach ($target in $streamTargets) { Set-Content -LiteralPath $target -Stream unvalidated -Value 'after stamping' }
+        }
+        if ($StreamTiming -ne 'none') {
+            Set-Content -LiteralPath (Join-Path $source 'viewer-build-stamp.json') -Stream unvalidated -Value 'stamp ADS'
+            New-Item -ItemType Directory -Force -Path $output | Out-Null
+            Set-Content (Join-Path $output 'previous.bin') 'previous output'
+            Set-Content -LiteralPath (Join-Path $output 'previous.bin') -Stream unvalidated -Value 'previous ADS'
+        }
         $before = @(Get-ChildItem -LiteralPath $repository -Recurse -File | ForEach-Object { "$($_.FullName):$((Get-FileHash -LiteralPath $_.FullName).Hash)" })
+        if ($CorruptCopy -ne 'none') {
+            $script:CopyCorruption = $CorruptCopy
+            $script:RealCopy = (Get-Command Copy-PackageBundle).ScriptBlock
+            Mock Copy-PackageBundle {
+                if ($script:CopyCorruption -eq 'source-during-copy') {
+                    Set-Content (Join-Path $SourceRoot 'tasks_viewer.exe') 'source changed after validation'
+                }
+                & $script:RealCopy -SourceRoot $SourceRoot -CliExecutable $CliExecutable -DestinationRoot $DestinationRoot -ExpectedManifest $ExpectedManifest
+                switch ($script:CopyCorruption) {
+                    'replacement' { Set-Content (Join-Path $DestinationRoot 'tasks_viewer.exe') 'copy corrupted' }
+                    'missing' { Remove-Item -LiteralPath (Join-Path $DestinationRoot 'tasks_viewer.exe') }
+                    'extra' { Set-Content (Join-Path $DestinationRoot 'extra.bin') 'unexpected payload' }
+                }
+            }
+            New-Item -ItemType Directory -Path $output | Out-Null
+            Set-Content (Join-Path $output 'keep.txt') 'existing output'
+            { Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $repository `
+                    -CliTargetDirectory $cliTarget -PackageParentRoot $lane -PackageSourceRoot $source `
+                    -OutputRoot $output -EvidenceRoot $evidence -WorkingRoot $script:Root -AnnouncementToolPath $announcementTool } |
+                Should -Throw '*copied bundle manifest*'
+            Get-Content (Join-Path $output 'keep.txt') | Should -Be 'existing output'
+            @(Get-ChildItem -LiteralPath $lane -Directory -Filter '.viewer-package-stage-*').Count | Should -Be 0
+            return
+        }
         $result = Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $repository `
             -CliTargetDirectory $cliTarget -PackageParentRoot $lane -PackageSourceRoot $source `
             -OutputRoot $output -EvidenceRoot $evidence -WorkingRoot $script:Root -AnnouncementToolPath $announcementTool
 
         $result.Ok | Should -BeTrue
+        foreach ($file in Get-ChildItem -LiteralPath $output -Recurse -File -Force) {
+            @(Get-Item -LiteralPath $file.FullName -Stream * | Where-Object Stream -NE ':$DATA').Count | Should -Be 0
+        }
+        if ($StreamTiming -ne 'none') {
+            Test-Path (Join-Path $output 'previous.bin') | Should -BeFalse
+            foreach ($target in $streamTargets) {
+                Get-Content -LiteralPath $target -Stream unvalidated | Should -Be "$StreamTiming stamping"
+            }
+        }
+        $metadata = Get-Content (Join-Path $output 'bundle-metadata.json') -Raw | ConvertFrom-Json
+        $metadata.source_commit | Should -Be 'fixture'
+        $metadata.viewer_source_fingerprint | Should -Be 'fixture-inputs'
+        Should -Invoke Invoke-PackageFlutterBuild -Times 0 -Exactly
         $result.OutputRoot | Should -Be $output
         $result.LaunchTest.Ok | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $evidence 'package-summary.json') | Should -BeTrue
@@ -310,6 +558,86 @@ Describe 'package.ps1 batch guards' {
         $after = @(Get-ChildItem -LiteralPath $repository -Recurse -File | ForEach-Object { "$($_.FullName):$((Get-FileHash -LiteralPath $_.FullName).Hash)" })
         $after | Should -Be $before
         Test-Path -LiteralPath (Join-Path $repository 'target') | Should -BeFalse
+    }
+
+    It 'builds Flutter by default even if an old release directory exists' {
+        $viewer = Join-Path $script:Root 'viewer'
+        $source = Join-Path $viewer 'build/windows/x64/runner/Release'
+        New-Item -ItemType Directory -Force -Path $source | Out-Null
+        Set-Content (Join-Path $source 'tasks_viewer.exe') 'old bundle'
+        # Missing CLI prevents packaging, but must never prevent the default rebuild.
+        $result = Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $script:Root
+        $result.Ok | Should -BeFalse
+        Should -Invoke Invoke-PackageFlutterBuild -Times 1 -Exactly -ParameterFilter { $ViewerRoot -eq $viewer }
+    }
+
+    It 'preserves existing output and invalidates the stamp when the default build fails' {
+        $viewer = Join-Path $script:Root 'viewer'
+        $source = Join-Path $viewer 'build/windows/x64/runner/Release'
+        $output = Join-Path $script:Root 'target/viewer-release'
+        New-Item -ItemType Directory -Force -Path $source, $output | Out-Null
+        Set-Content (Join-Path $source 'viewer-build-stamp.json') '{}'
+        Set-Content (Join-Path $output 'keep.txt') 'existing package'
+        Mock Invoke-PackageFlutterBuild { throw 'intentional build failure' }
+        { Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $script:Root } |
+            Should -Throw '*intentional build failure*'
+        Test-Path (Join-Path $source 'viewer-build-stamp.json') | Should -BeFalse
+        Get-Content (Join-Path $output 'keep.txt') | Should -Be 'existing package'
+    }
+
+    It 'refuses an unstamped prebuilt bundle without replacing existing output' {
+        $source = Join-Path $script:Root 'prebuilt'
+        $output = Join-Path $script:Root 'target/viewer-release'
+        New-Item -ItemType Directory -Force -Path $source, $output | Out-Null
+        Set-Content (Join-Path $output 'keep.txt') 'existing package'
+        Mock Get-SourceIdentity { [pscustomobject]@{ Commit = 'fixture'; Dirty = $false } }
+        { Invoke-PackageTool -ViewerRoot $script:Root -RepositoryRoot $script:Root -PackageSourceRoot $source } |
+            Should -Throw '*prebuilt*stamp*'
+        Get-Content (Join-Path $output 'keep.txt') | Should -Be 'existing package'
+        Should -Invoke Invoke-PackageFlutterBuild -Times 0 -Exactly
+    }
+
+    It 'refuses a prebuilt bundle from another commit or older source inputs' -ForEach @(
+        @{ Commit = 'old-commit'; Fingerprint = 'fixture-inputs' }
+        @{ Commit = 'fixture'; Fingerprint = 'old-inputs' }
+    ) {
+        $source = Join-Path $script:Root 'prebuilt'
+        New-Item -ItemType Directory -Force -Path $source | Out-Null
+        @{ source_commit = $Commit; source_fingerprint = $Fingerprint } |
+            ConvertTo-Json | Set-Content (Join-Path $source 'viewer-build-stamp.json')
+        Mock Get-SourceIdentity { [pscustomobject]@{ Commit = 'fixture'; Dirty = $false } }
+        { Invoke-PackageTool -ViewerRoot $script:Root -RepositoryRoot $script:Root -PackageSourceRoot $source } |
+            Should -Throw '*prebuilt*stale*'
+        Test-Path (Join-Path $script:Root 'target/viewer-release') | Should -BeFalse
+    }
+
+    It 'refuses a stamped bundle changed after building: <Change>' -ForEach @(
+        @{ Change = 'replacement' }
+        @{ Change = 'missing' }
+        @{ Change = 'extra' }
+    ) {
+        $viewer = Join-Path $script:Root 'viewer'
+        $source = Join-Path $viewer 'build/windows/x64/runner/Release'
+        $output = Join-Path $script:Root 'target/viewer-release'
+        New-Item -ItemType Directory -Force -Path (Join-Path $source 'data'), $output | Out-Null
+        Set-Content (Join-Path $source 'tasks_viewer.exe') 'original executable'
+        Set-Content (Join-Path $source 'data/payload.bin') 'original payload'
+        Set-Content (Join-Path $output 'keep.txt') 'existing output'
+        # Default build stamps the fixture before missing CLI/catalog inputs stop packaging.
+        $result = Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $script:Root
+        $result.Ok | Should -BeFalse
+        $stamp = Get-Content (Join-Path $source 'viewer-build-stamp.json') -Raw | ConvertFrom-Json
+        @($stamp.bundle_files).Count | Should -Be 2
+        $stamp.bundle_files[0] | Should -Be "$((Get-FileHash (Join-Path $source 'data/payload.bin')).Hash.ToLowerInvariant())  data/payload.bin"
+        $stamp.bundle_files[1] | Should -Be "$((Get-FileHash (Join-Path $source 'tasks_viewer.exe')).Hash.ToLowerInvariant())  tasks_viewer.exe"
+        switch ($Change) {
+            'replacement' { Set-Content (Join-Path $source 'tasks_viewer.exe') 'rebuilt from different dirty sources' }
+            'missing' { Remove-Item -LiteralPath (Join-Path $source 'data/payload.bin') }
+            'extra' { Set-Content (Join-Path $source 'data/extra.bin') 'unexpected payload' }
+        }
+        { Invoke-PackageTool -ViewerRoot $viewer -RepositoryRoot $script:Root -PackageSourceRoot $source } |
+            Should -Throw '*prebuilt*bundle manifest*'
+        Get-Content (Join-Path $output 'keep.txt') | Should -Be 'existing output'
     }
 
     It 'refuses an output outside the selected package parent before writing' {

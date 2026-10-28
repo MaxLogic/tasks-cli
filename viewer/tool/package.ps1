@@ -8,7 +8,7 @@ viewer/spec.md section 11 requires this script to put the full runner bundle and
 the matching CLI in target/viewer-release/, write hashes and check a launch from
 a path containing spaces and non-ASCII characters.
 
-The script copies the Flutter Windows release bundle, adds the matching
+The script builds the Flutter Windows release bundle by default, adds the matching
 `tasks.exe`, validates every bundled Bella clip against the committed catalog
 and provenance manifest, refuses to ship an ElevenLabs API key, writes
 SHA256SUMS.txt plus bundle-metadata.json and then launch-tests a copy that lives
@@ -121,6 +121,16 @@ function Get-BundleRelativePath {
     return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
+function Assert-BundlePath {
+    <#
+    .SYNOPSIS
+    Rejects bundle paths redirected by any reparse point in their ancestry.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try { $null = Assert-ToolOutputPath -Path $Path }
+    catch { throw "Refusing bundle '$Path': $($_.Exception.Message)" }
+}
+
 function Get-BundleFile {
     <#
     .SYNOPSIS
@@ -138,10 +148,68 @@ function Get-BundleFile {
         $excludedFull = [System.IO.Path]::GetFullPath($ExcludedPath)
     }
 
-    $files = Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
-        Where-Object { $_.FullName -ne $excludedFull } |
-        Sort-Object -Property FullName
-    return @($files)
+    # Materialize the whole traversal before returning any file. Never follow links.
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    Assert-BundlePath -Path $rootFull
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($rootFull)
+    $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    while ($pending.Count -gt 0) {
+        foreach ($item in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Refusing bundle '$rootFull': reparse point '$($item.FullName)' is not allowed."
+            }
+            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+            elseif ($item.FullName -ne $excludedFull) { $files.Add($item) }
+        }
+    }
+    return @($files | Sort-Object -Property FullName)
+}
+
+function Copy-PackageFile {
+    <#
+    .SYNOPSIS
+    Copies only unnamed-stream bytes to a new file and hashes the same buffers.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [Parameter(Mandatory)][string]$ExpectedSha256
+    )
+    $sourceFull = [System.IO.Path]::GetFullPath($SourcePath)
+    $destinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    foreach ($path in @($sourceFull, $destinationFull)) {
+        if ($path.Substring([System.IO.Path]::GetPathRoot($path).Length).Contains(':')) {
+            throw "Only an unnamed data stream may be copied: '$path'."
+        }
+    }
+    Assert-BundlePath -Path $sourceFull
+    $null = Assert-ToolOutputPath -Path $destinationFull
+    if (Test-Path -LiteralPath $destinationFull) {
+        throw "Refusing to reuse '$destinationFull': destination already exists; a new file is required."
+    }
+    $readStream = $null
+    $writeStream = $null
+    $hasher = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try {
+        $readStream = [System.IO.FileStream]::new($sourceFull, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $writeStream = [System.IO.FileStream]::new($destinationFull, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $buffer = [byte[]]::new(81920)
+        while (($count = $readStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $writeStream.Write($buffer, 0, $count)
+            $hasher.AppendData($buffer, 0, $count)
+        }
+        $writeStream.Flush()
+        $copiedHash = [BitConverter]::ToString($hasher.GetHashAndReset()).Replace('-', '').ToLowerInvariant()
+        if (-not [string]::Equals($copiedHash, $ExpectedSha256, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing '$destinationFull': copied bundle manifest mismatch for '$sourceFull' (hash while copying)."
+        }
+    }
+    finally {
+        if ($null -ne $writeStream) { $writeStream.Dispose() }
+        if ($null -ne $readStream) { $readStream.Dispose() }
+        $hasher.Dispose()
+    }
 }
 
 function Copy-PackageBundle {
@@ -157,15 +225,44 @@ function Copy-PackageBundle {
         [string]$CliExecutable,
 
         [Parameter(Mandatory)]
-        [string]$DestinationRoot
+        [string]$DestinationRoot,
+
+        [string[]]$ExpectedManifest
     )
 
-    New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
-    foreach ($item in Get-ChildItem -LiteralPath $SourceRoot -Force | Sort-Object -Property Name) {
-        Copy-Item -LiteralPath $item.FullName -Destination $DestinationRoot -Recurse -Force
+    $files = @(Get-BundleFile -Root $SourceRoot)
+    $suppliedManifest = $null -ne $ExpectedManifest -and $ExpectedManifest.Count -gt 0
+    if (-not $suppliedManifest) {
+        $ExpectedManifest = @(Get-PackageBundleManifest -Root $SourceRoot -IncludeStamp)
+    }
+    $expected = [System.Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($line in $ExpectedManifest) {
+        $parts = $line -split '  ', 2
+        $expected.Add($parts[1], $parts[0])
+    }
+    $cliKey = @($expected.Keys | Where-Object { $_ -ieq 'tasks.exe' } | Select-Object -First 1)
+    $cliRelative = if ($cliKey.Count -gt 0) { $cliKey[0] } else { 'tasks.exe' }
+    if (-not $suppliedManifest) {
+        $expected[$cliRelative] = (Get-FileHash -LiteralPath $CliExecutable -Algorithm SHA256).Hash
+    }
+    if (-not $expected.ContainsKey($cliRelative)) {
+        throw 'The copied bundle manifest does not cover the selected CLI.'
+    }
+    $destinationFull = Assert-ToolOutputPath -Path $DestinationRoot
+    New-Item -ItemType Directory -Force -Path $destinationFull | Out-Null
+    foreach ($file in $files) {
+        $relative = Get-BundleRelativePath -Root $SourceRoot -Path $file.FullName
+        # The selected CLI replaces any root-level CLI from the source bundle.
+        if ($relative -ieq 'tasks.exe') { continue }
+        if (-not $expected.ContainsKey($relative)) {
+            throw "Refusing '$relative': copied bundle manifest mismatch (unexpected source file)."
+        }
+        $destination = Join-Path $destinationFull $relative
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+        Copy-PackageFile -SourcePath $file.FullName -DestinationPath $destination -ExpectedSha256 $expected[$relative]
     }
 
-    Copy-Item -LiteralPath $CliExecutable -Destination (Join-Path -Path $DestinationRoot -ChildPath 'tasks.exe') -Force
+    Copy-PackageFile -SourcePath $CliExecutable -DestinationPath (Join-Path $destinationFull $cliRelative) -ExpectedSha256 $expected[$cliRelative]
 }
 
 function Find-BundleCredential {
@@ -235,6 +332,7 @@ function Invoke-CapturedProcess {
     $startInfo.FileName = $FilePath
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     foreach ($argument in $Arguments) {
@@ -309,9 +407,7 @@ function Invoke-BundleLaunchTest {
     $launchRoot = Join-Path -Path $WorkingRoot -ChildPath ("Maks Zaźółć gęślą jaźń {0}" -f [guid]::NewGuid().ToString('n').Substring(0, 8))
     $copyRoot = Join-Path -Path $launchRoot -ChildPath 'bundle'
     New-Item -ItemType Directory -Force -Path $copyRoot | Out-Null
-    foreach ($item in Get-ChildItem -LiteralPath $BundleRoot -Force) {
-        Copy-Item -LiteralPath $item.FullName -Destination $copyRoot -Recurse -Force
-    }
+    Copy-PackageBundle -SourceRoot $BundleRoot -CliExecutable (Join-Path $BundleRoot 'tasks.exe') -DestinationRoot $copyRoot
 
     $settingsRoot = Get-BundleSettingsRoot -Root $launchRoot
     $viewerExe = Join-Path -Path $copyRoot -ChildPath 'tasks_viewer.exe'
@@ -397,6 +493,89 @@ function Get-SourceIdentity {
     return [pscustomobject]@{ Commit = $commit; Dirty = $dirty }
 }
 
+function Get-ViewerSourceFingerprint {
+    <#
+    .SYNOPSIS
+    Hashes versioned and unignored viewer build inputs, including dirty edits.
+    #>
+    param([string]$ViewerRoot)
+    $paths = @(& git -c core.quotepath=false -C $ViewerRoot ls-files --cached --others --exclude-standard -- lib windows assets 'pubspec.*')
+    if ($LASTEXITCODE -ne 0 -or $paths.Count -eq 0) {
+        throw "Cannot enumerate viewer inputs in '$ViewerRoot'; packaging requires a Git checkout."
+    }
+    $lines = foreach ($path in $paths | Sort-Object -Unique) {
+        $file = Join-Path $ViewerRoot $path
+        if (Test-Path -LiteralPath $file -PathType Leaf) {
+            "$path $((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant())"
+        }
+        else { "$path MISSING" }
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hasher.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+}
+
+function Get-PackageBundleManifest {
+    <#
+    .SYNOPSIS
+    Records every bundle file except the build stamp, sorted by relative path.
+    #>
+    param([Parameter(Mandatory)][string]$Root, [switch]$IncludeStamp)
+    $stampPath = if ($IncludeStamp) { '' } else { Join-Path $Root 'viewer-build-stamp.json' }
+    $files = [System.Collections.Generic.SortedDictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($file in Get-BundleFile -Root $Root -ExcludedPath $stampPath) {
+        $relative = Get-BundleRelativePath -Root $Root -Path $file.FullName
+        $files.Add($relative, (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+    foreach ($entry in $files.GetEnumerator()) {
+        "$($entry.Value)  $($entry.Key)"
+    }
+}
+
+function Get-PackageCopyManifest {
+    <#
+    .SYNOPSIS
+    Adds the stamp and selected CLI to the verified Flutter payload manifest.
+    #>
+    param([string[]]$PayloadManifest, [string]$SourceRoot, [string]$CliExecutable)
+    $files = [System.Collections.Generic.SortedDictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($line in $PayloadManifest) {
+        $parts = $line -split '  ', 2
+        $files.Add($parts[1], $parts[0])
+    }
+    $stamp = Join-Path $SourceRoot 'viewer-build-stamp.json'
+    $files.Add('viewer-build-stamp.json', (Get-FileHash -LiteralPath $stamp -Algorithm SHA256).Hash.ToLowerInvariant())
+    $cliKey = @($files.Keys | Where-Object { $_ -ieq 'tasks.exe' } | Select-Object -First 1)
+    $cliPath = if ($cliKey.Count -gt 0) { $cliKey[0] } else { 'tasks.exe' }
+    $files[$cliPath] = (Get-FileHash -LiteralPath $CliExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+    foreach ($entry in $files.GetEnumerator()) { "$($entry.Value)  $($entry.Key)" }
+}
+
+function Invoke-PackageFlutterBuild {
+    <#
+    .SYNOPSIS
+    Uses the verifier's launcher and release flags without importing its helpers into the caller.
+    #>
+    param([string]$ViewerRoot, [string]$EvidenceRoot)
+    $result = & {
+        param($buildViewerRoot)
+        . (Join-Path $PSScriptRoot 'verify-windows.ps1')
+        $launcher = Resolve-FlutterLauncher
+        Invoke-FlutterCommand -Launcher $launcher -Arguments @('build', 'windows', '--release') `
+            -WorkingDirectory $buildViewerRoot -TimeoutSeconds 1800
+    } $ViewerRoot
+    $log = "flutter build windows --release`nexit: $($result.ExitCode)`ntimed_out: $($result.TimedOut)`n$($result.StdOut)`n$($result.StdErr)"
+    if (-not [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+        New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
+        Set-Content -LiteralPath (Join-Path $EvidenceRoot 'package-flutter-build.log') -Value $log -Encoding utf8NoBOM
+    }
+    Write-PackageMessage -Message $log
+    if ($result.TimedOut -or $result.ExitCode -ne 0) {
+        throw "Flutter release build failed (exit $($result.ExitCode), timeout $($result.TimedOut)); no bundle was packaged."
+    }
+}
+
 function Invoke-PackageTool {
     <#
     .SYNOPSIS
@@ -456,12 +635,67 @@ function Invoke-PackageTool {
     }
 
     $outputFull = Resolve-PackageOutputRoot -Path $OutputRoot -AllowedRoot $targetRoot
-    if ([string]::IsNullOrWhiteSpace($PackageSourceRoot)) {
+    $buildFlutter = [string]::IsNullOrWhiteSpace($PackageSourceRoot)
+    if ($buildFlutter) {
         $PackageSourceRoot = Join-Path $viewerFull 'build/windows/x64/runner/Release'
     }
     $bundleSource = [System.IO.Path]::GetFullPath($PackageSourceRoot)
+    Assert-BundlePath -Path $bundleSource
+    if (Test-Path -LiteralPath $bundleSource -PathType Container) {
+        $null = @(Get-BundleFile -Root $bundleSource)
+    }
     if (-not [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
         $EvidenceRoot = Assert-ToolOutputPath -Path $EvidenceRoot
+    }
+    $sourceIdentity = Get-SourceIdentity -RepositoryRoot $repositoryFull
+    if ([string]::IsNullOrWhiteSpace($sourceIdentity.Commit)) {
+        throw 'Cannot resolve the current source commit; packaging requires a Git checkout.'
+    }
+    $sourceFingerprint = Get-ViewerSourceFingerprint -ViewerRoot $viewerFull
+    $stampPath = Join-Path $bundleSource 'viewer-build-stamp.json'
+    if ($buildFlutter) {
+        # Invalidate a previous successful stamp before attempting the new build.
+        if (Test-Path -LiteralPath $stampPath) { Remove-Item -LiteralPath $stampPath -Force }
+        Write-PackageMessage -Message 'package: building Flutter Windows release'
+        Invoke-PackageFlutterBuild -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot
+        if ($sourceFingerprint -ne (Get-ViewerSourceFingerprint -ViewerRoot $viewerFull)) {
+            throw 'Viewer inputs changed during the Flutter build; run packaging again on stable sources.'
+        }
+        $builtViewer = Join-Path $bundleSource 'tasks_viewer.exe'
+        if (-not (Test-Path -LiteralPath $builtViewer -PathType Leaf)) {
+            throw "Flutter release build did not produce '$builtViewer'; no bundle was packaged."
+        }
+        $bundleManifest = @(Get-PackageBundleManifest -Root $bundleSource)
+        [ordered]@{
+            source_commit = $sourceIdentity.Commit
+            source_fingerprint = $sourceFingerprint
+            generated_utc = (Get-Date).ToUniversalTime().ToString('o')
+            bundle_files = $bundleManifest
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $stampPath -Encoding utf8NoBOM
+    }
+    else {
+        if (-not (Test-Path -LiteralPath $stampPath -PathType Leaf)) {
+            throw "Refusing prebuilt bundle '$bundleSource': missing viewer-build-stamp.json. Run package.ps1 without -PackageSourceRoot to build and stamp it."
+        }
+        try {
+            $stamp = Get-Content -LiteralPath $stampPath -Raw | ConvertFrom-Json
+            if ([string]::IsNullOrWhiteSpace($stamp.source_commit) -or [string]::IsNullOrWhiteSpace($stamp.source_fingerprint)) {
+                throw 'Incomplete build stamp.'
+            }
+        }
+        catch { throw "Refusing prebuilt bundle '$bundleSource': invalid build stamp. Rebuild with package.ps1." }
+        if ($stamp.source_commit -ne $sourceIdentity.Commit -or $stamp.source_fingerprint -ne $sourceFingerprint) {
+            throw "Refusing prebuilt bundle '$bundleSource': stale build stamp (commit or viewer inputs differ). Run package.ps1 without -PackageSourceRoot."
+        }
+        $manifestProperty = $stamp.PSObject.Properties['bundle_files']
+        if ($null -eq $manifestProperty -or @($manifestProperty.Value).Count -eq 0) {
+            throw "Refusing prebuilt bundle '$bundleSource': missing bundle manifest in the build stamp. Rebuild with package.ps1."
+        }
+        $bundleManifest = @($manifestProperty.Value)
+        $actualManifest = @(Get-PackageBundleManifest -Root $bundleSource)
+        if (-not [string]::Equals(($manifestProperty.Value -join "`n"), ($actualManifest -join "`n"), [StringComparison]::Ordinal)) {
+            throw "Refusing prebuilt bundle '$bundleSource': bundle manifest mismatch (modified, missing or extra file). Rebuild with package.ps1."
+        }
     }
     $announcementsDirectory = Join-Path -Path $viewerFull -ChildPath 'assets/announcements'
     $catalogPath = Join-Path -Path $announcementsDirectory -ChildPath 'catalog.json'
@@ -498,25 +732,42 @@ function Invoke-PackageTool {
         $clipBytes = 0
     }
 
-    if (Test-Path -LiteralPath $outputFull -PathType Container) {
-        # A running viewer locks its DLLs, so deleting the folder would fail
-        # halfway and leave that viewer without its data folder.
-        $outputPrefix = $outputFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-        $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-                $null -ne $_.Path -and $_.Path.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)
-            })
-        if ($running.Count -gt 0) {
-            $names = ($running | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" }) -join ', '
-            throw "Cannot replace '$outputFull' while $names runs from it; close it and package again."
+    $stageFull = Join-Path $targetRoot ('.viewer-package-stage-' + [guid]::NewGuid().ToString('n'))
+    $stageFull = Assert-ToolOutputPath -Path $stageFull
+    try {
+        $expectedCopy = @(Get-PackageCopyManifest -PayloadManifest $bundleManifest -SourceRoot $bundleSource -CliExecutable $CliExecutable)
+        Write-PackageMessage -Message "package: copying '$bundleSource' and '$CliExecutable' to staging '$stageFull'"
+        Copy-PackageBundle -SourceRoot $bundleSource -CliExecutable $CliExecutable -DestinationRoot $stageFull -ExpectedManifest $expectedCopy
+        $copiedManifest = @(Get-PackageBundleManifest -Root $stageFull -IncludeStamp)
+        if (-not [string]::Equals(($expectedCopy -join "`n"), ($copiedManifest -join "`n"), [StringComparison]::Ordinal)) {
+            throw "Refusing to replace '$outputFull': copied bundle manifest mismatch (modified, missing or extra file)."
         }
-        Write-PackageMessage -Message "package: replacing '$outputFull'"
-        Remove-Item -LiteralPath $outputFull -Recurse -Force
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $outputFull) | Out-Null
+        if (Test-Path -LiteralPath $outputFull -PathType Container) {
+            # A running viewer locks its DLLs, so deleting the folder would fail
+            # halfway and leave that viewer without its data folder.
+            $outputPrefix = $outputFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+                    $null -ne $_.Path -and $_.Path.StartsWith($outputPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+                })
+            if ($running.Count -gt 0) {
+                $names = ($running | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" }) -join ', '
+                throw "Cannot replace '$outputFull' while $names runs from it; close it and package again."
+            }
+            Write-PackageMessage -Message "package: replacing '$outputFull'"
+            Remove-Item -LiteralPath $outputFull -Recurse -Force
+        }
+
+        Move-Item -LiteralPath $stageFull -Destination $outputFull
+    }
+    finally {
+        if (Test-Path -LiteralPath $stageFull) {
+            # Validate our exact owned staging root before recursive cleanup.
+            $null = @(Get-BundleFile -Root $stageFull)
+            Remove-Item -LiteralPath $stageFull -Recurse -Force
+        }
     }
 
-    Write-PackageMessage -Message "package: copying '$bundleSource' and '$CliExecutable'"
-    Copy-PackageBundle -SourceRoot $bundleSource -CliExecutable $CliExecutable -DestinationRoot $outputFull
-
-    $sourceIdentity = Get-SourceIdentity -RepositoryRoot $repositoryFull
     $viewerExe = Join-Path -Path $outputFull -ChildPath 'tasks_viewer.exe'
     $packagedCli = Join-Path -Path $outputFull -ChildPath 'tasks.exe'
     $metadataPath = Join-Path -Path $outputFull -ChildPath 'bundle-metadata.json'
@@ -526,6 +777,7 @@ function Invoke-PackageTool {
         generated_utc     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         source_commit     = $sourceIdentity.Commit
         source_dirty      = $sourceIdentity.Dirty
+        viewer_source_fingerprint = $sourceFingerprint
         viewer_exe_sha256 = Get-FileSha256 -Path $viewerExe
         cli_exe_sha256    = Get-FileSha256 -Path $packagedCli
         clip_count        = $clipResult.Verified.Count
