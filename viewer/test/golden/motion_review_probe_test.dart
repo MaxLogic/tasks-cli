@@ -91,10 +91,14 @@ void main() {
           await model.openTaskIndex(0);
           await tester.pumpAndSettle();
           final stem = '${name}_${size.width.toInt()}x${size.height.toInt()}';
-          Future<void> capture(String state) => expectLater(
-            find.byType(TasksViewerApp),
-            matchesGoldenFile(Uri.file('$_out/${stem}_$state.png')),
-          );
+          Future<void> capture(String state) async {
+            if (_out.isEmpty) return;
+            await expectLater(
+              find.byType(TasksViewerApp),
+              matchesGoldenFile(Uri.file('$_out/${stem}_$state.png')),
+            );
+          }
+
           await capture('settled');
           model.showTab(TaskDetailTab.rules);
           await tester.pump();
@@ -118,7 +122,6 @@ void main() {
           await capture('filters_60ms');
           await tester.pumpAndSettle();
         },
-        skip: _out.isEmpty || !Platform.isWindows,
         variant: TargetPlatformVariant.only(TargetPlatform.windows),
       );
     }
