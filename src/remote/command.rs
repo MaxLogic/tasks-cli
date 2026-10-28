@@ -113,7 +113,7 @@ fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), Ap
             connect_timeout_seconds,
             request_timeout_seconds,
         } => {
-            super::capabilities::invalidate(root)?;
+            super::capabilities::invalidate(root);
             let profile = Profile::Remote {
                 server_url: server_url.clone(),
                 server_id: *server_id,
@@ -147,14 +147,14 @@ fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), Ap
                 }
             }
             config::save(root, &profile)?;
-            client.remember_capabilities(root, &profile, &info)?;
+            client.remember_capabilities(root, &profile, &info);
             println!(
                 "{}",
                 json!({"backend":"remote","server_id":server_id,"credential_id":credential_id})
             );
         }
         RemoteCommand::Local => {
-            super::capabilities::invalidate(root)?;
+            super::capabilities::invalidate(root);
             std::fs::create_dir_all(root)?;
             let pending = PendingStore::new(root)?;
             let _lock = pending.lock()?;

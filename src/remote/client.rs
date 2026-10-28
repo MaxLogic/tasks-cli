@@ -146,20 +146,21 @@ impl RemoteClient {
     }
     pub(super) fn with_state(profile: &Profile, root: &Path) -> Result<Self, AppError> {
         let mut client = Self::new(profile)?;
-        client.capabilities = Some(super::capabilities::Capabilities::new(root, profile)?);
+        client.capabilities =
+            super::capabilities::Capabilities::new(root, profile, &client.http.private_ca_sha256)
+                .ok();
         Ok(client)
     }
-    pub(super) fn remember_capabilities(
-        &self,
-        root: &Path,
-        profile: &Profile,
-        info: &Value,
-    ) -> Result<(), AppError> {
-        super::capabilities::Capabilities::new(root, profile)?.save(info)
+    pub(super) fn remember_capabilities(&self, root: &Path, profile: &Profile, info: &Value) {
+        if let Ok(cache) =
+            super::capabilities::Capabilities::new(root, profile, &self.http.private_ca_sha256)
+        {
+            cache.save(info);
+        }
     }
     fn service_info(&self) -> Result<Value, AppError> {
         if let Some(cache) = &self.capabilities {
-            if let Some(info) = cache.get()? {
+            if let Some(info) = cache.get() {
                 if let Ok(info) = self.validate_info(info) {
                     return Ok(info);
                 }
@@ -172,7 +173,7 @@ impl RemoteClient {
         )?;
         let reply = self.validate_info(reply)?;
         if let Some(cache) = &self.capabilities {
-            cache.save(&reply)?;
+            cache.save(&reply);
         }
         Ok(reply)
     }

@@ -122,7 +122,7 @@ fn missing_capabilities_refuse_mutations_and_sources_and_filter_viewer_info() {
                 .is_empty());
             continue;
         }
-        for command in [
+        for (index, command) in [
             vec![
                 "attachment",
                 "add",
@@ -136,14 +136,19 @@ fn missing_capabilities_refuse_mutations_and_sources_and_filter_viewer_info() {
             vec!["attachment", "get", "1", "A1"],
             vec!["attachment", "detach", "1", "A1", "--expect-version", "1"],
             vec!["attachment", "clipboard"],
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let before = gateway.requests();
             let args = [vec!["--project", &project], command].concat();
             let output = run(&f.clients[0], &args);
             assert_eq!(output.status.code(), Some(5));
             let error: Value = serde_json::from_slice(&output.stderr).unwrap();
             assert_eq!(error["error"]["code"], "remote_capability");
-            assert!(gateway.requests() - before <= 1);
+            // The first refusal uses viewer-info's discovery. Every refusal
+            // invalidates it, so each later command probes exactly once.
+            assert_eq!(gateway.requests() - before, usize::from(index > 0));
         }
     }
 }
@@ -170,7 +175,7 @@ fn expired_corrupt_or_future_discovery_is_refreshed_and_errors_invalidate_it() {
     let original = std::fs::read(&cache).unwrap();
     for timestamp in [0, u64::MAX] {
         let mut record: Value = serde_json::from_slice(&original).unwrap();
-        record["checked_at"] = json!(timestamp);
+        record["checked_at"] = json!({"secs":timestamp,"nanos":0});
         std::fs::write(&cache, serde_json::to_vec(&record).unwrap()).unwrap();
         let before = f.gateway.requests();
         ok(run(&f.clients[0], &["viewer", "info"]));
