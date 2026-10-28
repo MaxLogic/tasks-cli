@@ -437,6 +437,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
                   child: Text(rowLabel(context, c.task.attachments[i])),
                 ),
                 onSelectedIndexChanged: (_) => setState(() {}),
+                activateOnDoubleTap: true,
                 onActivate: (_) => unawaited(view()),
               ),
             ),

@@ -249,7 +249,7 @@ Describe 'release UIA probe retry decision' {
             Ok = $false; Reason = 'Settings is absent from the packaged release UIA tree.'
             Nodes = @([pscustomobject]@{ Name = 'FLUTTERVIEW'; Type = 'MSAA.Role.10' })
             NodeCount = 1; ElapsedSeconds = 3.0; Backend = 'UIA'; WindowName = 'Tasks Viewer'
-            SettingsChecks = $null; SettingsNodes = @(); ProcessId = 111; TimedOut = $false
+            SettingsChecks = $null; SettingsNodes = @(); ProcessId = 111
         }
         $stub = {
             param($ViewerExe, $BundleFull, $CliExe, $DataRootFull, $SettingsRootFull,
@@ -265,9 +265,65 @@ Describe 'release UIA probe retry decision' {
 
         { Invoke-ReleaseUiaProbe -BundleRoot $script:BundleRoot -DataRoot $script:DataRoot `
                 -SettingsRoot $script:SettingsRoot -ExpectedProjectName 'alpha' -TimeoutSeconds 45 `
-                -AttemptFunction $stub } | Should -Throw '*Not retried*'
+                -AttemptFunction $stub } | Should -Throw '*Settings is absent*Not retried*'
 
         $script:attemptCalls.Count | Should -Be 1
+    }
+}
+
+Describe 'Settings readiness deadline' {
+    It 'waits through incomplete snapshots until all Settings controls appear' {
+        $script:settingsReads = 0
+        $ready = @(
+            [pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Dialog' }
+            [pscustomobject]@{ Name = 'Tasks CLI path (Alt+E)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Data root (Alt+D)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Theme (Alt+H)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Text size (Alt+Z)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Bella volume (Alt+V)'; Type = 'ControlType.Slider' }
+            [pscustomobject]@{ Name = 'Cancel (Alt+C)'; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'Save (Ctrl+S)'; Type = 'ControlType.Button' }
+        )
+        $read = {
+            $script:settingsReads++
+            if ($script:settingsReads -ge 3) { return $ready }
+            if ($script:settingsReads -eq 1) { return @() }
+            return @([pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Dialog' })
+        }
+        $result = Wait-ReleaseUiaSettingsSnapshot -ReadSnapshot $read -HasExited { $false } -TimeoutSeconds 2
+        $result.Ok | Should -BeTrue
+        $result.TimedOut | Should -BeFalse
+        $script:settingsReads | Should -Be 3
+    }
+
+    It 'accepts complete controls when an in-budget snapshot read finishes late' {
+        $ready = @(
+            [pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Dialog' }
+            [pscustomobject]@{ Name = 'Tasks CLI path (Alt+E)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Data root (Alt+D)'; Type = 'ControlType.Edit' }
+            [pscustomobject]@{ Name = 'Theme (Alt+H)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Text size (Alt+Z)'; Type = 'ControlType.ComboBox' }
+            [pscustomobject]@{ Name = 'Bella volume (Alt+V)'; Type = 'ControlType.Slider' }
+            [pscustomobject]@{ Name = 'Cancel (Alt+C)'; Type = 'ControlType.Button' }
+            [pscustomobject]@{ Name = 'Save (Ctrl+S)'; Type = 'ControlType.Button' }
+        )
+        $result = Wait-ReleaseUiaSettingsSnapshot -ReadSnapshot {
+            Start-Sleep -Milliseconds 100
+            return $ready
+        } -HasExited { $false } -TimeoutSeconds 0.05
+        $result.Ok | Should -BeTrue
+        $result.TimedOut | Should -BeFalse
+        $result.Checks.Findings | Should -BeNullOrEmpty
+    }
+
+    It 'reports a Settings timeout and the missing controls rather than a property crash' {
+        $result = Wait-ReleaseUiaSettingsSnapshot -ReadSnapshot {
+            [pscustomobject]@{ Name = 'Settings'; Type = 'ControlType.Dialog' }
+        } -HasExited { $false } -TimeoutSeconds 0.05
+        $result.Ok | Should -BeFalse
+        $result.TimedOut | Should -BeTrue
+        $result.Reason | Should -BeLike '*Settings*timed out*Tasks CLI path*'
+        $result.Nodes.Count | Should -Be 1
     }
 }
 

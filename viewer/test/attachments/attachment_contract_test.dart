@@ -602,7 +602,7 @@ void main() {
         home: Scaffold(body: AttachmentPanel(controller: rig.controller)),
       ),
     );
-    expect(find.text(message), findsOneWidget);
+    expect(find.text('$message. Error code: interop.'), findsOneWidget);
     final retry = find.widgetWithText(TextButton, 'Retry clipboard');
     expect(retry, findsOneWidget);
     expect(tester.widget<TextButton>(retry).onPressed, isNull);

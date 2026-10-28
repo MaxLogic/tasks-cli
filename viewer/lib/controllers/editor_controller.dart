@@ -992,7 +992,7 @@ class ViewerEditorController extends ChangeNotifier {
               return EditorSaveResult(
                 EditorSaveOutcome.conflict,
                 message:
-                    'The pending change was refused: ${failure.message}. '
+                    'The pending change was refused: ${failure.message} '
                     'The task also changed in the store.',
                 conflict: conflict,
               );
@@ -1002,7 +1002,7 @@ class ViewerEditorController extends ChangeNotifier {
             return EditorSaveResult(
               EditorSaveOutcome.failed,
               message:
-                  'The pending change was refused: ${failure.message}. '
+                  'The pending change was refused: ${failure.message} '
                   'Could not read the current task: ${readFailure.message}',
             );
           }

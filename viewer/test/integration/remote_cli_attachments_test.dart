@@ -21,65 +21,152 @@ const server = String.fromEnvironment('TASKS_VIEWER_TEST_SERVER');
 const hookServer = String.fromEnvironment('TASKS_VIEWER_TEST_HOOK_SERVER');
 
 void main() {
-  for (final capable in [true, false]) {
-    testWidgets(
-      'real remote server capability=$capable controls the attachment tab',
-      (tester) async {
-        if (!local.available(local.cli) ||
-            !local.available(capable ? server : hookServer)) {
-          return;
-        }
-        final fixture = (await tester.runAsync(
-          () => RemoteFixture.start(capable: capable),
-        ))!;
-        addTearDown(fixture.close);
-        final info = (await tester.runAsync(fixture.client.probe))!;
-        expect(info.isRemote, isTrue);
-        expect(fixture.capabilities.contains('attachments-v1'), capable);
-        expect(
-          info.supportsAttachments,
-          capable,
-          reason:
-              'viewer info operations must agree with the actual server capability',
-        );
-        tester.view.physicalSize = const Size(1600, 900);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.reset);
-        final announcements = AnnouncementController(
-          clipPlayer: support.RecordingClipPlayer(),
-        );
-        await tester.pumpWidget(
-          MaterialApp(
-            home: ViewerWorkspaceHost(
-              environment: fixture.environment,
-              readers: ViewerDataReader(
-                projects: fixture.client,
-                tasks: fixture.client,
-                detail: fixture.client,
-                update: fixture.client,
-                probe: fixture.client.probe,
-              ),
-              announcements: announcements,
+  group(
+    'real remote authentication',
+    () {
+      testWidgets(
+        'real remote rejected-signature failure is readable in attachment View',
+        (tester) async {
+          expect(
+            File(local.cli).existsSync(),
+            isTrue,
+            reason: 'Configured CLI must exist.',
+          );
+          expect(
+            File(server).existsSync(),
+            isTrue,
+            reason: 'Configured server must exist.',
+          );
+          final fixture = (await tester.runAsync(
+            () => RemoteFixture.start(capable: true),
+          ))!;
+          addTearDown(fixture.close);
+          final h = (await tester.runAsync(fixture.harness))!;
+          addTearDown(h.controller.dispose);
+          final source = File('${fixture.root.path}/auth.log')
+            ..writeAsStringSync('auth fixture');
+          h.dialogs.files = [source.path];
+          await tester.runAsync(h.controller.addFiles);
+          expect(
+            h.detail.attachments,
+            hasLength(1),
+            reason: h.controller.notice,
+          );
+          // A different real signing key under the same credential makes the real
+          // server reject this read. No mock process or fabricated CLI error JSON.
+          await tester.runAsync(() async {
+            await exec(local.cli, [
+              '--data-root',
+              h.environment.dataRoot!,
+              'remote',
+              'keygen',
+              '--directory',
+              '${fixture.root.path}/wrong-key',
+            ]);
+            File(
+              '${h.environment.dataRoot}/client/signing-key.pem',
+            ).writeAsBytesSync(
+              File(
+                '${fixture.root.path}/wrong-key/signing-key.pem',
+              ).readAsBytesSync(),
+            );
+          });
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(body: AttachmentPanel(controller: h.controller)),
             ),
-          ),
+          );
+          await tester.pumpAndSettle();
+          await tester.runAsync(() async {
+            await tester.tap(find.text('View (Alt+W)'));
+            await h.launcher.idle;
+          });
+          await local.waitFor(tester, () => !h.controller.busy);
+          expect(h.controller.notice, contains('code: '));
+          expect(h.controller.notice, isNot(contains('{')));
+          expect(h.controller.notice, isNot(contains('Opening')));
+          expect(find.text(h.controller.notice!), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+        },
+      );
+    },
+    skip: local.cli.isEmpty || server.isEmpty
+        ? 'Requires TASKS_VIEWER_TEST_CLI and TASKS_VIEWER_TEST_SERVER for loopback authentication proof.'
+        : false,
+  );
+  for (final capable in [true, false]) {
+    group(
+      'remote capability=$capable',
+      () {
+        testWidgets(
+          'real remote server capability=$capable controls the attachment tab',
+          (tester) async {
+            expect(
+              File(local.cli).existsSync(),
+              isTrue,
+              reason: 'Configured CLI must exist.',
+            );
+            expect(
+              File(capable ? server : hookServer).existsSync(),
+              isTrue,
+              reason: 'Configured server must exist.',
+            );
+            final fixture = (await tester.runAsync(
+              () => RemoteFixture.start(capable: capable),
+            ))!;
+            addTearDown(fixture.close);
+            final info = (await tester.runAsync(fixture.client.probe))!;
+            expect(info.isRemote, isTrue);
+            expect(fixture.capabilities.contains('attachments-v1'), capable);
+            expect(
+              info.supportsAttachments,
+              capable,
+              reason:
+                  'viewer info operations must agree with the actual server capability',
+            );
+            tester.view.physicalSize = const Size(1600, 900);
+            tester.view.devicePixelRatio = 1;
+            addTearDown(tester.view.reset);
+            final announcements = AnnouncementController(
+              clipPlayer: support.RecordingClipPlayer(),
+            );
+            await tester.pumpWidget(
+              MaterialApp(
+                home: ViewerWorkspaceHost(
+                  environment: fixture.environment,
+                  readers: ViewerDataReader(
+                    projects: fixture.client,
+                    tasks: fixture.client,
+                    detail: fixture.client,
+                    update: fixture.client,
+                    probe: fixture.client.probe,
+                  ),
+                  announcements: announcements,
+                ),
+              ),
+            );
+            final model = tester
+                .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
+                .model;
+            await tester.runAsync(() async {
+              await model.projectList.refresh();
+              model.selectProjectIndex(0);
+              await model.tasks!.refresh();
+              await model.openTaskIndex(0);
+            });
+            await tester.pumpAndSettle();
+            expect(
+              find.text('Attachments (0)'),
+              capable ? findsOneWidget : findsNothing,
+            );
+            await tester.pumpWidget(const SizedBox());
+            announcements.dispose();
+          },
         );
-        final model = tester
-            .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
-            .model;
-        await tester.runAsync(() async {
-          await model.projectList.refresh();
-          model.selectProjectIndex(0);
-          await model.tasks!.refresh();
-          await model.openTaskIndex(0);
-        });
-        await tester.pumpAndSettle();
-        expect(
-          find.text('Attachments (0)'),
-          capable ? findsOneWidget : findsNothing,
-        );
-        await tester.pumpWidget(const SizedBox());
-        announcements.dispose();
       },
+      skip: local.cli.isEmpty || (capable ? server : hookServer).isEmpty
+          ? 'Requires TASKS_VIEWER_TEST_CLI and ${capable ? "TASKS_VIEWER_TEST_SERVER" : "TASKS_VIEWER_TEST_HOOK_SERVER"} for loopback capability proof.'
+          : false,
     );
   }
   testWidgets(

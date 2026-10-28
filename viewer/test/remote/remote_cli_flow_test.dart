@@ -619,6 +619,59 @@ void main() {
     },
   );
 
+  for (final freshReadFails in [false, true]) {
+    test(
+      'refusal punctuation composes with fresh read failure=$freshReadFails',
+      () async {
+        final launcher = _Launcher();
+        final client = await _client(launcher);
+        final editor = ViewerEditorController(
+          writer: client,
+          detailReader: client,
+        );
+        addTearDown(editor.dispose);
+        final document =
+            jsonDecode(fixture.showDocument()) as Map<String, dynamic>;
+        editor.observeDetail(
+          TaskDetail.fromJson(document['data'] as Map<String, dynamic>),
+          projectId: fixture.projectUuid,
+        );
+        editor.beginEdit();
+        editor.setField(EditorField.title, 'Changed');
+        launcher.replies.add(_Reply(_update(id: 99)));
+        await editor.save();
+        document['data']['version'] = 8;
+        launcher.replies
+          ..add(
+            const _Reply(
+              '',
+              stderr:
+                  '{"error":{"code":"validation","message":"Original refusal"}}',
+              exit: 2,
+            ),
+          )
+          ..add(const _Reply('', render: _ack))
+          ..add(
+            freshReadFails
+                ? const _Reply(
+                    '',
+                    stderr:
+                        '{"error":{"code":"authentication","message":"Read refused"}}',
+                    exit: 5,
+                  )
+                : _Reply(jsonEncode(document)),
+          );
+        final result = await editor.retryReconciliation();
+        expect(
+          result.message,
+          freshReadFails
+              ? 'The pending change was refused: Original refusal. Error code: validation. Could not read the current task: Read refused. Error code: authentication.'
+              : 'The pending change was refused: Original refusal. Error code: validation. The task also changed in the store.',
+        );
+      },
+    );
+  }
+
   test(
     'editor retains draft until explicit receipt check and fresh detail',
     () async {

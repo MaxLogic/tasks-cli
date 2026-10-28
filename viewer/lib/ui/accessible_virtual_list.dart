@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind, kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/scheduler.dart';
@@ -109,6 +110,7 @@ class AccessibleVirtualList extends StatefulWidget {
     required this.rowSemanticsBuilder,
     required this.itemKeyBuilder,
     this.onActivate,
+    this.activateOnDoubleTap = false,
     this.onSelectedIndexChanged,
     this.excludeRowChildSemantics = true,
     this.isRowReady,
@@ -140,6 +142,9 @@ class AccessibleVirtualList extends StatefulWidget {
 
   /// Enter/Space on the selected row.
   final ValueChanged<int>? onActivate;
+
+  /// Select the clicked row before using the same activation as Enter/Space.
+  final bool activateOnDoubleTap;
 
   final ValueChanged<int>? onSelectedIndexChanged;
 
@@ -296,6 +301,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   int? _refusedFocusIndex;
   int? _notifiedIndex;
   int? _pendingIndex;
+  bool _pendingReveal = true;
   int? _forwardIndex;
   int _focusAttempts = 0;
   bool _pendingFocusIntent = false;
@@ -421,6 +427,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     int index, {
     required bool moveFocus,
     bool forceFocus = false,
+    bool reveal = true,
   }) {
     if (widget.itemCount == 0) {
       return;
@@ -434,6 +441,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       return;
     }
     _pendingIndex = target;
+    _pendingReveal = reveal;
     // Scrolling to the target disposes the row that owned focus, so by the
     // time the target row exists nothing in the list is focused any more.
     // Remember that this move was deliberate instead of mistaking the gap for
@@ -441,7 +449,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     _pendingFocusIntent =
         forceFocus || _listHasFocus || _containerFocus.hasFocus;
     _focusAttempts = 0;
-    _scrollToIndex(target);
+    if (reveal) _scrollToIndex(target);
     _settleFocus();
     if (_pendingIndex != null && !_containerFocus.hasFocus) {
       // design.md section 6: during an unloaded jump the focus stays in the
@@ -496,9 +504,18 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     }
     final position = _scroll.position;
     final extent = widget.itemExtent;
-    final target =
-        index * extent - math.max(0.0, position.viewportDimension - extent);
-    final clamped = target.clamp(0.0, position.maxScrollExtent);
+    final rowTop = index * extent;
+    final rowBottom = rowTop + extent;
+    final viewTop = position.pixels;
+    final viewBottom = viewTop + position.viewportDimension;
+    if (rowTop >= viewTop && rowBottom <= viewBottom) return;
+    final target = rowTop < viewTop
+        ? rowTop
+        : rowBottom - position.viewportDimension;
+    final clamped = target.clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
     if ((position.pixels - clamped).abs() < 0.5) {
       return;
     }
@@ -551,7 +568,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         _focusAttempts++;
         // Once the pane has a viewport, scroll to the row that is still
         // waiting for focus.
-        _scrollToIndex(target);
+        if (_pendingReveal) _scrollToIndex(target);
         // The row is built by the next layout pass, so make sure one happens
         // even when nothing else changed this frame.
         SchedulerBinding.instance.scheduleFrame();
@@ -683,7 +700,11 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     if (node != null && (widget.isRowReady?.call(index) ?? true)) {
       node.requestFocus();
     } else {
-      _requestIndex(index, moveFocus: true);
+      _requestIndex(
+        index,
+        moveFocus: true,
+        reveal: _pendingIndex != index || _pendingReveal,
+      );
     }
   }
 
@@ -954,50 +975,88 @@ class _VirtualRowState extends State<_VirtualRow> {
           moveFocus: true,
           forceFocus: true,
         ),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          excludeFromSemantics: true,
-          onTap: () => widget.owner._requestIndex(
-            widget.index,
-            moveFocus: true,
-            forceFocus: true,
-          ),
-          child: _RowMotion(
-            driver: widget.owner._motion,
-            fromY: _fromY,
-            entering: _entering,
-            delay: _delay,
-            child: MouseRegion(
-              onEnter: (_) => setState(() => _hovered = true),
-              onExit: (_) => setState(() => _hovered = false),
-              child: AnimatedContainer(
-                duration: _focused || widget.selected
-                    ? Duration.zero
-                    : ViewerMotion.of(context, ViewerMotion.short),
-                color: _hovered && !_focused && !widget.selected
-                    ? colors.onSurface.withValues(alpha: .06)
-                    : colors.onSurface.withValues(alpha: 0),
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border(
-                      left: stroke > 0
-                          ? BorderSide(color: borderColor, width: stroke)
-                          : BorderSide.none,
-                      top: stroke > 0
-                          ? BorderSide(color: borderColor, width: stroke)
-                          : BorderSide.none,
-                      right: stroke > 0
-                          ? BorderSide(color: borderColor, width: stroke)
-                          : BorderSide.none,
-                      bottom: BorderSide(
-                        color: stroke > 0 ? borderColor : colors.outlineVariant,
-                        width: stroke > 0 ? stroke : 1,
+        child: Listener(
+          onPointerDown: widget.owner.widget.activateOnDoubleTap
+              ? (event) {
+                  if (event.kind == PointerDeviceKind.mouse &&
+                      event.buttons == kPrimaryButton) {
+                    // Selection and focus cannot wait for double-tap recognition:
+                    // a following keyboard command must target this row now.
+                    widget.owner._requestIndex(
+                      widget.index,
+                      moveFocus: true,
+                      forceFocus: true,
+                      reveal: false,
+                    );
+                  }
+                }
+              : null,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            excludeFromSemantics: true,
+            onDoubleTap: widget.owner.widget.activateOnDoubleTap
+                ? () {
+                    widget.owner._requestIndex(
+                      widget.index,
+                      moveFocus: true,
+                      forceFocus: true,
+                      reveal: false,
+                    );
+                    widget.owner.widget.onActivate?.call(widget.index);
+                  }
+                : null,
+            onTapUp: (details) {
+              // Mouse double-click rows selected on down. Other taps select
+              // only after recognition, so a touch scroll cannot select a row.
+              if (!widget.owner.widget.activateOnDoubleTap ||
+                  details.kind != PointerDeviceKind.mouse) {
+                widget.owner._requestIndex(
+                  widget.index,
+                  moveFocus: true,
+                  forceFocus: true,
+                  reveal: false,
+                );
+              }
+            },
+            child: _RowMotion(
+              driver: widget.owner._motion,
+              fromY: _fromY,
+              entering: _entering,
+              delay: _delay,
+              child: MouseRegion(
+                onEnter: (_) => setState(() => _hovered = true),
+                onExit: (_) => setState(() => _hovered = false),
+                child: AnimatedContainer(
+                  duration: _focused || widget.selected
+                      ? Duration.zero
+                      : ViewerMotion.of(context, ViewerMotion.short),
+                  color: _hovered && !_focused && !widget.selected
+                      ? colors.onSurface.withValues(alpha: .06)
+                      : colors.onSurface.withValues(alpha: 0),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        left: stroke > 0
+                            ? BorderSide(color: borderColor, width: stroke)
+                            : BorderSide.none,
+                        top: stroke > 0
+                            ? BorderSide(color: borderColor, width: stroke)
+                            : BorderSide.none,
+                        right: stroke > 0
+                            ? BorderSide(color: borderColor, width: stroke)
+                            : BorderSide.none,
+                        bottom: BorderSide(
+                          color: stroke > 0
+                              ? borderColor
+                              : colors.outlineVariant,
+                          width: stroke > 0 ? stroke : 1,
+                        ),
                       ),
                     ),
-                  ),
-                  child: ExcludeSemantics(
-                    excluding: widget.owner.widget.excludeRowChildSemantics,
-                    child: widget.child,
+                    child: ExcludeSemantics(
+                      excluding: widget.owner.widget.excludeRowChildSemantics,
+                      child: widget.child,
+                    ),
                   ),
                 ),
               ),

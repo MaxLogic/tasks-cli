@@ -225,9 +225,14 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         final projects = _projects;
         return LayoutBuilder(
           builder: (context, constraints) {
+            final hasPendingChange =
+                widget.model.pendingRemoteChanges.isNotEmpty;
+            final pendingBudget = hasPendingChange
+                ? constraints.maxHeight * 0.25
+                : 0.0;
             final budget = viewerPaneBudgetFor(
               context,
-              constraints.maxHeight,
+              constraints.maxHeight - pendingBudget,
               footerShare: 0.5,
             );
             return Column(
@@ -241,8 +246,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   maxHeight: budget.status,
                   child: _buildStatusLine(context, projects),
                 ),
-                if (widget.model.pendingRemoteChanges.isNotEmpty)
-                  _buildPendingRemoteChange(context),
+                if (hasPendingChange)
+                  ViewerPaneRegion(
+                    maxHeight: pendingBudget,
+                    child: _buildPendingRemoteChange(context),
+                  ),
                 Expanded(child: _buildList(context, projects)),
                 ConstrainedBox(
                   constraints: BoxConstraints(
@@ -428,16 +436,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     final receipt = widget.model.pendingRemoteChanges.first;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Expanded(
-            child: Text(
-              _pendingRecoveryError ??
-                  'Pending remote change ${receipt.requestId}. Other writes are paused.',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
+          Text(
+            _pendingRecoveryError ??
+                'Pending remote change ${receipt.requestId}. Other writes are paused.',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
           TextButton.icon(
             onPressed: () async {

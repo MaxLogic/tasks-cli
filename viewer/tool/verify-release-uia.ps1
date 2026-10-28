@@ -161,7 +161,7 @@ function Find-ReleaseUiaElement {
 }
 
 function Test-ReleaseUiaSettingsSnapshot {
-    param([Parameter(Mandatory)][object[]]$Nodes)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Nodes)
 
     $required = @(
         @{ Name = 'Settings'; Types = @('ControlType.Dialog', 'ControlType.Custom') },
@@ -241,6 +241,46 @@ function Test-ReleaseUiaBareFlutterViewSnapshot {
     return ($node.Name -eq 'FLUTTERVIEW') -and ([string]$node.Type).StartsWith('MSAA.Role.', [System.StringComparison]::Ordinal)
 }
 
+function Wait-ReleaseUiaSettingsSnapshot {
+    param(
+        [Parameter(Mandatory)][scriptblock]$ReadSnapshot,
+        [Parameter(Mandatory)][scriptblock]$HasExited,
+        [Parameter(Mandatory)][double]$TimeoutSeconds
+    )
+    # Settings gets its own deadline, starting after its native Invoke action.
+    # Startup tree traversal must not consume the dialog's readiness budget.
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $nodes = @()
+    $checks = $null
+    do {
+        if (& $HasExited) {
+            return [pscustomobject]@{
+                Ok = $false; TimedOut = $false
+                Reason = 'The packaged viewer exited while opening Settings.'
+                Nodes = $nodes; Checks = $checks
+            }
+        }
+        $nodes = @(& $ReadSnapshot)
+        $checks = Test-ReleaseUiaSettingsSnapshot -Nodes $nodes
+        # A read started within the budget can return late under load. Its
+        # complete controls still prove readiness; do not report an empty timeout.
+        if ($checks.Ok) {
+            return [pscustomobject]@{
+                Ok = $true; TimedOut = $false; Reason = $null
+                Nodes = $nodes; Checks = $checks
+            }
+        }
+        $remainingMs = ($TimeoutSeconds - $watch.Elapsed.TotalSeconds) * 1000
+        if ($remainingMs -le 0) { break }
+        Start-Sleep -Milliseconds ([int][math]::Min(200, [math]::Ceiling($remainingMs)))
+    } while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    return [pscustomobject]@{
+        Ok = $false; TimedOut = $true
+        Reason = "Settings readiness timed out after $TimeoutSeconds s. $($checks.Findings -join ' ')"
+        Nodes = $nodes; Checks = $checks
+    }
+}
+
 function Invoke-ReleaseUiaAttempt {
     <#
     .SYNOPSIS
@@ -284,6 +324,7 @@ function Invoke-ReleaseUiaAttempt {
             if ($process.HasExited) {
                 return [pscustomobject]@{
                     Ok = $false
+                    TimedOut = $false
                     Reason = "The packaged viewer exited before the UIA tree was ready (exit $($process.ExitCode))."
                     Nodes = @()
                     NodeCount = 0
@@ -319,6 +360,7 @@ function Invoke-ReleaseUiaAttempt {
                         if ($settingsButton.Count -ne 1) {
                             return [pscustomobject]@{
                                 Ok = $false
+                                TimedOut = $false
                                 Reason = 'Expected exactly one accessible Settings button.'
                                 Nodes = $lastNodes
                                 NodeCount = $lastNodes.Count
@@ -338,6 +380,7 @@ function Invoke-ReleaseUiaAttempt {
                         if ($null -eq $settingsButton) {
                             return [pscustomobject]@{
                                 Ok = $false
+                                TimedOut = $false
                                 Reason = 'Settings is absent from the packaged release UIA tree.'
                                 Nodes = $lastNodes
                                 NodeCount = $lastNodes.Count
@@ -353,6 +396,7 @@ function Invoke-ReleaseUiaAttempt {
                         if ($null -eq $invoke) {
                             return [pscustomobject]@{
                                 Ok = $false
+                                TimedOut = $false
                                 Reason = 'Settings has no native UIA Invoke action.'
                                 Nodes = $lastNodes
                                 NodeCount = $lastNodes.Count
@@ -366,34 +410,21 @@ function Invoke-ReleaseUiaAttempt {
                         }
                         $invoke.Invoke()
                     }
-                    $settingsCheck = $null
-                    $settingsNodes = @()
-                    do {
-                        if ($process.HasExited) {
-                            return [pscustomobject]@{
-                                Ok = $false
-                                Reason = 'The packaged viewer exited while opening Settings.'
-                                Nodes = $lastNodes
-                                NodeCount = $lastNodes.Count
-                                ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
-                                Backend = $backend
-                                WindowName = $windowName
-                                SettingsChecks = $null
-                                SettingsNodes = @()
-                                ProcessId = $process.Id
-                            }
-                        }
-                        $settingsNodes = if ($backend -eq 'MSAA') {
+                    $settingsWait = Wait-ReleaseUiaSettingsSnapshot -TimeoutSeconds $TimeoutSeconds `
+                        -HasExited { $process.HasExited } -ReadSnapshot {
+                        if ($backend -eq 'MSAA') {
                             @(Get-ReleaseMsaaNode -WindowHandle $window.Current.NativeWindowHandle)
-                        } else { @(Get-ReleaseUiaNode -Window $window) }
-                        $settingsCheck = Test-ReleaseUiaSettingsSnapshot -Nodes $settingsNodes
-                        if ($settingsCheck.Ok) { break }
-                        Start-Sleep -Milliseconds 200
-                    } while ([datetime]::UtcNow -lt $deadline)
-                    if (-not $settingsCheck.Ok) {
+                        } else {
+                            @(Get-ReleaseUiaNode -Window $window)
+                        }
+                    }
+                    $settingsCheck = $settingsWait.Checks
+                    $settingsNodes = $settingsWait.Nodes
+                    if (-not $settingsWait.Ok) {
                         return [pscustomobject]@{
                             Ok = $false
-                            Reason = "Settings was not accessible through $backend`: $($settingsCheck.Findings -join ' ')"
+                            TimedOut = $settingsWait.TimedOut
+                            Reason = "$($settingsWait.Reason) Backend: $backend."
                             Nodes = $lastNodes
                             NodeCount = $lastNodes.Count
                             ElapsedSeconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
@@ -406,6 +437,7 @@ function Invoke-ReleaseUiaAttempt {
                     }
                     return [pscustomobject]@{
                         Ok = $true
+                        TimedOut = $false
                         Reason = $null
                         Nodes = $lastNodes
                         NodeCount = $lastNodes.Count
@@ -452,7 +484,7 @@ function Invoke-ReleaseUiaAttempt {
 function Invoke-ReleaseUiaProbe {
     <#
     .DESCRIPTION
-    Runs one timed attempt against the packaged viewer. A 2026-09-30 run
+    Runs one attempt with separate startup and Settings deadlines. A 2026-09-30 run
     (HEAD 47ab4f5) timed out after 45 s with the OS's own default
     FLUTTERVIEW MSAA object (see Test-ReleaseUiaBareFlutterViewSnapshot);
     the identical exe hash re-ran cleanly moments later. When, and only
@@ -514,7 +546,9 @@ function Invoke-ReleaseUiaProbe {
     [Console]::Error.WriteLine("UIA attempt 1 finished: ok=$($first.Ok), nodes=$($first.NodeCount), elapsed=$($first.ElapsedSeconds)s, reason=$($first.Reason)")
     $attempt = $first
     $retried = $false
-    if (-not $first.Ok -and $first.TimedOut -and (Test-ReleaseUiaBareFlutterViewSnapshot -Nodes $first.Nodes)) {
+    $timeoutProperty = $first.PSObject.Properties['TimedOut']
+    if (-not $first.Ok -and $null -ne $timeoutProperty -and $timeoutProperty.Value -and
+        (Test-ReleaseUiaBareFlutterViewSnapshot -Nodes $first.Nodes)) {
         $retried = $true
         [Console]::Error.WriteLine('UIA attempt 2 starting after the bare-FLUTTERVIEW startup signature.')
         $attempt = & $AttemptFunction @attemptArgs

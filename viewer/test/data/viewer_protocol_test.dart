@@ -5,6 +5,8 @@
 /// error the user can act on, never a silently empty list.
 library;
 
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/data/models.dart';
 
@@ -239,6 +241,44 @@ void main() {
   });
 
   group('ViewerErrorEnvelope', () {
+    for (final (detail, expected) in [
+      ('remote authentication failed', 'Remote authentication failed.'),
+      ('already punctuated!', 'Already punctuated!'),
+      ('   ', 'The tasks CLI failed.'),
+      ('x' * 501, 'X${'x' * 499}...'),
+    ]) {
+      test('formats bounded sentence: ${expected.substring(0, 12)}', () {
+        final decoded = ViewerErrorEnvelope.tryDecode(
+          jsonEncode({
+            'error': {'code': 'authentication', 'message': detail},
+          }),
+        )!;
+        expect(
+          decoded.asFailure(5).message,
+          '$expected Error code: authentication.',
+        );
+      });
+    }
+
+    for (final cluster in [
+      '\u{1f600}',
+      'e\u0301',
+      '\u{1f469}\u200d\u{1f4bb}',
+    ]) {
+      test('long diagnostic preserves whole grapheme $cluster', () {
+        final prefix = 'A${'a' * 498}';
+        final decoded = ViewerErrorEnvelope.tryDecode(
+          jsonEncode({
+            'error': {'code': 'validation', 'message': '$prefix${cluster}tail'},
+          }),
+        )!;
+        expect(
+          decoded.asFailure(2).message,
+          '$prefix... Error code: validation.',
+        );
+      });
+    }
+
     test('decodes a conflict with both versions', () {
       final decoded = ViewerErrorEnvelope.tryDecode(
         '{"schema_version":1,"error":{"code":"version_conflict",'

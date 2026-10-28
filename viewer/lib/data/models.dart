@@ -11,6 +11,20 @@ library;
 
 import 'dart:convert';
 
+import 'package:characters/characters.dart';
+
+/// Bounds diagnostic detail to 500 UTF-16 code units without splitting a
+/// grapheme, keeping the same display budget as plain CLI stderr.
+String viewerTruncateDiagnostic(String text) {
+  if (text.length <= 500) return text;
+  final result = StringBuffer();
+  for (final character in text.characters) {
+    if (result.length + character.length > 500) break;
+    result.write(character);
+  }
+  return '$result...';
+}
+
 /// The only protocol version this client understands.
 const int viewerProtocolVersion = 1;
 
@@ -760,7 +774,10 @@ final class ViewerErrorEnvelope {
     } on FormatException {
       return null;
     }
-    if (root is! Map<String, Object?> || root['schema_version'] != 1) {
+    // Some CLI error paths return the unversioned error envelope. A supplied
+    // version must still be supported; success envelopes remain versioned.
+    if (root is! Map<String, Object?> ||
+        (root.containsKey('schema_version') && root['schema_version'] != 1)) {
       return null;
     }
     final error = root['error'];
@@ -817,14 +834,28 @@ final class ViewerErrorEnvelope {
     );
   }
 
-  ViewerCliErrorFailure asFailure(int exitCode) => ViewerCliErrorFailure(
-    code: code,
-    message: message,
-    exitCode: exitCode,
-    conflictExpected: conflictExpected,
-    conflictCurrent: conflictCurrent,
-    openPrerequisites: openPrerequisites,
-  );
+  ViewerCliErrorFailure asFailure(int exitCode) {
+    var detail = message.trim();
+    if (detail.isNotEmpty) {
+      final first = detail.characters.first;
+      detail = viewerTruncateDiagnostic(
+        '${first.toUpperCase()}${detail.substring(first.length)}',
+      );
+    }
+    final sentence = detail.isEmpty
+        ? 'The tasks CLI failed.'
+        : RegExp(r'[.!?]$').hasMatch(detail)
+        ? detail
+        : '$detail.';
+    return ViewerCliErrorFailure(
+      code: code,
+      message: '$sentence Error code: $code.',
+      exitCode: exitCode,
+      conflictExpected: conflictExpected,
+      conflictCurrent: conflictCurrent,
+      openPrerequisites: openPrerequisites,
+    );
+  }
 }
 
 /// Decodes one JSON document, rejecting duplicate object keys everywhere.

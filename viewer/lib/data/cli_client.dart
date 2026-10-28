@@ -1264,10 +1264,7 @@ class ViewerCliClient
       }
       throw ViewerCliErrorFailure(
         code: 'unparsed_error',
-        message:
-            _firstLine(stderr) ??
-            'The tasks CLI exited with code $exitCode and no diagnostic '
-                'message.',
+        message: _readableDiagnostic(stderr, exitCode),
         exitCode: exitCode,
       );
     }
@@ -1297,12 +1294,20 @@ class ViewerCliClient
     for (final line in text.split('\n')) {
       final trimmed = line.trim();
       if (trimmed.isNotEmpty) {
-        return trimmed.length > 500
-            ? '${trimmed.substring(0, 500)}...'
-            : trimmed;
+        return viewerTruncateDiagnostic(trimmed);
       }
     }
     return null;
+  }
+
+  static String _readableDiagnostic(String stderr, int exitCode) {
+    final trimmed = stderr.trimLeft();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return 'The tasks CLI failed with an unreadable error response '
+          '(code: unparsed_error, exit: $exitCode).';
+    }
+    return _firstLine(stderr) ??
+        'The tasks CLI exited with code $exitCode and no diagnostic message.';
   }
 }
 

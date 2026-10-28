@@ -320,6 +320,36 @@ Future<ViewerCliClient> probedClient(
 }
 
 void main() {
+  for (final diagnostic in [
+    '{"error":{"code":"authentication","message":"Remote authentication failed."}}',
+    '{"schema_version":2,"error":{"code":"authentication","message":"Denied"}}',
+    '{"error":{"code":"authentication","message":7}}',
+    '{"error":',
+    '{"error":{"code":"a","code":"b","message":"Denied"}}',
+  ]) {
+    test(
+      'CLI JSON errors never become raw diagnostic text: $diagnostic',
+      () async {
+        final launcher = ScriptedLauncher();
+        final client = await probedClient(launcher);
+        launcher
+          ..exit = 5
+          ..stderrBytes = [utf8.encode(diagnostic)];
+        await expectLater(
+          client.fetchProjects(const ProjectQuery()),
+          throwsA(
+            isA<ViewerCliErrorFailure>()
+                .having(
+                  (e) => e.message,
+                  'readable message',
+                  isNot(contains('{')),
+                )
+                .having((e) => e.exitCode, 'exit', 5),
+          ),
+        );
+      },
+    );
+  }
   group('executable resolution', () {
     test('the launch argument wins and PATH is never a candidate', () {
       final client = buildClient(
