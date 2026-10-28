@@ -867,6 +867,223 @@ fn non_regular_fifo_sources_are_refused_without_waiting_for_a_writer() {
 
 #[cfg(feature = "test-hooks")]
 #[test]
+fn win32_source_preserves_priority_bytes_and_fresh_capture_tokens() {
+    let f = Fixture::new();
+    let dir = Path::new(&f.path("win32-source")).to_path_buf();
+    fs::create_dir(&dir).unwrap();
+    let capture = |args: &[&str]| {
+        f.cmd(args)
+            .env("TASKS_TEST_WIN32_CLIPBOARD_SOURCE", &dir)
+            .output()
+            .unwrap()
+    };
+    fs::write(dir.join("formats.json"), br#"["CF_DIB","PNG"]"#).unwrap();
+    let first = b"\x89PNG\r\n\x1a\nfirst PNG payload";
+    fs::write(dir.join("PNG.bin"), first).unwrap();
+    // No DIB file: selecting it would fail, proving PNG precedence.
+    let inspected = ok(capture(&["attachment", "clipboard"]));
+    assert_eq!(inspected["items"][0]["original_size"], first.len());
+    let second = b"\x89PNG\r\n\x1a\nchanged PNG payload";
+    fs::write(dir.join("PNG.bin"), second).unwrap();
+    error(
+        capture(&[
+            "attachment",
+            "add",
+            "1",
+            "--expect-version",
+            "1",
+            "--clipboard",
+            "--clipboard-token",
+            inspected["token"].as_str().unwrap(),
+        ]),
+        4,
+        "clipboard_changed",
+    );
+    let inspected = ok(capture(&["attachment", "clipboard"]));
+    let added = ok(capture(&[
+        "attachment",
+        "add",
+        "1",
+        "--expect-version",
+        "1",
+        "--clipboard",
+        "--clipboard-token",
+        inspected["token"].as_str().unwrap(),
+    ]));
+    assert_eq!(added["version"], 2);
+    let get = ok(f.run(&["attachment", "get", "1", "A1"], None));
+    assert_eq!(
+        fs::read(get["items"][0]["path"].as_str().unwrap()).unwrap(),
+        second
+    );
+
+    let file = f.path("Ω $literal `file`.txt");
+    fs::write(&file, b"drop payload").unwrap();
+    let mut drop = vec![0u8; 20];
+    drop[..4].copy_from_slice(&20u32.to_le_bytes());
+    drop[16..20].copy_from_slice(&1u32.to_le_bytes());
+    for path in [&file, &f.path("missing"), dir.to_str().unwrap()] {
+        for unit in path.encode_utf16().chain([0]) {
+            drop.extend(unit.to_le_bytes());
+        }
+    }
+    drop.extend([0, 0]);
+    fs::write(dir.join("CF_HDROP.bin"), drop).unwrap();
+    fs::write(
+        dir.join("formats.json"),
+        br#"["PNG","CF_HDROP","CF_DIBV5"]"#,
+    )
+    .unwrap();
+    let inspected = ok(capture(&["attachment", "clipboard"]));
+    assert_eq!(inspected["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inspected["items"][0]["path"], file);
+    assert_eq!(inspected["skipped"].as_array().unwrap().len(), 2);
+    let added = ok(capture(&[
+        "attachment",
+        "add",
+        "1",
+        "--expect-version",
+        "2",
+        "--clipboard",
+        "--clipboard-token",
+        inspected["token"].as_str().unwrap(),
+    ]));
+    assert_eq!(
+        added["attachments"][0]["media_type"],
+        "text/plain; charset=utf-8"
+    );
+
+    // A top-down 1x1 BGR DIB: exact red pixel, padded row.
+    let mut dib = vec![0u8; 40];
+    dib[..4].copy_from_slice(&40u32.to_le_bytes());
+    dib[4..8].copy_from_slice(&1i32.to_le_bytes());
+    dib[8..12].copy_from_slice(&(-1i32).to_le_bytes());
+    dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+    dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+    dib.extend([0, 0, 255, 0]);
+    fs::write(dir.join("CF_DIB.bin"), dib).unwrap();
+    fs::write(dir.join("formats.json"), br#"["CF_DIB"]"#).unwrap();
+    let inspected = ok(capture(&["attachment", "clipboard"]));
+    ok(capture(&[
+        "attachment",
+        "add",
+        "1",
+        "--expect-version",
+        "3",
+        "--clipboard",
+        "--clipboard-token",
+        inspected["token"].as_str().unwrap(),
+    ]));
+    let get = ok(f.run(&["attachment", "get", "1", "A3"], None));
+    let image = image::open(get["items"][0]["path"].as_str().unwrap())
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(image.as_raw(), &[255, 0, 0, 255]);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn win32_source_errors_and_limits_fail_before_store_mutation() {
+    let f = Fixture::new();
+    let dir = Path::new(&f.path("win32-errors")).to_path_buf();
+    fs::create_dir(&dir).unwrap();
+    let invoke = |formats: &[&str], exit, code| {
+        fs::write(
+            dir.join("formats.json"),
+            serde_json::to_vec(formats).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["attachment", "clipboard"],
+            vec![
+                "attachment",
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--clipboard",
+            ],
+        ] {
+            error(
+                f.cmd(&args)
+                    .env("TASKS_TEST_WIN32_CLIPBOARD_SOURCE", &dir)
+                    .output()
+                    .unwrap(),
+                exit,
+                code,
+            );
+        }
+    };
+    invoke(&[], 2, "clipboard_empty");
+    fs::write(dir.join("CF_DIBV5.bin"), [0u8; 8]).unwrap();
+    invoke(&["CF_DIBV5"], 6, "interop");
+    let image = fs::File::create(dir.join("PNG.bin")).unwrap();
+    image.set_len(20 * 1024 * 1024 + 1).unwrap();
+    drop(image);
+    invoke(&["PNG"], 2, "attachment_too_large");
+    let mut dib = vec![0u8; 124];
+    dib[..4].copy_from_slice(&124u32.to_le_bytes());
+    dib[4..8].copy_from_slice(&100000u32.to_le_bytes());
+    dib[8..12].copy_from_slice(&100000u32.to_le_bytes());
+    fs::write(dir.join("CF_DIBV5.bin"), dib).unwrap();
+    invoke(&["CF_DIBV5"], 2, "attachment_too_large");
+    let mut drop = vec![0u8; 20];
+    drop[..4].copy_from_slice(&20u32.to_le_bytes());
+    drop[16..20].copy_from_slice(&1u32.to_le_bytes());
+    for _ in 0..33 {
+        drop.extend([b'x', 0, 0, 0]);
+    }
+    drop.extend([0, 0]);
+    fs::write(dir.join("CF_HDROP.bin"), drop).unwrap();
+    invoke(&["CF_HDROP"], 2, "attachment_batch_too_large");
+    assert_eq!(ok(f.run(&["show", "1"], None))["version"], 1);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn win32_source_large_drop_counts_files_before_the_metadata_cap() {
+    let f = Fixture::new();
+    let dir = Path::new(&f.path("large-win32-drop")).to_path_buf();
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("formats.json"), br#"["CF_HDROP"]"#).unwrap();
+    let mut bytes = vec![0u8; 20];
+    bytes[..4].copy_from_slice(&20u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+    for _ in 0..5000 {
+        for _ in 0..128 {
+            bytes.extend([b'x', 0]);
+        }
+        bytes.extend([0, 0]);
+    }
+    bytes.extend([0, 0]);
+    assert!(bytes.len() > 1024 * 1024);
+    fs::write(dir.join("CF_HDROP.bin"), bytes).unwrap();
+    for args in [
+        vec!["attachment", "clipboard"],
+        vec![
+            "attachment",
+            "add",
+            "1",
+            "--expect-version",
+            "1",
+            "--clipboard",
+        ],
+    ] {
+        let message = error(
+            f.cmd(&args)
+                .env("TASKS_TEST_WIN32_CLIPBOARD_SOURCE", &dir)
+                .output()
+                .unwrap(),
+            2,
+            "attachment_batch_too_large",
+        );
+        assert!(message.contains("5000"), "{message}");
+    }
+    assert_eq!(ok(f.run(&["show", "1"], None))["version"], 1);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
 fn clipboard_errors_are_mapped_without_opening_a_store() {
     let f = Fixture::new();
     let dir = f.path("broken-clipboard");

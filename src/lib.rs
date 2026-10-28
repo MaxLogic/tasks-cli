@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)] // Owner-approved Win32 clipboard FFI is isolated in one module.
 
 pub mod attachment;
 pub mod attribution;

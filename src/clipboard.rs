@@ -5,6 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(any(windows, test, feature = "test-hooks"))]
+mod native;
+
 const MAX_CLIPBOARD_IMAGE: u64 = 20 * 1024 * 1024;
 const MAX_CLIPBOARD_LIST: u64 = 1024 * 1024;
 const MAX_CLIPBOARD_FILE: u64 = 256 * 1024 * 1024;
@@ -288,6 +291,7 @@ fn inspect_files(
     Ok(capture)
 }
 
+#[cfg(any(windows, test, feature = "test-hooks"))]
 fn inspect_drop(
     count: u64,
     files: Vec<PathBuf>,
@@ -310,10 +314,12 @@ fn inspect_drop(
     inspect_files(files, Vec::new())
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 fn read_png(path: &Path) -> Result<Vec<u8>, ClipboardCaptureError> {
     read_png_with(path, read_png_stream)
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 fn read_png_with(
     path: &Path,
     read_content: impl FnOnce(std::fs::File) -> Result<Vec<u8>, ClipboardCaptureError>,
@@ -332,6 +338,7 @@ fn read_png_with(
     read_content(file)
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
 fn read_png_stream(input: impl Read) -> Result<Vec<u8>, ClipboardCaptureError> {
     let mut bytes = Vec::new();
     input
@@ -454,11 +461,25 @@ pub fn read_attachments(work_dir: &Path) -> Result<ClipboardCapture, ClipboardCa
     {
         let fixture = std::env::var_os("TASKS_TEST_CLIPBOARD_FIXTURE");
         with_fixture(fixture.as_deref().map(Path::new), || {
-            read_attachments_backend(work_dir, backend()?)
+            if let Some(dir) = std::env::var_os("TASKS_TEST_WIN32_CLIPBOARD_SOURCE") {
+                return native::capture_fixture(Path::new(&dir));
+            }
+            read_attachments_backend(work_dir, attachment_backend()?)
         })
     }
     #[cfg(not(feature = "test-hooks"))]
-    read_attachments_backend(work_dir, backend()?)
+    read_attachments_backend(work_dir, attachment_backend()?)
+}
+
+fn attachment_backend() -> Result<Backend, AppError> {
+    // Windows-owned stores have already delegated the whole command to tasks.exe.
+    // A native Linux store uses its own Wayland/X11 desktop, including under WSL.
+    choose_backend(
+        cfg!(windows),
+        false,
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+    )
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -485,74 +506,17 @@ fn read_attachments_backend(
                 )
                 .into());
             }
-            let image_path = work_dir.join(format!("clipboard-{}.png", uuid::Uuid::new_v4()));
-            let result = (|| {
-                let mut command = Command::new("powershell.exe");
-                command.args([
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-STA",
-                    "-Command",
-                    include_str!("clipboard_attach.ps1"),
-                ]);
-                let request = serde_json::to_vec(&serde_json::json!({"image_path": image_path}))
-                    .map_err(AppError::from)?;
-                let reply = attachment_run_windows(command, &request, MAX_CLIPBOARD_LIST)?;
-                #[derive(serde::Deserialize)]
-                struct Reply {
-                    files: Vec<PathBuf>,
-                    count: u64,
-                    image: bool,
-                    #[serde(default)]
-                    too_large: bool,
-                    measured: Option<u64>,
-                    limit: Option<u64>,
-                    unit: Option<String>,
-                }
-                let reply: Reply = serde_json::from_slice(&reply).map_err(AppError::from)?;
-                if reply.too_large {
-                    let measured = reply.measured.ok_or_else(|| {
-                        AppError::Interop("clipboard helper omitted measured size".into())
-                    })?;
-                    let limit = reply.limit.ok_or_else(|| {
-                        AppError::Interop("clipboard helper omitted size limit".into())
-                    })?;
-                    let unit = match reply.unit.as_deref() {
-                        Some("bytes") => "bytes",
-                        Some("bitmap_bytes") => "bitmap_bytes",
-                        _ => {
-                            return Err(AppError::Interop(
-                                "clipboard helper returned invalid measurement unit".into(),
-                            )
-                            .into())
-                        }
-                    };
-                    return Err(ClipboardCaptureError::too_large(
-                        "attachment_too_large",
-                        measured,
-                        limit,
-                        unit,
-                    ));
-                }
-                let mut capture = inspect_drop(reply.count, reply.files)?;
-                if reply.image {
-                    capture.image = Some(read_png(&image_path)?);
-                }
-                Ok::<_, ClipboardCaptureError>(capture)
-            })();
-            let cleanup = match std::fs::remove_file(&image_path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(AppError::io_path(
-                    "remove clipboard temporary image",
-                    &image_path,
-                    e,
-                )),
-            };
-            let capture = result?;
-            cleanup?;
-            require_content(capture)
+            #[cfg(any(windows, test, feature = "test-hooks"))]
+            {
+                native::capture()
+            }
+            #[cfg(not(any(windows, test, feature = "test-hooks")))]
+            {
+                Err(AppError::Interop(
+                    "Windows attachment capture must run through tasks.exe".into(),
+                )
+                .into())
+            }
         }
         Backend::Wayland | Backend::X11 => {
             let name = if selected == Backend::Wayland {
@@ -640,22 +604,8 @@ fn attachment_run(
     )
 }
 
-fn attachment_run_windows(
-    command: Command,
-    input: &[u8],
-    limit: u64,
-) -> Result<Vec<u8>, ClipboardCaptureError> {
-    attachment_run_with_budgets(
-        command,
-        input,
-        "PowerShell clipboard helper",
-        limit,
-        HelperBudgets::windows(),
-        |_| {},
-    )
-}
-
-// Windows uses only std::process: the static STA script spawns no children.
+// Synthetic Windows transport tests use std::process; production attachment
+// subprocess capture uses this supervisor for Linux wl-paste/xclip only.
 // Deliberately no Job Object dependency/unsafe code. A descendant inheriting
 // pipes could outlive the CLI; the independent 500 ms pipe grace still bounds
 // return latency. Linux retains process-group termination through safe rustix.
@@ -758,28 +708,9 @@ enum HelperIo {
     Diagnostics(std::io::Result<u64>),
 }
 
-#[derive(Clone, Copy)]
-struct HelperBudgets {
-    startup: Option<std::time::Duration>,
-    capture: std::time::Duration,
-}
-
-impl HelperBudgets {
-    fn windows() -> Self {
-        // 15 s startup + 10 s capture + 500 ms shutdown leaves 4.5 s for CLI
-        // startup, queued-write wait and storage inside the viewer's 30 s budget.
-        Self {
-            startup: Some(std::time::Duration::from_secs(15)),
-            capture: std::time::Duration::from_secs(10),
-        }
-    }
-}
-
 #[derive(Default)]
 struct ClipboardProgress {
     phase: std::sync::atomic::AtomicU8,
-    // Only the first started marker arms capture. Later markers cannot reset it.
-    started: std::sync::OnceLock<std::time::Instant>,
 }
 
 // Only fixed literals cross the diagnostic boundary. Never retain or display
@@ -922,9 +853,6 @@ fn drain_clipboard_diagnostics(
                 if !discard_line {
                     let line = line.strip_suffix(b"\r").unwrap_or(&line);
                     if let Some(parsed) = ClipboardPhase::from_marker(line) {
-                        if matches!(parsed, ClipboardPhase::Started) {
-                            progress.started.get_or_init(std::time::Instant::now);
-                        }
                         progress.phase.store(parsed as u8, Ordering::Relaxed);
                     }
                 }
@@ -1014,27 +942,6 @@ fn attachment_run_with_deadline(
     deadline: std::time::Duration,
     observe_child: impl FnOnce(u32),
 ) -> Result<Vec<u8>, ClipboardCaptureError> {
-    attachment_run_with_budgets(
-        command,
-        input,
-        name,
-        limit,
-        HelperBudgets {
-            startup: None,
-            capture: deadline,
-        },
-        observe_child,
-    )
-}
-
-fn attachment_run_with_budgets(
-    command: Command,
-    input: &[u8],
-    name: &str,
-    limit: u64,
-    budgets: HelperBudgets,
-    observe_child: impl FnOnce(u32),
-) -> Result<Vec<u8>, ClipboardCaptureError> {
     use std::time::{Duration, Instant};
     let started = Instant::now();
     let (child_stdin, mut stdin) = std::io::pipe()?;
@@ -1079,7 +986,7 @@ fn attachment_run_with_budgets(
     let mut bytes = None;
     let mut drained = None;
     let mut overflow = None;
-    let mut timed_out = None;
+    let mut timed_out = false;
     let mut status = None;
     let mut monitor_error = None;
     loop {
@@ -1107,14 +1014,7 @@ fn attachment_run_with_budgets(
         if overflow.is_some() {
             break;
         }
-        let (budget_started, budget, startup_timeout) = match budgets.startup {
-            Some(startup) => match progress.started.get().copied() {
-                Some(first) if first <= started + startup => (first, budgets.capture, false),
-                _ => (started, startup, true),
-            },
-            None => (started, budgets.capture, false),
-        };
-        let deadline = budget_started + budget;
+        let expires = started + deadline;
         // Completion wins when the helper exited before this monitoring turn,
         // even if scheduling delayed us past the deadline.
         match tree.exit_success() {
@@ -1128,12 +1028,12 @@ fn attachment_run_with_budgets(
                 break;
             }
         }
-        if Instant::now() >= deadline {
-            timed_out = Some((budget_started, budget, startup_timeout));
+        if Instant::now() >= expires {
+            timed_out = true;
             break;
         }
         std::thread::sleep(
-            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            Duration::from_millis(5).min(expires.saturating_duration_since(Instant::now())),
         );
     }
     // Terminate the direct Windows helper / Linux group at every boundary.
@@ -1164,34 +1064,16 @@ fn attachment_run_with_budgets(
     if let Some(error) = monitor_error {
         return Err(AppError::Interop(format!("cannot monitor {name}: {error}")).into());
     }
-    if let Some((budget_started, budget, startup_timeout)) = timed_out {
-        if startup_timeout {
-            let mut error = helper_unavailable(
-                name,
-                "startup timed out",
-                elapsed,
-                duration_ms(budget_started.elapsed()),
-                duration_ms(budget),
-                "milliseconds",
-            );
-            if let ClipboardCaptureError::Unavailable { details, source } = &mut error {
-                details.message = format!("PowerShell was slow to start (system busy?). Try again in a moment. (phase: startup; elapsed: {} ms)", duration_ms(elapsed));
-                *source = AppError::Interop(details.message.clone());
-            }
-            return Err(error);
-        }
+    if timed_out {
         let phase =
-            ClipboardPhase::from_code(progress.phase.load(std::sync::atomic::Ordering::Relaxed))
-                .or_else(|| {
-                    (name == "PowerShell clipboard helper").then_some(ClipboardPhase::Started)
-                });
+            ClipboardPhase::from_code(progress.phase.load(std::sync::atomic::Ordering::Relaxed));
         return Err(with_clipboard_phase(
             helper_unavailable(
                 name,
                 &format!("timed out after {} ms", duration_ms(elapsed)),
                 elapsed,
-                duration_ms(budget_started.elapsed()),
-                duration_ms(budget),
+                duration_ms(started.elapsed()),
+                duration_ms(deadline),
                 "milliseconds",
             ),
             phase,
@@ -1336,6 +1218,12 @@ fn windows(request: serde_json::Value) -> Result<Vec<u8>, AppError> {
         "-Command",
         include_str!("clipboard.ps1"),
     ]);
+    windows_with(command, request)
+}
+
+fn windows_with(command: Command, request: serde_json::Value) -> Result<Vec<u8>, AppError> {
+    // Preserve the original text-helper transport and error semantics. Enrich
+    // validates the 16 MiB input limit after acquisition (Validation, exit 2).
     run(
         command,
         &serde_json::to_vec(&request)?,
@@ -1401,6 +1289,71 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Synthetic console processes only: no Forms assembly or clipboard API.
+    fn r1_text_helper_fixture(mode: &str) -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("powershell.exe");
+            let script = match mode {
+                "oversize" => "[Console]::Out.Write(('x' * 16777217))",
+                "non-text" => "[Console]::Error.Write('The clipboard does not contain text.'); exit 1",
+                "changed" => "[Console]::Error.Write('The clipboard changed during enrichment; run the command again.'); exit 1",
+                _ => panic!("unknown text fixture"),
+            };
+            command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+            command
+        } else {
+            let mut command = Command::new("python3");
+            command.args([
+                "-c",
+                if mode == "oversize" {
+                    "import sys; sys.stdout.write('x'*16777217)"
+                } else {
+                    "import sys; sys.stderr.write('private diagnostic'); sys.exit(1)"
+                },
+            ]);
+            command
+        }
+    }
+
+    #[test]
+    fn r1_text_over_16_mib_keeps_validation_exit_and_message() {
+        let result = windows_with(
+            r1_text_helper_fixture("oversize"),
+            serde_json::json!({"action":"read"}),
+        )
+        .and_then(|bytes| {
+            let text = String::from_utf8(bytes).unwrap();
+            crate::enrich::enrich_using(&text, None, |_| panic!("must validate before lookup"))
+        });
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "validation");
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(
+            error.to_string(),
+            "validation: enrichment input exceeds 16 MiB; split the document"
+        );
+    }
+
+    #[test]
+    fn r1_text_non_text_and_changed_keep_prior_helper_failure_message() {
+        for mode in ["non-text", "changed"] {
+            let error = windows_with(
+                r1_text_helper_fixture(mode),
+                serde_json::json!({"action":"replace","expected":"old","replacement":"new"}),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "interop");
+            assert_eq!(error.exit_code(), 6);
+            let text = error.to_string();
+            assert!(
+                text.starts_with("interop: Windows clipboard helper failed ("),
+                "{text}"
+            );
+            assert!(text.ends_with("); the clipboard may be unavailable, locked, non-text, or changed; retry the command"), "{text}");
+            assert!(!text.contains("phase:") && !text.contains("starting clipboard support"));
+        }
+    }
+
     fn scratch() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("clipboard-unit-")
@@ -1432,223 +1385,11 @@ mod tests {
             ClipboardPhase::from_code(phase.phase.load(Ordering::Relaxed)),
             Some(ClipboardPhase::ReadingImage)
         ));
-        assert!(
-            phase.started.get().is_none(),
-            "only started may arm capture"
-        );
         let noisy = std::io::repeat(b'x').take(MAX_CLIPBOARD_LIST + 100);
         assert_eq!(
             drain_clipboard_diagnostics(noisy, &phase).unwrap(),
             MAX_CLIPBOARD_LIST + 1
         );
-        drain_clipboard_diagnostics(&b"TASKS_CLIPBOARD_PHASE_V1:started\n"[..], &phase).unwrap();
-        let first = *phase.started.get().unwrap();
-        drain_clipboard_diagnostics(&b"TASKS_CLIPBOARD_PHASE_V1:started\n"[..], &phase).unwrap();
-        assert_eq!(
-            *phase.started.get().unwrap(),
-            first,
-            "duplicate markers must not restart capture"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_data_objects_preserve_native_image_payload_types() {
-        let dir = scratch();
-        let mut script = format!(
-            "$ErrorActionPreference='Stop'\n. {{ {} }} -FunctionsOnly\n",
-            include_str!("clipboard_attach.ps1")
-        );
-        script.push_str(r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @'
-public static class DataObjectClipboard {
-    public static System.Windows.Forms.IDataObject Data;
-    public static System.Windows.Forms.IDataObject GetDataObject() { return Data; }
-    public static System.Drawing.Image GetImage() { throw new System.InvalidOperationException("unexpected fallback"); }
-}
-'@
-$bitmap = New-Object Drawing.Bitmap(1,2)
-$png = New-Object IO.MemoryStream
-try {
-    $bitmap.SetPixel(0,0,[Drawing.Color]::Red)
-    $bitmap.SetPixel(0,1,[Drawing.Color]::Blue)
-    $bitmap.Save($png,[Drawing.Imaging.ImageFormat]::Png)
-    $pngBytes = $png.ToArray()
-} finally { $bitmap.Dispose(); $png.Dispose() }
-$dib = New-Object IO.MemoryStream
-try {
-    $w = New-Object IO.BinaryWriter($dib)
-    $w.Write([uint32]124); $w.Write([int]1); $w.Write([int]-2)
-    $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]3); $w.Write([uint32]8)
-    $w.Write((New-Object byte[] 16))
-    $w.Write([uint32]0x00ff0000); $w.Write([uint32]0x0000ff00); $w.Write([uint32]0x000000ff); $w.Write([uint32]4278190080)
-    $w.Write([uint32]0x73524742); $w.Write((New-Object byte[] 64))
-    $w.Write([byte[]]@(0,0,255,255,255,0,0,255))
-    $dibBytes = $dib.ToArray()
-} finally { $dib.Dispose() }
-$results = @()
-Write-AttachmentClipboardPhase 'started'
-foreach ($format in @('PNG','Format17')) {
-    foreach ($representation in @('bytes','stream')) {
-        $case = $format + '-' + $representation
-        $bytes = $pngBytes
-        if ($format -eq 'Format17') { $bytes = $dibBytes }
-        $payload = $bytes
-        if ($representation -eq 'stream') { $payload = New-Object IO.MemoryStream(,$bytes) }
-        $data = New-Object Windows.Forms.DataObject
-        $data.SetData($format,$false,$payload)
-        [DataObjectClipboard]::Data = $data
-        try {
-            $native = $data.GetData($format,$false)
-            if (($representation -eq 'bytes' -and $native -isnot [byte[]]) -or
-                ($representation -eq 'stream' -and $native -isnot [IO.MemoryStream])) { throw 'invalid fixture payload type' }
-            $path = Join-Path $env:TASKS_CLIPBOARD_FIXTURE_ROOT ($case + '.png')
-            $reply = Get-AttachmentClipboardSnapshot ([DataObjectClipboard]) $path
-            if (-not $reply.image) { throw 'image missing' }
-            if ($format -eq 'PNG' -and
-                [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ne [Convert]::ToBase64String($pngBytes)) { throw 'PNG bytes changed' }
-            $image = [Drawing.Bitmap]::FromFile($path)
-            try {
-                if ($image.Width -ne 1 -or $image.Height -ne 2 -or
-                    $image.GetPixel(0,0).ToArgb() -ne [Drawing.Color]::Red.ToArgb() -or
-                    $image.GetPixel(0,1).ToArgb() -ne [Drawing.Color]::Blue.ToArgb()) { throw 'image pixels changed' }
-            } finally { $image.Dispose() }
-            $results += @{ case=$case; passed=$true }
-        } catch { $results += @{ case=$case; passed=$false; error=$_.Exception.Message } }
-        finally { if ($payload -is [IO.Stream]) { $payload.Dispose() } }
-    }
-}
-[Console]::Write((ConvertTo-Json -InputObject $results -Compress))
-"#);
-        let mut command = Command::new("powershell.exe");
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-STA",
-                "-Command",
-                &script,
-            ])
-            .env("TASKS_CLIPBOARD_FIXTURE_ROOT", dir.path());
-        let reply = attachment_run_windows(command, &[], MAX_CLIPBOARD_LIST).unwrap();
-        let cases: Vec<serde_json::Value> = serde_json::from_slice(&reply).unwrap();
-        assert_eq!(cases.len(), 4);
-        assert!(
-            cases.iter().all(|case| case["passed"] == true),
-            "DataObject cases: {cases:?}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_native_formats_and_dib_bounds_without_desktop_access() {
-        let dir = scratch();
-        let mut script = format!(
-            "$ErrorActionPreference='Stop'\n. {{ {} }} -FunctionsOnly\n",
-            include_str!("clipboard_attach.ps1")
-        );
-        script.push_str(r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
-public class NativeFixtureData {
-    public string[] GetFormats(bool auto) { if (auto) throw new System.Exception("conversion"); return NativeFixture.Formats; }
-    public object GetData(string format, bool auto) {
-        if (auto) throw new System.Exception("conversion");
-        NativeFixture.Reads++;
-        if (format == "FileDrop") return new [] { "first $file.txt", "second Ω.txt" };
-        if (format == "PNG") return new System.IO.MemoryStream(NativeFixture.Bytes);
-        if (format == "Format17") return new System.IO.MemoryStream(NativeFixture.Bytes);
-        if (format == "Bitmap" && NativeFixture.AllowBitmap) return new System.Drawing.Bitmap(1, 2);
-        throw new System.Exception("unexpected fallback: " + format);
-    }
-}
-public static class NativeFixture {
-    public static string[] Formats;
-    public static byte[] Bytes;
-    public static int Reads;
-    public static bool AllowBitmap;
-    public static NativeFixtureData GetDataObject() { return new NativeFixtureData(); }
-    public static System.Drawing.Image GetImage() { throw new System.Exception("unexpected conversion"); }
-}
-'@
-# FileDrop has priority over both native image formats; no path is opened.
-Write-AttachmentClipboardPhase 'started'
-[NativeFixture]::Formats = @('Bitmap', 'PNG', 'FileDrop')
-$reply = Get-AttachmentClipboardSnapshot ([NativeFixture]) 'unused'
-if ($reply.image -or $reply.count -ne 2 -or $reply.files[0] -ne 'first $file.txt' -or $reply.files[1] -ne 'second Ω.txt') { throw 'FileDrop priority or order failed' }
-[NativeFixture]::Reads = 0
-# Multiple native formats, exact PNG passthrough: the Bitmap path must never run.
-[NativeFixture]::Formats = @('Bitmap', 'PNG', 'Format17')
-[NativeFixture]::Bytes = [byte[]]@(137,80,78,71,13,10,26,10,42)
-$path = Join-Path $env:TASKS_CLIPBOARD_FIXTURE_ROOT 'native.png'
-$reply = Get-AttachmentClipboardSnapshot ([NativeFixture]) $path
-if (-not $reply.image -or [NativeFixture]::Reads -ne 1 -or
-    [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ne [Convert]::ToBase64String([NativeFixture]::Bytes)) { throw 'PNG passthrough failed' }
-# Known 1x2 opaque pixels in a BITMAPV5HEADER, bottom-up and top-down.
-foreach ($height in @(2, -2)) {
-    $dib = New-Object IO.MemoryStream
-    $w = New-Object IO.BinaryWriter($dib)
-    $w.Write([uint32]124); $w.Write([int]1); $w.Write([int]$height)
-    $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]3); $w.Write([uint32]8)
-    $w.Write((New-Object byte[] 16))
-    $w.Write([uint32]0x00ff0000); $w.Write([uint32]0x0000ff00); $w.Write([uint32]0x000000ff); $w.Write([uint32]4278190080)
-    $w.Write([uint32]0x73524742); $w.Write((New-Object byte[] 64))
-    if ($height -gt 0) { $w.Write([byte[]]@(255,0,0,255,0,0,255,255)) }
-    else { $w.Write([byte[]]@(0,0,255,255,255,0,0,255)) }
-    [NativeFixture]::Bytes = $dib.ToArray(); $dib.Dispose()
-    [NativeFixture]::Formats = @('Bitmap', 'DeviceIndependentBitmap', 'Format17')
-    [NativeFixture]::Reads = 0
-    $path = Join-Path $env:TASKS_CLIPBOARD_FIXTURE_ROOT ('dib' + $height + '.png')
-    $reply = Get-AttachmentClipboardSnapshot ([NativeFixture]) $path
-    $png = [Drawing.Bitmap]::FromFile($path)
-    try {
-        if (-not $reply.image -or [NativeFixture]::Reads -ne 1 -or $png.Width -ne 1 -or $png.Height -ne 2 -or
-            $png.GetPixel(0,0).R -ne 255 -or $png.GetPixel(0,1).B -ne 255) { throw 'DIB pixels or preferred format failed' }
-    } finally { $png.Dispose() }
-}
-# Unsupported DIB layouts retain the Bitmap fallback.
-$bytes = [NativeFixture]::Bytes.Clone()
-[BitConverter]::GetBytes([uint16]24).CopyTo($bytes,14)
-[NativeFixture]::Bytes = $bytes
-[NativeFixture]::AllowBitmap = $true
-[NativeFixture]::Reads = 0
-$path = Join-Path $env:TASKS_CLIPBOARD_FIXTURE_ROOT 'fallback.png'
-$reply = Get-AttachmentClipboardSnapshot ([NativeFixture]) $path
-if (-not $reply.image -or [NativeFixture]::Reads -ne 2) { throw 'DIB fallback failed' }
-[BitConverter]::GetBytes([uint16]32).CopyTo($bytes,14)
-# A plausible header must not permit oversized allocation/encoding.
-$bytes = [NativeFixture]::Bytes.Clone()
-[BitConverter]::GetBytes([int]100000).CopyTo($bytes,4)
-[BitConverter]::GetBytes([int]100000).CopyTo($bytes,8)
-$stream = New-Object IO.MemoryStream(,$bytes)
-try {
-    try { $null = Get-AttachmentDibV5Image $stream; throw 'limit missing' }
-    catch { if ($_.Exception.Message -ne 'too_large') { throw } }
-} finally { $stream.Dispose() }
-$stream = New-Object IO.MemoryStream(,[NativeFixture]::Bytes[0..125])
-try {
-    try { $null = Get-AttachmentDibV5Image $stream; throw 'truncation missing' }
-    catch { if ($_.Exception.Message -notlike '*Truncated DIBV5 pixels*') { throw } }
-} finally { $stream.Dispose() }
-[Console]::Write('native formats and bounds verified')
-"#);
-        let mut command = Command::new("powershell.exe");
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-STA",
-                "-Command",
-                &script,
-            ])
-            .env("TASKS_CLIPBOARD_FIXTURE_ROOT", dir.path());
-        let reply = attachment_run_windows(command, &[], MAX_CLIPBOARD_LIST).unwrap();
-        assert_eq!(reply, b"native formats and bounds verified");
     }
 
     #[cfg(windows)]
@@ -1680,63 +1421,6 @@ try {
         )
         .unwrap();
         assert!(reply.ends_with(b"fixture complete"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_slow_start_does_not_consume_capture_budget() {
-        let mut command = phase_fixture("success");
-        command.env("TASKS_CLIPBOARD_STARTUP_DELAY_MS", "11100");
-        let started = std::time::Instant::now();
-        let reply = attachment_run_windows(command, &[], MAX_CLIPBOARD_LIST).unwrap();
-        assert!(reply.ends_with(b"fixture complete"));
-        assert!(started.elapsed() >= std::time::Duration::from_millis(11100));
-        assert!(started.elapsed() < std::time::Duration::from_secs(18));
-        eprintln!(
-            "slow-start success: {} ms total",
-            duration_ms(started.elapsed())
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_startup_allowance_has_a_distinct_bounded_error() {
-        let mut command = phase_fixture("success");
-        command.env("TASKS_CLIPBOARD_STARTUP_DELAY_MS", "22000");
-        let started = std::time::Instant::now();
-        let error = attachment_run_windows(command, &[], MAX_CLIPBOARD_LIST).unwrap_err();
-        assert_eq!(error.code(), "interop");
-        assert_eq!(error.exit_code(), 6);
-        assert_eq!(error.details().limit, Some(15000));
-        assert!(
-            error.to_string().contains("PowerShell was slow to start"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("phase: startup"));
-        assert!(started.elapsed() >= std::time::Duration::from_secs(15));
-        assert!(started.elapsed() < std::time::Duration::from_secs(18));
-        eprintln!(
-            "startup deadline: {error}; limit {:?} ms",
-            error.details().limit
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_capture_still_times_out_ten_seconds_after_start() {
-        let started = std::time::Instant::now();
-        let error = attachment_run_windows(phase_fixture("reading_image"), &[], MAX_CLIPBOARD_LIST)
-            .unwrap_err();
-        assert_eq!(error.details().limit, Some(10000));
-        assert!(error.details().measured.unwrap() >= 10000);
-        assert!(error.to_string().contains("reading the image"), "{error}");
-        assert!(error.to_string().contains("phase: reading_image"));
-        assert!(started.elapsed() >= std::time::Duration::from_secs(10));
-        assert!(started.elapsed() < std::time::Duration::from_secs(13));
-        eprintln!(
-            "capture deadline: {error}; limit {:?} ms",
-            error.details().limit
-        );
     }
 
     #[cfg(windows)]
@@ -1828,9 +1512,6 @@ try {
     #[ignore = "synthetic subprocess entry point; never accesses the desktop clipboard"]
     fn synthetic_clipboard_phase_helper() {
         let phase = std::env::var("TASKS_CLIPBOARD_PHASE_FIXTURE").unwrap();
-        if let Ok(delay) = std::env::var("TASKS_CLIPBOARD_STARTUP_DELAY_MS") {
-            std::thread::sleep(std::time::Duration::from_millis(delay.parse().unwrap()));
-        }
         eprintln!("TASKS_CLIPBOARD_PHASE_V1:started");
         if phase == "success" {
             std::io::stdout().write_all(b"fixture complete").unwrap();
@@ -1867,77 +1548,6 @@ try {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_busy_twice_then_succeeds_without_desktop_access() {
-        let dir = scratch();
-        let mut script = format!(
-            "$ErrorActionPreference='Stop'\n. {{ {} }} -FunctionsOnly\n",
-            include_str!("clipboard_attach.ps1")
-        );
-        script.push_str(r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
-public class FixtureData {
-    public string[] GetFormats(bool auto) { return new [] { "Bitmap" }; }
-    public object GetData(string format, bool auto) {
-        if (auto || format != "Bitmap") throw new System.InvalidOperationException("unexpected conversion");
-        return BusyClipboard.GetImage();
-    }
-}
-public static class BusyClipboard {
-    public static int Attempts;
-    public static int Mode;
-    public static FixtureData GetDataObject() { return new FixtureData(); }
-    public static bool ContainsFileDropList() { return false; }
-    public static bool ContainsData(string format) { return false; }
-    public static bool ContainsImage() { return true; }
-    public static System.Drawing.Image GetImage() {
-        Attempts++;
-        if (Mode == 2) throw new System.IO.IOException("not clipboard busy");
-        if (Mode == 1 || Attempts <= 2) throw new System.Runtime.InteropServices.ExternalException("clipboard in use", unchecked((int)0x800401D0));
-        return new System.Drawing.Bitmap(2, 3);
-    }
-}
-'@
-Write-AttachmentClipboardPhase 'started'
-$reply = Get-AttachmentClipboardSnapshot -ClipboardType ([BusyClipboard]) -ImagePath $env:TASKS_CLIPBOARD_IMAGE_FIXTURE
-if ([BusyClipboard]::Attempts -ne 3 -or -not $reply.image) { throw 'busy retry failed' }
-foreach ($mode in @(1,2)) {
-    [BusyClipboard]::Mode = $mode; [BusyClipboard]::Attempts = 0
-    try { $null = Get-AttachmentClipboardSnapshot ([BusyClipboard]) $env:TASKS_CLIPBOARD_IMAGE_FIXTURE; throw 'expected failure' }
-    catch {
-        $expected = if ($mode -eq 1) { 4 } else { 1 }
-        if ([BusyClipboard]::Attempts -ne $expected) { throw 'incorrect retry count' }
-    }
-}
-[Console]::Write(($reply | ConvertTo-Json -Compress))
-"#);
-        let mut command = Command::new("powershell.exe");
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-STA",
-                "-Command",
-                &script,
-            ])
-            .env(
-                "TASKS_CLIPBOARD_IMAGE_FIXTURE",
-                dir.path().join("image.png"),
-            );
-        let reply = attachment_run_windows(command, &[], MAX_CLIPBOARD_LIST).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&reply).unwrap()["image"],
-            true
-        );
-        assert!(std::fs::read(dir.path().join("image.png"))
-            .unwrap()
-            .starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[test]

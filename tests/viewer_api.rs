@@ -656,36 +656,29 @@ fn every_advertised_attachment_operation_is_accepted_by_the_cli() {
             "attachment-clipboard" => vec!["attachment", "clipboard"],
             _ => panic!("advertised attachment operation has no CLI probe: {operation}"),
         };
+        // A default Windows build has no injectable source. Check CLI parsing
+        // only: hiding PowerShell from PATH cannot disable native Win32 capture.
+        #[cfg(all(windows, not(feature = "test-hooks")))]
+        if operation == "attachment-clipboard" {
+            let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
+                .args(["attachment", "clipboard", "--help"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            probed.push(operation);
+            continue;
+        }
         let args = viewer_args(project.data_root.path(), Some(&project.id_text()), &tail);
-        // Probe helper failure rather than reading the owner's clipboard.
+        // Native Linux defaults fail headless; test-hooks uses an invalid source
+        // to check the interop mapping without ever opening the desktop clipboard.
         let helper_root = project.data_root.path().join("no-clipboard-helpers");
         fs::create_dir_all(&helper_root).unwrap();
-        #[cfg(windows)]
-        if operation == "attachment-clipboard" {
-            // Windows searches these directories before PATH. Refuse this
-            // probe if any could launch a real PowerShell clipboard helper.
-            let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
-            for directory in [
-                Path::new(env!("CARGO_BIN_EXE_tasks"))
-                    .parent()
-                    .unwrap()
-                    .to_path_buf(),
-                helper_root.clone(),
-                windows.join("System32"),
-                windows.join("System"),
-                windows,
-            ] {
-                assert!(
-                    !directory.join("powershell.exe").exists(),
-                    "clipboard probe requires an unavailable helper: {}",
-                    directory.display()
-                );
-            }
-        }
+        fs::write(helper_root.join("formats.json"), b"invalid fixture JSON").unwrap();
         let output = support::process::command(env!("CARGO_BIN_EXE_tasks"))
             .args(args)
             .current_dir(&helper_root)
             .env("PATH", &helper_root)
+            .env("TASKS_TEST_WIN32_CLIPBOARD_SOURCE", &helper_root)
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY")
             .env_remove("WSL_DISTRO_NAME")
