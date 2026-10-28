@@ -1,83 +1,48 @@
 # tasks-cli
 
-A shared task backlog for coding agents and the architect coordinating them.
+A shared task backlog for coding agents and the architect who coordinates them.
 
-`tasks` keeps one SQLite task list per project, stored outside the working tree
-and keyed by a project UUID. Switch branches, add a worktree, or wipe and
-re-clone, and the backlog stays exactly where it was. Reads are bounded, so
-`list` and `search` hand back summary rows without dragging every task body
-along with them. Writes carry a version check, so two agents working the same
-backlog cannot silently overwrite each other.
+`tasks` keeps one SQLite task list per project. The database lives outside the
+working tree and is keyed by a project UUID, so switching branches, adding a
+worktree or re-cloning the repository leaves the backlog untouched. Every write
+states the task version it read, and a stale write fails instead of
+overwriting someone else's change.
 
-Local operation uses one synchronous executable and one SQLite connection per
-command. Optional remote profiles send signed HTTPS requests to the Rust
-`tasks-server`, which owns the same task databases. Remote access requires an
-online server. See [remote setup and recovery](integration/remote-cli.md).
-Multi-query reads use one WAL snapshot, so concurrent changes cannot mix task
-versions, rules and dependencies. Export verifies a complete snapshot and
-publishes without overwriting a competing file.
-
-The bundled engine is SQLite 3.53.2 through rusqlite 0.40.2. This is the engine
-in the current crate, not a claim to bundle the latest upstream SQLite patch.
+The CLI stores and queries work. It does not call an LLM or run task bodies.
+The agent workflow around it lives in the bundled [skills](integration/README.md).
 
 ## Why use it
 
-- Keep one backlog across sessions, branches and Git worktrees. Task data lives
-  outside the checkout; a small `.tasks.json` selects the project.
-- Coordinate workers through one architect. The architect defines scope, assigns
-  tasks, records worker results and accepts verified work. Workers share the
-  same task records without maintaining competing TODO files.
-- Reject stale edits. Updates require the version that was read; a conflicting
-  update fails instead of silently overwriting another writer's changes.
-- Read only the context you need. Lists and searches return bounded summaries;
-  `show` retrieves complete selected tasks and optional project rules.
-- Inspect how work changed. Task history retains revisions and mutation context;
-  server credentials establish actor and installation identity. Unavailable
-  session or model fields stay empty rather than being guessed.
-- Separate implementation from acceptance. `to-verify` records work awaiting a
-  verification gate; `needs-human` identifies decisions that need user input.
-- Review and edit through the Windows viewer. It provides keyboard navigation,
-  full task text, conflict handling and saved drafts. The project owner tested
-  the viewer with NVDA and confirmed screen-reader use on 2026-10-06.
-- Start locally without an account or server. For shared access across machines,
-  configure the optional self-hosted HTTPS server. Remote writes retain request
-  receipts so a lost reply can be reconciled without inventing a new mutation.
+- **One backlog across sessions, branches and worktrees.** A small `.tasks.json`
+  in the project root selects the backlog from any nested directory.
+- **No silent overwrites.** Updates carry `--expect-version`; a conflict exits
+  with code 4 and the caller decides what to do. There is no automatic retry.
+- **Cheap reads for agents.** `list` and `search` return bounded summary rows.
+  `show` returns complete text only for the tasks you ask for.
+- **A full audit trail.** History is append-only. Each event keeps the task
+  snapshot, the changed fields and the available context about who made the change.
+- **Implementation separate from acceptance.** `to-verify` marks work waiting for
+  a verification gate; the `needs-human` label marks decisions for the user.
+- **Local first.** A local CLI needs no account, server or runtime beyond the
+  executable. An optional self-hosted HTTPS server provides shared access
+  across machines.
+- **A Windows viewer** for reading and editing tasks, with keyboard navigation,
+  conflict handling, saved drafts and screen-reader support.
 
-The CLI stores and queries work; it does not call an LLM or execute task bodies.
-The accompanying [skills](integration/README.md) define the agent workflow.
-Version checks protect task edits, while the architect prevents duplicate work
-by assigning bounded tasks. There is no built-in assignee or task lease.
+Coordination is the architect's job: it assigns bounded tasks to workers. The
+tool has no built-in assignee or task lease.
 
-## Installation and platform support
+## Install
 
-The CLI targets Windows x64 and Linux x64. Native Linux verification uses Ubuntu
-in WSL, with Linux-owned storage. The viewer targets Windows 11 x64. macOS has
-not been built or tested; there is currently no macOS machine available.
+The CLI runs on Windows x64 and Linux x64; the viewer runs on Windows 11 x64.
+macOS has not been built or tested. Portable packages contain everything needed
+at runtime, including SQLite and, for the viewer, its Flutter runtime and a
+matching CLI.
 
-[Download portable packages](https://github.com/MaxLogic/tasks-cli/releases/latest)
-for the Windows CLI, Linux CLI or Windows viewer. See [installation](installation.md)
-for checksum checks, PATH setup, source builds and a first-run example. A local CLI needs no Rust,
-Python, Node.js or separately installed SQLite at runtime. The viewer bundle
-includes its Flutter runtime and matching CLI.
+See [installation](installation.md) for checksum verification, PATH setup,
+building from source and a first-run example.
 
-The project source is licensed under [MIT](LICENSE). Dependencies and bundled
-audio retain their own terms; audio provenance is recorded in the viewer assets.
-
-## Source and releases
-
-The public repository is [MaxLogic/tasks-cli](https://github.com/MaxLogic/tasks-cli).
-
-```text
-git clone https://github.com/MaxLogic/tasks-cli.git
-```
-
-Native CI checks Windows and Ubuntu builds and prepares portable archives.
-Version tags prepare all three packages and SHA-256 checksums in a draft after
-the build jobs pass. Publication follows the Windows 11 candidate check.
-See [release maintenance](release/README.md) for the workflow and
-its verification scope.
-
-## Sixty-second tour
+## Quick tour
 
 ```text
 tasks init --root "D:\Work\Project" --key APP
@@ -86,18 +51,12 @@ tasks create --title "Write release notes" --body-file notes.md --status todo
 tasks list
 ```
 
-Create `notes.md` with the task description first. Use your own absolute project
-path; the Linux CLI accepts native Linux paths. For an isolated trial and an
-architect supervising two worktrees, see [the walkthrough](integration/architect-workflow.md).
-
-That gives you a project, a task, and a backlog you can read at a glance:
-
 ```text
 APP-001	P2	todo	v1	Write release notes
 has_more: false
 ```
 
-`show` is where the full text lives, along with whatever the task is waiting on:
+`show` prints the full text and whatever the task is waiting on:
 
 ```text
 $ tasks show APP-2
@@ -112,280 +71,110 @@ body:
 Ship it.
 ```
 
-IDs render as `KEY-001` with the project's key, which you choose at `init`
-(2-6 letters or digits, starting with a letter; `T` and `T` plus digits are reserved). Input accepts
-`APP-1`, `app-001`, the legacy `T-1` and a bare `1` for the same task, so old
-notes keep working. Another project's key fails with exit 3 and names that
-project. Keys are unique within a data root; `tasks project-key` prints the key
-and `tasks project-key --set NEW` changes it without rewriting task bodies. A
-database migrated from before keys has none and keeps showing `T-001` until a
-key is set. JSON keeps the numeric `id` and adds `display_id`.
+The project key (2-6 letters or digits, starting with a letter) is chosen at
+`init` and can be changed later with `tasks project-key --set NEW`. Input accepts
+`APP-1`, `app-001`, a bare `1` and the legacy `T-1` form for the same task.
 
-## Finding the right project
-
-You rarely pass `--project`. A project-root `.tasks.json` containing only its
-canonical `project_id` travels with Git worktrees and lets the CLI select the
-same backlog from any nested directory. When no identity file exists, the
-registry picks the longest registered ancestor. Unknown projects fail loudly
-instead of creating a second backlog.
-
-Monorepos can put a separate `.tasks.json` in each subproject. The CLI walks
-upward and selects the first identity it finds, regardless of Git boundaries;
-otherwise the root identity applies. `init --root <subdirectory> --key KEY`
-creates a subproject identity without changing the parent's file.
-
-The identity may be an ordinary file or a file symlink, for example to
-`.private/.tasks.json` or, for a subproject, the root overlay's
-`.private/<relative subproject path>/.tasks.json`. Excluded copies still work.
-The target must be an ordinary file of at most 4 KiB containing only the canonical
-lowercase `project_id` UUID. Directories, directory links and other reparse
-points are rejected. A dangling identity link fails with its link and target
-paths, without falling back to a parent. `init` preserves an existing matching
-link and its target; it refuses conflicting or dangling links.
-See [project identity files](docs/project-identities.md) for target validation
-and Windows junction behavior.
-
-```text
-tasks init --root "D:\Work\Project" --key APP
-tasks bind --root "D:\Work\Project\subdir" --project UUID
-tasks --project UUID doctor
-```
-
-Routing precedence is explicit `--project`, `TASKS_PROJECT`, the nearest
-`.tasks.json`, then the longest registry binding. A malformed nearer identity
-fails closed. The environment variable and hidden `--route-root` option are
-routing context for routed project commands only. `init` and `bind` ignore them,
-native or delegated, and follow their own binding contract instead.
-
-Data lives under `%LOCALAPPDATA%\MaxLogic\tasks-cli` on Windows and under
-`$XDG_DATA_HOME/MaxLogic/tasks-cli` or `$HOME/.local/share/MaxLogic/tasks-cli`
-on Linux. The registry is `registry.json`, and each database is
-`projects/<UUID>/TASKS.sqlite`. Pass `--data-root PATH` when you want an
-isolated root, which is what the tests do.
-
-Local maintenance commands (`import`, `bulk-import`, `backup`, `migrate` and
-`doctor`) require local storage. A configured remote CLI refuses them;
-use [server administration](integration/server-core.md) and
-[server backup/recovery](integration/server-cutover.md) for a remote authority.
+For an isolated trial with an architect supervising two worktrees, follow
+[the architect walkthrough](integration/architect-workflow.md).
 
 ## Everyday commands
 
 ```text
-tasks list [--open] [--after P2:T-020] [--limit 20]
-tasks search "release notes"
-tasks show T-12
-tasks show T-12 T-13 --rules
-tasks create --title "Write release notes" --body-file notes.md
-tasks update T-12 --expect-version 1 --status todo
-tasks update T-12 --expect-version 2 --clear-deps
-tasks update T-12 --expect-version 3 --add-label needs-human --remove-label perf
-tasks history T-12
-tasks attachment add T-12 --expect-version 4 --file run.log
-tasks attachment add T-12 --expect-version 5 --file - --name report.txt
-tasks attachment clipboard
-tasks attachment add T-12 --expect-version 6 --clipboard
-tasks attachment list T-12
-tasks attachment get T-12 A1
-tasks attachment get T-12 A1 --out saved.log --overwrite
-tasks attachment detach T-12 A1 --expect-version 7
+tasks list [--open] [--needs-human] [--label perf] [--limit 20] [--after CURSOR]
+tasks search "release notes" [--ranked] [--prefix]
+tasks show APP-12 APP-13 --rules
+tasks create --title "Fix login" --body-file task.md --status todo --priority P1 --labels security
+tasks update APP-12 --expect-version 3 --status in-progress --add-label needs-human
+tasks history APP-12 [--event 42]
+tasks unlocks --limit 20
 tasks rules show
 tasks rules set --body-file RULES.md --expect-version 1
-```
-
-An agent can retrieve a previous task revision without loading the whole history:
-
-```text
-tasks history T-12 --format json
-tasks history T-12 --event 42 --format json
-```
-
-The first command lists event IDs, `resulting_version` and the `changed_fields`
-of each update. Select the event for the desired task version; the second
-returns its complete `snapshot` as a nested JSON object.
-Event IDs and task version numbers are different. Reading an old snapshot does
-not restore it or change the current task.
-
-Statuses are `draft`, `todo`, `in-progress`, `to-verify`, `blocked`, `done`, and
-`cancelled`. `to-verify` marks work that is implemented and focused-tested but
-waits for a batch gate; collect the group with `list --status to-verify`.
-`update --status done` exits 2 without writing while any prerequisite is not
-done or cancelled, so complete a verified group in dependency order. Bodies come
-from a file, and `-` reads standard input. Page limits run from 1 to 100, and
-`--after` continues from the cursor the previous page reported. `rules` holds
-the shared text that `show --rules` prints once after the tasks, which makes it
-the natural home for conventions that apply to the whole backlog. Plain `show`
-leaves the rules out.
-
-The global options `--data-root`, `--project`, `--format`, and `--windows-exe`
-work before or after the subcommand, whichever reads better.
-
-The attachment contract requires project schema 9, adding retained attachment
-references and deduplicated file bytes to attribution and atomic request
-receipts. `history` includes stored context; `project-history`
-pages through project creation, key changes and import provenance. Legacy
-history retains null attribution. Context collection is implemented, with
-optional [harness hooks](integration/context-hooks.md) for supplied session
-metadata. Project schema, server schema and the JSON envelope version are
-separate contracts.
-
-Attachments accept any file type. Add/detach check the task version and create
-one audit event; detach keeps the bytes in history. `show` includes metadata,
-and list/search append `attachments=N` for nonzero counts. Get verifies original
-size and SHA-256, writes a local file and prints its path, never file bytes or
-base64. Without --out it reuses a verified cache under
-`<data-root>/cache/attachments/<project-uuid>/A<id>/<safe-name>`; explicit output
-refuses a different existing file unless --overwrite is given. Display names
-stay exact; portable disk names are sanitized and bounded to 255 UTF-8 bytes,
-preserving extensions up to 32 bytes and escaping Windows device names,
-including CONIN$/CONOUT$ and superscript COM/LPT names. Multi-file output collisions
-refuse the whole get before writing.
-
-Limits are 20 MiB per file after compression, 32 retained attachments/50 MiB
-stored per task and 1 GiB unique stored bytes per project, including detached
-content. Technical decode bounds are 256 MiB original per file and 512 MiB
-original per add command (maximum 32 files).
-Clipboard inspection returns a token; callers may pass --clipboard-token to add
-to detect a changed capture. Helpers have a 10 s deadline plus a bounded 500 ms
-shutdown grace. Remote servers must advertise attachments-v1; a missing
-capabilities field disables attachment operations (exit 5 `remote_capability`);
-unknown upload outcomes reconcile the exact retained body. SQLite backups
-include bytes; Markdown exports list metadata only. The capable Windows viewer
-adds an Attachments tab (Alt+5), file picker/paste, previews, Save as and Detach.
-These are the attachment implementation requirements; dated deployment records
-identify which installed candidates have been verified and upgraded.
-
-## Labels and ranked search
-
-```text
-tasks create --title "Review cache" --body-file task.md --labels performance,security
-tasks update T-12 --expect-version 2 --labels performance,needs-human
-tasks update T-12 --expect-version 3 --clear-labels
-tasks list --label performance
-tasks list --status blocked --label needs-human
-tasks search "cache latency" --ranked --label performance --format json
-tasks search "cach lat" --ranked --prefix --limit 20 --offset 20
-```
-
-Labels are trimmed, lowercased, sorted and deduplicated. Each task may have up to
-32 labels, each 1-64 ASCII letters, digits or `-_.:` characters. `--labels` replaces
-the complete set; omission preserves it. Label changes use the same version check
-and history transaction as other task edits. `needs-human` is a label rather
-than a status, and the default runnable query excludes it. Use `draft` for
-ideas needing brainstorming.
-
-Plain `search` already supports literal title/body substrings. `--ranked` adds
-SQLite FTS5 word search: all query terms must match; title matches receive more
-weight than body matches. `--prefix` matches word beginnings. Query text is quoted
-as literal terms, not interpreted as FTS operators. Ranked queries are limited to
-64 whitespace-separated terms and 4096 UTF-8 bytes. This is lexical retrieval,
-without typo correction, synonyms or embeddings.
-
-Ranked results use `next_offset` and `--offset`, not the ID-based `--after`
-cursor. Both search modes return bounded summaries and may include
-done/cancelled tasks. Ordinary `list` shows runnable todo/in-progress tasks,
-excluding unmet dependencies and needs-human; a `to-verify` prerequisite counts
-as met, but `to-verify` tasks themselves are not listed. Use `--open` for every
-unfinished task, including drafts/blocked, or `--needs-human` for the decision
-queue. Explicit `--status` bypasses readiness. Every page is internally
-consistent; changes between requests can move ranked results, so restart
-pagination after relevant edits.
-
-The schema-9 contract requires new databases to start at 9. Existing databases require explicit
-`tasks migrate` after a validated backup: schema 3 added labels and ranked
-search, 4 priority, 5 `to-verify`, 6 project keys, 7 attribution and project
-history, 8 mutation receipts and 9 attachments. Earlier state names become `draft`/`todo`;
-existing history snapshots remain unchanged. Older binaries refuse databases
-newer than they support. Remote migration requires server administration;
-network requests never migrate a project implicitly.
-
-## Priority and selecting work
-
-```text
-tasks create --title "Fix login" --body-file task.md --status todo --priority P1
-tasks update T-12 --expect-version 2 --priority P0
-tasks list
-tasks list --open --label performance
-tasks list --needs-human
-tasks unlocks --limit 20
-```
-
-P0 is most urgent, P3 least; P2 is the default. Default list accepts prerequisites
-in `done` or `to-verify`; cancelled prerequisites still withhold readiness.
-Completion is a separate rule: a transition to `done` accepts only `done` or
-`cancelled` prerequisites. A `to-verify` prerequisite permits starting work but
-still prevents marking the dependent done. Results are
-ordered by priority then ID. Pass the returned `next_after` string unchanged,
-for example `--after P1:T-012`. Search/history retain their existing pagination.
-`unlocks` shows direct open dependent counts and how many become runnable if a
-prerequisite finishes; it uses `--offset` pagination.
-
-## Enrich text with task titles
-
-```text
+tasks attachment add APP-12 --expect-version 4 --file run.log
+tasks attachment get APP-12 A1 --out saved.log
 tasks enrich --file response.txt
-tasks enrich < response.txt
-tasks enrich-clipboard
 ```
 
-`T001` becomes `T001 (Task title)`, and `T-001` keeps its hyphen. `APP-001`
-resolves in this project, and another project's `DS-640` resolves read-only in
-the project with key `DS` under the same data root. Every reference is
-enriched; a key that no project has (such as `UTF-8`) is left alone. Unknown IDs are unchanged and reported on stderr. An exact existing
-annotation is not duplicated. The input file is never overwritten. UTF-8 text,
-line endings and trailing newlines are preserved; text output has no banner.
-Use `--format json` for text plus replacement counts and unknown IDs.
+Global options (`--data-root`, `--project`, `--format`, `--windows-exe`) work
+before or after the subcommand. Bodies are read from a file, or from standard
+input with `-`. Pages hold 1 to 100 rows; pass the `next_after` cursor from one
+page unchanged to `--after` for the next.
 
-This is a plain-text transform: it can enrich code blocks and Markdown link
-labels. Obvious URL/path components are skipped. If a title was already written
-in a different format, the command may add it again. Limits are 16 MiB input,
-10,000 distinct IDs and 64 MiB output; exceeding them fails without truncation.
+### Statuses and picking work
 
-`enrich-clipboard` reads and replaces clipboard text. It checks that the original
-text still matches before writing and leaves no-op input alone. Replacement is
-plain text, so other clipboard formats are removed. Windows/WSL use Windows
-PowerShell; native Linux needs wl-clipboard (Wayland) or xclip (X11). With a shared
-Windows store, use the existing `--windows-exe` delegation setting.
+Statuses are `draft`, `todo`, `in-progress`, `to-verify`, `blocked`, `done` and
+`cancelled`. Priority runs from P0 (most urgent) to P3; the default is P2.
 
-## Every write says what it expects
+Plain `list` shows runnable work: `todo` and `in-progress` tasks whose
+prerequisites are `done` or `to-verify`, excluding `needs-human`, ordered by
+priority and then ID. `--open` shows every unfinished task. `--status` bypasses
+readiness. `unlocks` ranks open prerequisites by how much work finishing them
+would release.
 
-There is no manual lock to take and no automatic conflict retry. You tell the tool which version you
-read, and it refuses the write if the world moved:
+Marking a task `done` requires every prerequisite to be `done` or `cancelled`,
+so a group that is waiting in `to-verify` gets completed in dependency order.
+
+### Search
+
+Plain `search` matches literal substrings in titles and bodies. `--ranked` uses
+SQLite FTS5 word search, weights title matches above body matches and treats the
+query as literal terms rather than FTS operators. `--prefix` matches word
+beginnings. Matching is lexical: no typo correction, synonyms or embeddings.
+
+### History
+
+`history --format json` lists events with their `resulting_version` and
+`changed_fields`. `--event ID` returns that event's complete task snapshot.
+Reading an old snapshot does not restore it.
+
+### Attachments
+
+Tasks can carry files of any type. Adding or detaching an attachment checks the
+task version and records an audit event; detached bytes remain in history.
+`attachment get` verifies size and SHA-256 and writes a local file, then prints
+its path. It never prints file contents to the terminal. Files can also come
+from the clipboard (`attachment clipboard`, then `add --clipboard`).
+
+Limits: 20 MiB per compressed file, 32 attachments or 50 MiB per task, and
+1 GiB of unique stored bytes per project.
+
+### Enrich references
+
+`tasks enrich` turns `APP-001` into `APP-001 (Task title)` in plain text, which
+helps when reading agent output. References to other projects under the same
+data root resolve read-only by their key. Unknown IDs stay unchanged and are
+reported on stderr. `enrich-clipboard` does the same to clipboard text.
+
+## Version checks and exit codes
 
 ```text
-$ tasks update T-1 --expect-version 1 --status done
+$ tasks update APP-1 --expect-version 1 --status done
 version conflict: expected 1, current 2
 $ echo $?
 4
 ```
 
-Read the task again, decide what the other writer's change means for yours, then
-send the write with the current version. The tool will not guess on your behalf.
-
-Exit codes are stable and worth scripting against:
+Read the task again, decide what the other change means for yours, then retry
+with the current version.
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success, including an empty list |
 | 2 | Usage or validation error |
 | 3 | Project or task not found |
-| 4 | Version conflict or another conflict, including a stale viewer snapshot |
+| 4 | Version conflict or another conflict |
 | 5 | Lock timeout, busy database or remote service failure |
-| 6 | I/O, database, or schema failure |
+| 6 | I/O, database or schema failure |
 
-Errors name a recovery action and go to stderr. Mutations commit before anything
-is printed, so a broken stdout after a `create` means the task exists. Inspect
-the state before repeating that command.
+Errors go to stderr and name a recovery action. A mutation is printed only
+after it commits, so if stdout breaks after `create`, the task exists; check
+before repeating the command. Limits are 1 MiB per body, 500 characters per
+title and 256 KiB of shared rules, with no partial writes.
 
-Input limits are enforced with no partial write: 1 MiB per body, 500 Unicode
-characters per title, 256 KiB of shared rules. Invalid UTF-8 and empty titles
-are rejected outright.
+## JSON output
 
-## JSON for the callers that need it
-
-`--format json` wraps every command in a versioned envelope, printed as one
-compact line (shown indented here). The payload sits under `data`, errors still
-go to stderr, and the exit codes above still hold. Several IDs in one `show`
-give command `show_many` with an `items` array.
+`--format json` wraps every result in a versioned envelope on one line. The
+payload sits under `data`; errors and exit codes behave as in text mode.
 
 ```json
 {
@@ -394,6 +183,7 @@ give command `show_many` with an `items` array.
   "data": {
     "command": "show",
     "id": 2,
+    "display_id": "APP-002",
     "status": "draft",
     "priority": "P2",
     "version": 1,
@@ -407,81 +197,86 @@ give command `show_many` with an `items` array.
 }
 ```
 
-## Bringing a Markdown backlog across
+## Project selection and storage
+
+You rarely pass `--project`. The CLI resolves the project in this order:
+explicit `--project`, `TASKS_PROJECT`, the nearest `.tasks.json` found by walking
+up from the current directory, then the longest registered ancestor path. An
+unknown directory fails rather than creating a second backlog.
+
+A `.tasks.json` holds only the project UUID, so it travels with Git worktrees.
+Monorepos can give each subproject its own file with
+`tasks init --root <subdirectory> --key KEY`. The file may be a symlink, for
+example into a private overlay. See [project identity files](docs/project-identities.md)
+for the validation rules.
+
+```text
+tasks bind --root "D:\Work\Project\subdir" --project UUID
+tasks --project UUID doctor
+```
+
+Data lives under `%LOCALAPPDATA%\MaxLogic\tasks-cli` on Windows and under
+`$XDG_DATA_HOME/MaxLogic/tasks-cli` (or `~/.local/share/MaxLogic/tasks-cli`) on
+Linux. Each project database is `projects/<UUID>/TASKS.sqlite`. `--data-root`
+selects an isolated root, which is what the tests use.
+
+## Windows and WSL
+
+Windows and native Linux keep separate storage, and one live database is never
+opened from both. To use the Windows backlog from WSL, delegate to the Windows
+executable:
+
+```bash
+TASKS_WINDOWS_EXE=/mnt/f/Tools/tasks.exe tasks list
+tasks --windows-exe /mnt/f/Tools/tasks.exe show APP-12
+```
+
+The Linux CLI converts path arguments with `wslpath`, passes stdin, stdout,
+stderr and the exit code through, and never falls back to Linux storage if the
+Windows executable fails to start. A native Linux run refuses `/mnt/<drive>` and
+remote data roots.
+
+## Remote server
+
+Remote profiles send signed HTTPS requests to `tasks-server`, which owns the
+project databases. Remote writes keep request receipts, so a lost reply can be
+reconciled instead of repeated. Remote access needs the server online, and local
+maintenance commands (`import`, `bulk-import`, `backup`, `migrate`, `doctor`) are
+refused against a remote profile.
+
+- [Remote CLI setup and recovery](integration/remote-cli.md)
+- [Server administration](integration/server-core.md)
+- [Server backup and recovery](integration/server-cutover.md)
+
+## Importing a Markdown backlog
 
 ```text
 tasks --project UUID import --file TASKS.md
-tasks --format json --project UUID import --file TASKS.md --map-file sections.json
 tasks --project UUID import --file TASKS.md --map-file sections.json --apply --expect-sha256 HASH_FROM_PREVIEW
 tasks --project UUID export --out TASKS-export.md
 ```
 
-Import previews by default. Look at what it found, then apply with the exact
-SHA-256 the preview printed. Reading the source from `-` previews fine but
-cannot be applied, since apply has to re-read the file. Apply requires an empty task and rules store,
-re-reads the source immediately before mutating, insists on exact status
-sections or an explicit map, keeps the original bytes and hash as provenance,
-and commits tasks, dependencies, rules, events, and provenance together. Run the
-same import twice and the second run does nothing. Unknown source ranges,
-duplicate IDs, invalid mapping values, and a source that changed between preview
-and apply each stop the apply with no partial data left behind.
+Import previews by default. Apply requires the SHA-256 printed by the preview
+and an empty project, re-reads the source before writing and commits tasks,
+dependencies, rules, history and source provenance in one transaction. Unknown
+sections, duplicate IDs or a source that changed since the preview stop the
+apply with nothing written. Running the same import twice is a no-op.
 
-The importer reads the exporter's metadata block in this order: `Status:`,
-`Version:`, `Depends on:`, `Body:`, with an optional leading `Title:` accepted
-only as part of that block. The older ordered `Status:`, `Depends on:`, `Body:`
-form and an exact standalone `Body:` marker still work. `Body:` ends the
-metadata and everything after it is body text, which is how a paragraph that
-happens to begin with `Version:` survives the trip intact. A leading UTF-8 BOM
-counts as structural input: preview and JSON report `has_bom: true` while the
-original bytes and source SHA-256 stay unchanged. Tasks sitting before the first
-level-two section are reported as `<no section>` and block the apply until a map
-assigns them somewhere on purpose.
+Export writes a deterministic Markdown snapshot that the importer reads back.
+It is for reading and review. The SQLite backup is the recovery authority.
 
-Import preserves content and original-source provenance; boundary whitespace
-and structural separators may be normalized.
-
-Canonical exports include the exact standalone `Task schema: 1` marker. Rules
-and each task body are wrapped in readable `tasks-cli:canonical-v1` comments
-carrying a UTF-8 byte length and SHA-256, so headings, fences and
-metadata-looking lines inside either value stay content. A frame is accepted
-only in its documented `Body:` or Rules-section position; its byte count, hash,
-end marker and LF/CRLF separator must match. A damaged, truncated, misplaced,
-mixed framed/unframed, or trailing unframed body block is a blocking problem,
-and the importer does not rediscover headings inside a damaged frame. Legacy
-ledgers without the exact marker keep the legacy heading and metadata
-compatibility rules. Multiple rules frames are combined in source order with a
-single LF separator when needed, while one framed rules body remains byte exact.
-
-An import set must not contain the same source SHA-256 more than once, even
-when the files have different names. The preview names the colliding files and
-the apply is refused before any task, rules or provenance row is written.
-
-For bulk migration, stop all workers and Markdown writers through apply,
-verification and quarantine. A failed candidate cleans up only its newly created
-artifacts. If an import committed into a pre-existing database and verification
-then failed, the database rows remain and the report says `rolled_back: false`.
-Successful candidates remain imported; there is no transaction across all
-projects. Existing databases and their sidecars are preserved.
-
-Export is deterministic and pleasant to read, and it carries a snapshot warning,
-the project UUID, rules, versions, dependency IDs, and complete bodies. It is
-not the recovery authority, though. The SQLite backup is.
-
-## Backups, and the one honest way to restore
+## Backup, restore and migration
 
 ```text
 tasks --project UUID backup --out "D:\Backups\project.sqlite"
-tasks --project UUID doctor
 ```
 
-Backup uses SQLite's online backup API, writes an exclusively created temporary
-file beside the destination, then validates it: `quick_check`, foreign-key
-integrity, schema version, and project UUID. It refuses to overwrite an existing
-destination or existing destination `-wal`/`-shm` sidecar, rechecking those
-sidecars immediately before publication while removing only temporary sidecars.
+Backup uses SQLite's online backup API, validates the result (integrity,
+foreign keys, schema version and project UUID) and never overwrites an
+existing file.
 
-There is no in-place restore command, on purpose. To recover, stop task
-clients, create an isolated data root, and restore the UUID layout yourself:
+There is no in-place restore command. To recover, stop task clients and restore
+into an isolated data root:
 
 ```text
 mkdir D:\Recovery\projects\UUID
@@ -490,105 +285,54 @@ tasks --data-root D:\Recovery --project UUID doctor
 tasks --data-root D:\Recovery bind --root D:\RecoveredWorktree --project UUID
 ```
 
-Replace `UUID` with the database's project UUID and use an absolute root on the
-same OS. `doctor` validates the restored file before `bind` recreates only the
-registry association; do not run `init` for this layout because it creates a
-new project identity. Nothing destructive reaches a live backlog by accident.
+Do not run `init` here; it creates a new project identity.
 
-Every real schema migration takes a fresh pre-upgrade backup first, validates it,
-and prints its path. The name carries the source version, a millisecond
-timestamp, the process ID, and a counter, in the form
-`TASKS.v<from>-pre-migrate-<unix-millis>-<pid>-<counter>.sqlite`, so a retried
-migration never reuses or overwrites an earlier attempt's backup. Older ones are
-kept, and pruning them is your call. A migrate that is already at the current
-schema reports no backup path.
+Schema upgrades are never implicit. `tasks migrate` takes and validates a fresh
+backup first, prints its path and keeps every earlier one. Older binaries refuse
+databases newer than they support.
 
-## Windows, Linux, and the line between them
+## Building from source
 
-Windows and native Linux own separate storage roots, and one live database must
-never be opened from both sides. From WSL, point `tasks` at the Windows
-executable and let it delegate:
-
-```bash
-tasks --windows-exe /mnt/c/Tools/tasks.exe --project UUID show T-12
-TASKS_WINDOWS_EXE=/mnt/c/Tools/tasks.exe tasks list
-```
-
-The Linux wrapper converts filesystem-valued arguments with `wslpath -w`, passes
-stdin, stdout, stderr, and the child exit code straight through, and never falls
-back to native Linux storage when the Windows executable cannot start. Writing
-to the wrong backlog would be worse than failing. With neither an explicit
-project nor `TASKS_PROJECT`, it translates the current directory and lets the
-Windows child resolve the nearest `.tasks.json`, then the closest registered
-ancestor; an unknown directory fails without creating a backlog on either side.
-Native Linux commands without delegation use Linux-owned storage only, and a
-native Linux run rejects
-`/mnt/<drive>` and UNC or remote roots rather than open a Windows-owned SQLite
-file.
-
-## Building it
-
-The toolchain is pinned in `rust-toolchain.toml` to 1.98.1, so rustup fetches
-the right one. You also need a C compiler suitable for the bundled SQLite build.
+`rust-toolchain.toml` pins the Rust toolchain, so rustup installs the right
+version. You also need a C compiler for the bundled SQLite.
 
 ```text
 cargo fmt --check
 cargo clippy --locked --all-targets --features server
 cargo test --locked
 cargo test --locked --features server
-cargo test --locked --features test-hooks --test bulk_rollback
 cargo build --release --locked --bin tasks --target-dir target/public-build
 ```
 
-`tasks --version` reports the package version and the short Git commit embedded
-at build time, for example `tasks 0.1.0 (commit 0123456789ab)`. Release packaging
-may set `TASKS_BUILD_COMMIT`; builds without that override read the current Git
-commit and fall back to `unknown` only when Git metadata is unavailable.
+Add `--features server --bin tasks-server` for a server build. `tasks --version`
+prints the package version and the Git commit it was built from. Windows and
+Linux each need a native build and test run; a cross-compile is not proof that
+the Linux binary works. [Installation](installation.md) covers Linux target
+directories, and [release maintenance](release/README.md) covers packaging.
 
-The example builds `target/public-build/release/tasks.exe` on Windows. On
-Linux, use a Linux-owned target directory as described in [installation](installation.md).
-The separate target avoids replacing the maintainer's installed release build.
-Copy the executable to a directory on `PATH` or invoke it by absolute path.
-Add `--features server --bin tasks-server` to a separate server build. Windows and
-Linux require separate native proof; a cross-compile alone is insufficient.
+## Verification
 
-## Tests
+Tests use real temporary SQLite databases and real subprocesses for contention,
+exit codes, standard input, backup recovery and crash rollback. They never touch
+the default task store or live Markdown ledgers.
 
-The historical 2026-09-22 verification ran 214 tests on Windows and 218 on Ubuntu/WSL
-with `cargo test --locked --no-fail-fast`. The separate feature-enabled bulk rollback regression
-also passed on both platforms (`cargo test --locked --features test-hooks
---test bulk_rollback`). See [verification-report.md](verification-report.md) for
-commands, logs and measured results. Coverage includes routing and init contention,
-selective reads, transactional mutations, Markdown preservation, migration and
-backup recovery, history, dependencies, output contracts, and WSL interop, using
-real temporary SQLite stores and real subprocesses for contention, exit codes,
-stdin, backup recovery, and crash rollback. Live legacy Markdown ledgers are
-never modified by the suite. Those counts describe that candidate, not current
-HEAD. Later CLI/server proof is recorded in
-[server progress](integration/server-refactor-progress.md), and viewer proof in
-[viewer verification](viewer/verification-report.md). Each result identifies
-its own candidate and environment.
+Recorded results, each tied to its own candidate and environment:
 
-## What v1 deliberately does not do
+- [CLI verification report](verification-report.md)
+- [Server verification](integration/server-refactor-progress.md)
+- [Viewer verification](viewer/verification-report.md)
 
-- No hard delete. History is append-only and stays that way.
-- No automatic migration of a live project.
-- No backup retention policy. Pre-migration backups accumulate until you remove
-  them.
-- No claim that Markdown export is full fidelity. The SQLite backup is the
-  recovery authority.
-- No concurrent access to one database from Windows and native Linux. Use WSL
-  delegation for a shared Windows backlog.
+## Deliberately out of scope
 
-`spec.md` is the normative contract when you need the exact rule behind any of
-this. The separate [server backup job](integration/server-daily-backups.md) has its
-own seven-day retention policy; it is not an automatic CLI feature.
+- Hard delete. History is append-only.
+- Automatic migration of a live project.
+- Retention of pre-migration backups. They accumulate until you remove them.
+- Full-fidelity Markdown export. Use the SQLite backup for recovery.
+- Opening one database from both Windows and native Linux. Use WSL delegation.
 
-States, labels, ranked search, priority, readiness selection, unlock queries,
-direct `.tasks.json` routing, identity creation during `init`, and build-identified
-`--version` output are implemented. The product-owned
-skills and deployment contract are in [integration/README.md](integration/README.md).
-The historical 2026-09-21 migration imported 51 project backlogs; its set and
-exclusions are in [migration/README.md](migration/README.md). The 2026-10-06
-production cutover moved 55 backlogs to the self-hosted server, as recorded in
-[the deployment record](integration/deployment-2026-10-06.md).
+[`spec.md`](spec.md) is the normative contract behind all of the above.
+
+## License
+
+The source is licensed under [MIT](LICENSE). Dependencies and bundled audio keep
+their own terms; audio provenance is recorded with the viewer assets.
