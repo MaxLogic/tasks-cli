@@ -179,6 +179,27 @@ void main() {
     }
   });
 
+  selectionTest('Shift+arrow at the list edge keeps the selection', (
+    tester,
+  ) async {
+    await mount(tester);
+    await click(tester, 0);
+    await modified(
+      tester,
+      LogicalKeyboardKey.controlLeft,
+      () => click(tester, 4),
+    );
+    rig.announcements.clear();
+    await modified(
+      tester,
+      LogicalKeyboardKey.shiftLeft,
+      () => tester.sendKeyEvent(LogicalKeyboardKey.arrowDown),
+    );
+    expect(selected(tester), {0, 4});
+    expect(panel.list.selectedIndex, 4);
+    expect(rig.announcements, isEmpty);
+  });
+
   selectionTest(
     'refresh insertion and reorder retain attachment IDs and lead',
     (tester) async {

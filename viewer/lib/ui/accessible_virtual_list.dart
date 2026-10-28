@@ -656,8 +656,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     final target = widget.multiSelect
         ? (current + delta).clamp(0, widget.itemCount - 1)
         : current + delta;
-    if (target < 0 || target >= widget.itemCount) {
-      return; // Stay in place at a boundary without repeated speech.
+    if (target < 0 || target >= widget.itemCount || target == current) {
+      // Stay in place at a boundary without repeated speech; Shift at an
+      // edge must not collapse a multi-selection onto the lead row.
+      return;
     }
     _requestIndex(
       target,
@@ -1295,9 +1297,11 @@ class _VirtualRowState extends State<_VirtualRow> {
                           ? Padding(
                               padding: const EdgeInsets.all(4),
                               child: ColoredBox(
+                                // Unselected rows stay transparent so the
+                                // hover tint remains visible.
                                 color: widget.selected
                                     ? colors.primaryContainer
-                                    : colors.surface,
+                                    : Colors.transparent,
                                 child: DefaultTextStyle.merge(
                                   style: TextStyle(
                                     color: widget.selected
