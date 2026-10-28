@@ -1,4 +1,4 @@
-/// A virtualized single-selection list that stays keyboard- and
+/// A virtualized list (single-selection by default) that stays keyboard- and
 /// screen-reader-operable, including rows that are not built yet.
 ///
 /// Contract: viewer/spec.md sections 5 and 9, viewer/design.md section 6.
@@ -7,6 +7,7 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show setEquals;
 import 'package:flutter/gestures.dart' show PointerDeviceKind, kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
@@ -31,6 +32,10 @@ class VirtualListController extends ChangeNotifier {
   bool get isAttached => _state != null;
 
   int? get selectedIndex => _state?._selectedIndex;
+
+  /// Selected row indices. In multi-select mode [selectedIndex] is the
+  /// focus/activation row and may itself be unselected (Ctrl+click/Space).
+  Set<int> get selectedIndices => _state?._selection ?? const <int>{};
 
   int? get forwardedIndex => _state?._forwardIndex;
 
@@ -120,6 +125,8 @@ class AccessibleVirtualList extends StatefulWidget {
     this.emptyAction,
     this.motionKey,
     this.emptyIsTransient = false,
+    this.multiSelect = false,
+    this.onSelectionChanged,
   });
 
   final VirtualListController controller;
@@ -147,6 +154,11 @@ class AccessibleVirtualList extends StatefulWidget {
   final bool activateOnDoubleTap;
 
   final ValueChanged<int>? onSelectedIndexChanged;
+
+  /// Opt-in Windows selection gestures. Other lists retain their original
+  /// focus-is-selection contract, including Ctrl+Space activation.
+  final bool multiSelect;
+  final ValueChanged<Set<int>>? onSelectionChanged;
 
   /// Allow embedded row actions to remain independently accessible.
   final bool excludeRowChildSemantics;
@@ -295,6 +307,19 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   final Map<int, FocusNode> _rowNodes = <int, FocusNode>{};
 
   int? _selectedIndex;
+  Set<int> _selectedIndices = {};
+  Set<Key> _selectedKeys = {};
+  Key? _leadKey;
+  Key? _anchorKey;
+  int? _rangeAnchor;
+
+  Set<int> get _selection => Set.unmodifiable(
+    widget.multiSelect ? _selectedIndices : {?_selectedIndex},
+  );
+
+  bool _isSelected(int index) => widget.multiSelect
+      ? _selectedIndices.contains(index)
+      : index == _selectedIndex;
 
   /// Row the owner refused to move to; the next focus change is the dialog's
   /// restoration, which must not be reported as a fresh move.
@@ -325,6 +350,25 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       widget.controller._attach(this);
     }
     _syncSelectionWithItemCount();
+    if (widget.multiSelect) {
+      if (oldWidget.multiSelect) {
+        final indices = <int>{};
+        int? lead;
+        int? anchor;
+        for (var i = 0; i < widget.itemCount; i++) {
+          final key = widget.itemKeyBuilder(i);
+          if (_selectedKeys.contains(key)) indices.add(i);
+          if (key == _leadKey) lead = i;
+          if (key == _anchorKey) anchor = i;
+        }
+        _selectedIndices = indices;
+        _selectedIndex = lead ?? _selectedIndex;
+        _rangeAnchor = anchor ?? _selectedIndex;
+      } else {
+        _selectedIndices = {?_selectedIndex};
+      }
+      _rememberSelection();
+    }
     if (oldWidget.itemCount != widget.itemCount) {
       // The rows changed under the selection, so whatever the owner was last
       // told describes a different list; let the next row focus speak again.
@@ -351,12 +395,31 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   void _syncSelectionWithItemCount() {
     if (widget.itemCount == 0) {
       _selectedIndex = null;
+      _selectedIndices = {};
       return;
     }
     final selected = _selectedIndex;
     if (selected == null || selected >= widget.itemCount) {
       _selectedIndex = math.min(selected ?? 0, widget.itemCount - 1);
     }
+    if (widget.multiSelect && _leadKey == null) {
+      _selectedIndices = {_selectedIndex!};
+      _rangeAnchor = _selectedIndex;
+      _rememberSelection();
+    }
+  }
+
+  void _rememberSelection() {
+    _selectedKeys = {
+      for (final i in _selectedIndices) widget.itemKeyBuilder(i),
+    };
+    _leadKey = _selectedIndex == null
+        ? null
+        : widget.itemKeyBuilder(_selectedIndex!);
+    final anchor = _rangeAnchor;
+    _anchorKey = anchor != null && anchor < widget.itemCount
+        ? widget.itemKeyBuilder(anchor)
+        : null;
   }
 
   bool get _listHasFocus =>
@@ -404,7 +467,12 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       node.requestFocus();
       return;
     }
-    _requestIndex(index, moveFocus: true, forceFocus: true);
+    _requestIndex(
+      index,
+      moveFocus: true,
+      forceFocus: true,
+      preserveSelection: widget.multiSelect,
+    );
   }
 
   void _setSelectedIndex(int? index, {required bool notify}) {
@@ -412,6 +480,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       index = index.clamp(0, widget.itemCount - 1);
     } else {
       index = null;
+    }
+    if (widget.multiSelect) {
+      _changeMultiSelection(index, notify: notify);
+      return;
     }
     if (index == _selectedIndex) {
       return;
@@ -423,11 +495,73 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     }
   }
 
+  void _changeMultiSelection(
+    int? index, {
+    bool extend = false,
+    bool toggle = false,
+    bool preserve = false,
+    required bool notify,
+  }) {
+    final before = _selection;
+    final previous = _selectedIndex;
+    setState(() {
+      if (index == null) {
+        _selectedIndices = {};
+        _rangeAnchor = null;
+      } else if (extend) {
+        final anchor = (_rangeAnchor ?? previous ?? index).clamp(
+          0,
+          widget.itemCount - 1,
+        );
+        _rangeAnchor = anchor;
+        _selectedIndices = {
+          for (
+            var i = math.min(anchor, index);
+            i <= math.max(anchor, index);
+            i++
+          )
+            i,
+        };
+      } else if (toggle) {
+        _selectedIndices = {..._selectedIndices};
+        if (!_selectedIndices.add(index)) _selectedIndices.remove(index);
+        _rangeAnchor = index;
+      } else if (!preserve) {
+        _selectedIndices = {index};
+        _rangeAnchor = index;
+      }
+      _selectedIndex = index;
+      _rememberSelection();
+    });
+    if (notify && index != null && previous != index) {
+      _notifiedIndex = index;
+      widget.onSelectedIndexChanged?.call(index);
+    }
+    if (notify && !setEquals(before, _selectedIndices)) {
+      widget.onSelectionChanged?.call(_selection);
+    }
+  }
+
+  void _pointerSelect(int index) => _requestIndex(
+    index,
+    moveFocus: true,
+    forceFocus: true,
+    reveal: false,
+    extend: widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
+    toggle:
+        widget.multiSelect &&
+        !HardwareKeyboard.instance.isShiftPressed &&
+        HardwareKeyboard.instance.isControlPressed,
+  );
+
   void _requestIndex(
     int index, {
     required bool moveFocus,
     bool forceFocus = false,
     bool reveal = true,
+    bool extend = false,
+    bool toggle = false,
+    bool preserveSelection = false,
   }) {
     if (widget.itemCount == 0) {
       return;
@@ -436,7 +570,17 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     _finishMotion();
     _pendingSnapshot = null;
     final target = index.clamp(0, widget.itemCount - 1);
-    _setSelectedIndex(target, notify: true);
+    if (widget.multiSelect) {
+      _changeMultiSelection(
+        target,
+        extend: extend,
+        toggle: toggle,
+        preserve: preserveSelection,
+        notify: true,
+      );
+    } else {
+      _setSelectedIndex(target, notify: true);
+    }
     if (!moveFocus) {
       return;
     }
@@ -480,9 +624,20 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     final current = _selectedIndex ?? 0;
     final target = current + delta;
     if (target < 0 || target >= widget.itemCount) {
+      if (widget.multiSelect &&
+          !HardwareKeyboard.instance.isShiftPressed &&
+          !HardwareKeyboard.instance.isControlPressed) {
+        _setSelectedIndex(current, notify: true);
+      }
       return; // Stay in place at a boundary without repeated speech.
     }
-    _requestIndex(target, moveFocus: true);
+    _requestIndex(
+      target,
+      moveFocus: true,
+      extend: widget.multiSelect && HardwareKeyboard.instance.isShiftPressed,
+      preserveSelection:
+          widget.multiSelect && HardwareKeyboard.instance.isControlPressed,
+    );
   }
 
   int _pageRows() {
@@ -660,7 +815,12 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       }
     }
     if (index != _selectedIndex) {
-      setState(() => _selectedIndex = index);
+      if (widget.multiSelect) {
+        // Focus returning from a dialog must not collapse the selected set.
+        _changeMultiSelection(index, preserve: true, notify: false);
+      } else {
+        setState(() => _selectedIndex = index);
+      }
     }
     // A row that takes focus *is* the selection, so the owner hears about it
     // even when the index already matched: a selection seeded while the list
@@ -704,6 +864,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         index,
         moveFocus: true,
         reveal: _pendingIndex != index || _pendingReveal,
+        preserveSelection: widget.multiSelect,
       );
     }
   }
@@ -718,6 +879,26 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     // focus back cannot claim a later focus change.
     _refusedFocusIndex = null;
     final key = event.logicalKey;
+    if (widget.multiSelect && HardwareKeyboard.instance.isControlPressed) {
+      if (key == LogicalKeyboardKey.space) {
+        if (event is KeyDownEvent && _selectedIndex != null) {
+          final index = _selectedIndex!;
+          _changeMultiSelection(index, toggle: true, notify: true);
+        }
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyA) {
+        final before = _selection;
+        setState(() {
+          _selectedIndices = {for (var i = 0; i < widget.itemCount; i++) i};
+          _rememberSelection();
+        });
+        if (!setEquals(before, _selectedIndices)) {
+          widget.onSelectionChanged?.call(_selection);
+        }
+        return KeyEventResult.handled;
+      }
+    }
     if (key == LogicalKeyboardKey.arrowDown) {
       _moveSelection(1);
       return KeyEventResult.handled;
@@ -823,6 +1004,9 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         focusable: true,
         focused: _containerFocused,
         label: widget.listLabel,
+        value: widget.multiSelect
+            ? '${_selectedIndices.length} selected'
+            : null,
         child: NotificationListener<ScrollStartNotification>(
           onNotification: (_) {
             _finishMotion();
@@ -839,12 +1023,12 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
             itemBuilder: (context, index) => _VirtualRow(
               key: widget.itemKeyBuilder(index),
               index: index,
-              selected: index == _selectedIndex,
+              selected: _isSelected(index),
               ready: widget.isRowReady?.call(index) ?? true,
               semantics: widget.rowSemanticsBuilder(index),
               owner: this,
               onKeyEvent: _handleKeyEvent,
-              child: widget.rowBuilder(context, index, index == _selectedIndex),
+              child: widget.rowBuilder(context, index, _isSelected(index)),
             ),
           ),
         ),
@@ -982,12 +1166,7 @@ class _VirtualRowState extends State<_VirtualRow> {
                       event.buttons == kPrimaryButton) {
                     // Selection and focus cannot wait for double-tap recognition:
                     // a following keyboard command must target this row now.
-                    widget.owner._requestIndex(
-                      widget.index,
-                      moveFocus: true,
-                      forceFocus: true,
-                      reveal: false,
-                    );
+                    widget.owner._pointerSelect(widget.index);
                   }
                 }
               : null,
@@ -1001,6 +1180,7 @@ class _VirtualRowState extends State<_VirtualRow> {
                       moveFocus: true,
                       forceFocus: true,
                       reveal: false,
+                      preserveSelection: true,
                     );
                     widget.owner.widget.onActivate?.call(widget.index);
                   }
@@ -1010,12 +1190,7 @@ class _VirtualRowState extends State<_VirtualRow> {
               // only after recognition, so a touch scroll cannot select a row.
               if (!widget.owner.widget.activateOnDoubleTap ||
                   details.kind != PointerDeviceKind.mouse) {
-                widget.owner._requestIndex(
-                  widget.index,
-                  moveFocus: true,
-                  forceFocus: true,
-                  reveal: false,
-                );
+                widget.owner._pointerSelect(widget.index);
               }
             },
             child: _RowMotion(

@@ -152,6 +152,10 @@ void main() {
           await tester.pumpAndSettle();
         }
         final returnedFocus = focus.hasFocus;
+        final list = tester
+            .state<AttachmentPanelState>(find.byType(AttachmentPanel))
+            .list;
+        final returnedToList = list.hasListFocus && list.focusedRowIndex == 0;
         await tester.pumpWidget(const SizedBox());
         expect(
           callsWhileBusy,
@@ -165,9 +169,11 @@ void main() {
               '$action must not disable the focused button during its CLI work',
         );
         expect(
-          returnedFocus,
+          action == 'Detach' ? returnedToList : returnedFocus,
           isTrue,
-          reason: '$action must return to the originating button',
+          reason: action == 'Detach'
+              ? 'Successful detach returns to the nearest remaining row (TSK-060)'
+              : '$action must return to the originating button',
         );
       },
     );

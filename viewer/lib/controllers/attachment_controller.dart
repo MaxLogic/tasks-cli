@@ -108,7 +108,11 @@ class AttachmentController extends ChangeNotifier {
     _say('$value$reminder');
   }
 
-  Future<bool> _write(List<String> command, String success) async {
+  Future<bool> _write(
+    List<String> command,
+    String success, {
+    VoidCallback? onSuccess,
+  }) async {
     if (!_checkEnabled()) {
       _confirmationSkipped = false;
       return false;
@@ -124,6 +128,7 @@ class AttachmentController extends ChangeNotifier {
     try {
       await client.attachmentCommand(projectId, command, mutation: true);
       await refresh();
+      onSuccess?.call();
       _outcome(success);
     } on ViewerPendingReceiptFailure catch (failure) {
       _outcome(
@@ -268,18 +273,40 @@ class AttachmentController extends ChangeNotifier {
     AttachmentSummary item,
     Future<bool> Function() confirm,
   ) async {
+    await detachMany([item], confirm);
+  }
+
+  /// One optimistic version check, mutation and refresh for the selected set.
+  /// False includes cancellation and unknown outcomes; selection is retained.
+  Future<bool> detachMany(
+    List<AttachmentSummary> items,
+    Future<bool> Function() confirm,
+  ) async {
     try {
       notice = null;
-      if (!_checkEnabled()) return;
+      if (!_checkEnabled()) return false;
+      if (items.isEmpty) {
+        noSelection();
+        return false;
+      }
       final version = task.version;
-      if (await _choose(confirm) != true || !_checkEnabled()) return;
-      await _write([
-        'detach',
-        '${task.id}',
-        item.displayId,
-        '--expect-version',
-        '$version',
-      ], 'Detached ${item.name}');
+      final selected = List<AttachmentSummary>.of(items);
+      if (await _choose(confirm) != true || !_checkEnabled()) return false;
+      var succeeded = false;
+      await _write(
+        [
+          'detach',
+          '${task.id}',
+          for (final item in selected) item.displayId,
+          '--expect-version',
+          '$version',
+        ],
+        selected.length == 1
+            ? 'Detached ${selected.single.name}'
+            : 'Detached ${selected.length} attachments',
+        onSuccess: () => succeeded = true,
+      );
+      return succeeded;
     } finally {
       _confirmationSkipped = false;
     }

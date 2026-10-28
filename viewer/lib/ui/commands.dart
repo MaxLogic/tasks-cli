@@ -893,7 +893,7 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     'attachmentPaste': ('Paste attachments', LogicalKeyboardKey.keyU),
     'attachmentView': ('View attachment', LogicalKeyboardKey.keyW),
     'attachmentSave': ('Save attachment as', LogicalKeyboardKey.keyS),
-    'attachmentDetach': ('Detach attachment', LogicalKeyboardKey.keyX),
+    'attachmentDetach': ('Detach attachments', LogicalKeyboardKey.keyX),
   }.entries)
     CommandSpec(
       id: 'details.${entry.key}',
@@ -909,9 +909,9 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     group: HelpGroup.details,
     label: 'Attachment preview and paste',
     shortcutText:
-        'Ctrl+V; Delete; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
+        'Ctrl+V; Ctrl+click; Shift+click/arrows; Ctrl+Space; Ctrl+A; Delete; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
     description:
-        'Ctrl+V attaches images or files from the task list or any task details tab. Editable fields and dialogs keep native paste. Delete on the attachment list detaches the selected file with confirmation; Enter views it. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
+        'Ctrl+V attaches images or files from the task list or any task details tab. Editable fields and dialogs keep native paste. On attachments, Ctrl+click toggles selection, Shift+click or Shift+Up/Down selects a range, Ctrl+Space toggles the focused row and Ctrl+A selects all. Delete or Alt+X detaches all selected files with one confirmation. View, double-click and Save as use the focused row. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
   ),
   // ---------------------------------------------------------------- editor
   CommandSpec(

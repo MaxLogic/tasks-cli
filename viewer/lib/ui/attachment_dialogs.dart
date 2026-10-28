@@ -156,6 +156,8 @@ class AttachmentPanel extends StatefulWidget {
 class AttachmentPanelState extends State<AttachmentPanel> {
   final list = VirtualListController();
   AttachmentController get c => widget.controller;
+  // selectedIndex is the retained focus/activation row in multi-select mode,
+  // even when Ctrl+click deselected it. View, double-click and Save as use it.
   AttachmentSummary? get item {
     final selected = list.selectedIndex;
     return selected != null &&
@@ -248,13 +250,16 @@ class AttachmentPanelState extends State<AttachmentPanel> {
   Future<void> detach() async {
     final returnToList = list.hasListFocus;
     final previousFocus = FocusManager.instance.primaryFocus;
-    final current = item;
-    if (current == null) {
+    final before = List<AttachmentSummary>.of(c.task.attachments);
+    final indices = list.selectedIndices.toList()..sort();
+    final selected = [for (final i in indices) before[i]];
+    final focused = list.selectedIndex ?? 0;
+    if (selected.isEmpty) {
       c.noSelection();
       return;
     }
-    await c.detach(
-      current,
+    final succeeded = await c.detachMany(
+      selected,
       () =>
           widget.api?.settings.confirmationEnabled(
                 ViewerConfirmation.attachmentDetach,
@@ -263,8 +268,12 @@ class AttachmentPanelState extends State<AttachmentPanel> {
           ? Future.value(true)
           : _confirm(
               AttachmentConfirmationDialog(
-                title: 'Detach ${current.name} from ${c.task.canonicalId}?',
-                content: "The file stays in the backlog's history.",
+                title: selected.length == 1
+                    ? 'Detach ${selected.single.name} from ${c.task.canonicalId}?'
+                    : 'Detach ${selected.length} attachments?',
+                content: selected.length == 1
+                    ? "The file stays in the backlog's history."
+                    : '${selected.map((item) => item.name).join('\n')}\n\nThe files stay in the backlog\'s history.',
                 accept: 'Detach (Alt+D)',
                 acceptIcon: ViewerIcons.detach,
                 cancelDefault: true,
@@ -284,7 +293,24 @@ class AttachmentPanelState extends State<AttachmentPanel> {
     if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (returnToList) {
+      if (succeeded) {
+        // Compare original positions so removing rows before the focused row
+        // does not turn an adjacent survivor into an unrelated index jump.
+        final remaining = c.task.attachments;
+        int? nearest;
+        var distance = before.length + 1;
+        for (var i = 0; i < remaining.length; i++) {
+          final old = before.indexWhere((item) => item.id == remaining[i].id);
+          final gap = old < 0 ? before.length : (old - focused).abs();
+          if (gap < distance || (gap == distance && old >= focused)) {
+            distance = gap;
+            nearest = i;
+          }
+        }
+        list.selectIndex(nearest);
+        if (nearest != null) list.goToIndex(nearest);
+        list.focusRegion();
+      } else if (returnToList) {
         list.focusRegion();
       } else if (previousFocus?.canRequestFocus == true) {
         previousFocus!.requestFocus();
@@ -381,10 +407,10 @@ class AttachmentPanelState extends State<AttachmentPanel> {
               ),
               Tooltip(
                 message:
-                    'Detach selected attachment (Delete on the attachment list)',
+                    'Detach selected attachments (Delete on the attachment list)',
                 child: Semantics(
                   hint:
-                      'Delete also detaches the selected attachment from the list',
+                      'Delete also detaches the selected attachments from the list',
                   child: TextButton.icon(
                     onPressed: detach,
                     icon: const Icon(ViewerIcons.detach),
@@ -418,6 +444,10 @@ class AttachmentPanelState extends State<AttachmentPanel> {
               },
               child: AccessibleVirtualList(
                 controller: list,
+                multiSelect: true,
+                onSelectionChanged: (selected) => c.announce(
+                  '${selected.length} ${selected.length == 1 ? 'attachment' : 'attachments'} selected',
+                ),
                 itemCount: c.task.attachments.length,
                 motionKey: ListMotionKey(
                   scope: c.task.canonicalId,
@@ -425,7 +455,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
                 ),
                 itemExtent: 64,
                 listLabel:
-                    'Attachments (Alt+A). Delete detaches the selected attachment',
+                    'Attachments (Alt+A). Delete detaches the selected attachments',
                 emptyLabel:
                     'No attachments. Add files (Alt+F) or paste an image or files (Ctrl+V).',
                 itemKeyBuilder: (i) => ValueKey(c.task.attachments[i].id),

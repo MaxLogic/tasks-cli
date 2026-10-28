@@ -8,8 +8,9 @@ import 'package:tasks_viewer/ui/accessible_virtual_list.dart';
 
 Future<(VirtualListController, List<int>, ScrollPosition)> mount(
   WidgetTester tester,
-  int count,
-) async {
+  int count, {
+  bool multiSelect = false,
+}) async {
   final controller = VirtualListController();
   addTearDown(controller.dispose);
   final activated = <int>[];
@@ -23,6 +24,7 @@ Future<(VirtualListController, List<int>, ScrollPosition)> mount(
             height: 300,
             child: AccessibleVirtualList(
               controller: controller,
+              multiSelect: multiSelect,
               itemCount: count,
               itemExtent: 64,
               listLabel: 'Attachments',
@@ -50,6 +52,79 @@ Future<(VirtualListController, List<int>, ScrollPosition)> mount(
 }
 
 void main() {
+  testWidgets(
+    'multi-select focus return retains selection across virtualized rows',
+    (tester) async {
+      final (controller, _, position) = await mount(
+        tester,
+        100,
+        multiSelect: true,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('body-1')),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.tap(
+        find.byKey(const ValueKey('body-3')),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(controller.selectedIndices, {1, 3});
+      final outside = FocusNode();
+      addTearDown(outside.dispose);
+      FocusScope.of(
+        tester.element(find.byType(AccessibleVirtualList)),
+      ).requestFocus(outside);
+      await tester.pumpAndSettle();
+      expect(outside.hasFocus, isTrue);
+      position.jumpTo(64 * 80);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('body-3')), findsNothing);
+      controller.focusRegion();
+      await tester.pumpAndSettle();
+      expect(controller.focusedRowIndex, 3);
+      expect(controller.selectedIndices, {1, 3});
+    },
+  );
+
+  testWidgets('multi-select pointer gestures never scroll the clicked rows', (
+    tester,
+  ) async {
+    final (controller, activated, position) = await mount(
+      tester,
+      20,
+      multiSelect: true,
+    );
+    position.jumpTo(37);
+    await tester.pumpAndSettle();
+    Future<void> click(int index) async {
+      final pointer = await tester.startGesture(
+        tester.getCenter(find.byKey(ValueKey('body-$index'))),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump();
+      expect(position.pixels, 37);
+      expect(controller.focusedRowIndex, index);
+      await pointer.up();
+    }
+
+    await click(1);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await click(3);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    expect(controller.selectedIndices, {1, 3});
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await click(2);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    expect(controller.selectedIndices, {2, 3});
+    expect(position.pixels, 37);
+    expect(activated, isEmpty);
+    await tester.pump(kDoubleTapTimeout);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   for (final count in [3, 8, 20, 100]) {
     testWidgets('visible rows stay under the pointer, count=$count', (
       tester,
