@@ -5,10 +5,8 @@ backlog per project through the CLI's `viewer` command group. Local stores and
 configured remote profiles use the same interface; the viewer never opens a
 task database itself.
 
-The project owner tested the viewer with NVDA and confirmed screen-reader use
-on 2026-10-06. Keyboard navigation, full-text reading and editing are part of
-the application workflow. See [verification-report.md](verification-report.md)
-for the owner report and dated automated checks.
+The viewer has been tested with the NVDA screen reader. Keyboard navigation,
+full-text reading and editing are part of the application workflow.
 
 The viewer talks to the store only through `tasks.exe`. Reads use the CLI's
 `viewer projects`, `viewer tasks`, `viewer show` and `viewer info` commands.
@@ -179,7 +177,7 @@ viewer never retries a conflicting write by itself. For a lost local save
 acknowledgement, reconciliation waits for the owned writer and re-reads the task.
 Remote writes retain their original request receipt; **Check pending change**
 reconciles that request rather than creating a replacement write. Drafts survive
-service failures and restarts. See [remote recovery](../integration/remote-viewer.md).
+service failures and restarts.
 A missing data root shows "No task store found" with the
 resolved path, and an unavailable or malformed project database produces its
 own error row without hiding the healthy projects.
@@ -253,6 +251,4 @@ Windows 11 against the downloaded candidate. See [release maintenance](../releas
 release fixtures with a recorded seed and times the release CLI round trips.
 Each script retains logs under `viewer/target/evidence/viewer/<run-id>/` and
 receives explicit temporary data and settings roots; none of them touch a real
-backlog. Dated results and environment-specific limitations are recorded in
-`viewer/verification-report.md` and integration deployment records. Their counts
-and unavailable rows describe the named run, not every later build.
+backlog.

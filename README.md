@@ -244,11 +244,8 @@ Remote profiles send signed HTTPS requests to `tasks-server`, which owns the
 project databases. Remote writes keep request receipts, so a lost reply can be
 reconciled instead of repeated. Remote access needs the server online, and local
 maintenance commands (`import`, `bulk-import`, `backup`, `migrate`, `doctor`) are
-refused against a remote profile.
-
-- [Remote CLI setup and recovery](integration/remote-cli.md)
-- [Server administration](integration/server-core.md)
-- [Server backup and recovery](integration/server-cutover.md)
+refused against a remote profile. The server is built from this source; see
+[building from source](#building-from-source).
 
 ## Importing a Markdown backlog
 
@@ -316,13 +313,8 @@ directories, and [release maintenance](release/README.md) covers packaging.
 
 Tests use real temporary SQLite databases and real subprocesses for contention,
 exit codes, standard input, backup recovery and crash rollback. They never touch
-the default task store or live Markdown ledgers.
-
-Recorded results, each tied to its own candidate and environment:
-
-- [CLI verification report](verification-report.md)
-- [Server verification](integration/server-refactor-progress.md)
-- [Viewer verification](viewer/verification-report.md)
+the default task store or live Markdown ledgers. CI runs the CLI tests natively
+on Windows and Ubuntu and verifies the Windows viewer bundle.
 
 ## Deliberately out of scope
 
@@ -331,8 +323,6 @@ Recorded results, each tied to its own candidate and environment:
 - Retention of pre-migration backups. They accumulate until you remove them.
 - Full-fidelity Markdown export. Use the SQLite backup for recovery.
 - Opening one database from both Windows and native Linux. Use WSL delegation.
-
-[`spec.md`](spec.md) is the normative contract behind all of the above.
 
 ## License
 

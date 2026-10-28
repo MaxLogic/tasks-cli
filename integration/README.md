@@ -58,9 +58,6 @@ detached Git worktree, read the same project from nested paths, and reject
 unsafe identity. They clean only their unique temporary directory and remove
 the test worktree through Git. They do not use the user's default store.
 
-See [evaluation.md](evaluation.md) for provenance, strengths retained and the
-limits of the workflow evaluation.
-
 For a first run, see [installation](../installation.md) and the
 [architect-led worktree example](architect-workflow.md). The architect owns
 assignment and lifecycle transitions; workers return changes and evidence.

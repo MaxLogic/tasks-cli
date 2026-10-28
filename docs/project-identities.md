@@ -31,7 +31,7 @@ handle and rejects a result over 4096 bytes, so concurrent growth cannot produce
 an unbounded allocation. On Unix the open is nonblocking so a concurrent FIFO
 replacement cannot hang the open before handle validation.
 
-Observed on Windows with Rust 1.98.1 and real NTFS links:
+Observed on Windows with real NTFS links:
 `symlink_metadata()` reports a file symlink as `is_symlink() == true`,
 `is_symlink_file() == true`, with attributes `0x420`.
 `metadata()` follows it and reports a regular file, `is_symlink() == false`,

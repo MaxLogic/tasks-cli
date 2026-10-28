@@ -46,7 +46,7 @@ or use the isolated architect walkthrough below.
 | --- | --- | --- |
 | CLI | Windows x64; native Linux x64 on Ubuntu in WSL, with separate storage | Other distributions need native verification. No macOS build or test has been run. |
 | Viewer | Windows 11 x64, including owner-tested NVDA use | No Linux or macOS viewer build. |
-| Server | Linux amd64 container, including a documented server deployment | Other architectures are unverified. |
+| Server | Linux amd64 container | Other architectures are unverified. |
 
 The Linux download is built natively on Ubuntu 22.04 and requires glibc 2.35
 or newer; Alpine/musl is not supported by that binary. macOS is unverified
@@ -121,8 +121,7 @@ TASKS_WINDOWS_EXE=/mnt/c/Tools/tasks.exe tasks list
 
 Replace the path with your installed `tasks.exe`. For a self-hosted remote
 backlog, configure each native installation independently instead; the server
-owns SQLite. Remote profiles are selected before delegation. See
-[remote setup](integration/remote-cli.md).
+owns SQLite. Remote profiles are selected before delegation.
 
 ## Viewer and server
 
@@ -132,8 +131,7 @@ Flutter runtime, assets and hash manifest. Copy the whole bundle and run
 keyboard controls are described in [viewer/README.md](viewer/README.md).
 
 The server is optional. Add `--features server --bin tasks-server` to a separate
-`cargo build --release --locked` invocation with its own target directory and
-follow [server administration](integration/server-core.md).
+`cargo build --release --locked` invocation with its own target directory.
 Remote access requires enrollment and an online HTTPS gateway. It does not
 provide an offline write queue.
 
