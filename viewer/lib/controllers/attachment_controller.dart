@@ -34,7 +34,10 @@ class AttachmentController extends ChangeNotifier {
   bool busy = false, editing = false;
   bool _disposed = false;
   bool _dialogOpen = false;
+  bool _confirmationSkipped = false;
+  void confirmationWasSkipped() => _confirmationSkipped = true;
   String? notice;
+  bool noticeAnnounced = false;
   bool clipboardRetryAvailable = false;
   String? get pendingRequestId => client.pendingReceipts
       .where(
@@ -64,23 +67,52 @@ class AttachmentController extends ChangeNotifier {
 
   bool get enabled =>
       current && !_dialogOpen && !busy && !editing && pendingRequestId == null;
-  String? get disabledReason => editing
+  String? get disabledReason => !current
+      ? 'The selected task changed. Select the task again.'
+      : editing
       ? 'Save or cancel your edits first'
       : busy
       ? _busyMessage
+      : _dialogOpen
+      ? 'Close the open attachment dialog first'
+      : pendingRequestId != null
+      ? 'Check the pending attachment change first'
       : null;
+  bool _checkEnabled() {
+    if (enabled) return true;
+    _say(
+      busy && !editing && current
+          ? 'An attachment operation is in progress. $_busyMessage'
+          : disabledReason ?? 'Attachments are unavailable',
+    );
+    return false;
+  }
+
+  void noSelection() => _say('Select an attachment first');
   void _notify() {
     if (!_disposed) notifyListeners();
   }
 
   void _say(String value) {
     notice = value;
-    if (current) announce(value);
+    noticeAnnounced = current;
+    if (noticeAnnounced) announce(value);
     _notify();
   }
 
-  Future<void> _write(List<String> command, String success) async {
-    if (!enabled) return;
+  void _outcome(String value) {
+    final reminder = _confirmationSkipped
+        ? '. Re-enable this confirmation in Settings > Confirmations.'
+        : '';
+    _confirmationSkipped = false;
+    _say('$value$reminder');
+  }
+
+  Future<bool> _write(List<String> command, String success) async {
+    if (!_checkEnabled()) {
+      _confirmationSkipped = false;
+      return false;
+    }
     clipboardRetryAvailable = false;
     busy = true;
     _busyMessage = command.first == 'detach' ? 'Detaching...' : 'Attaching...';
@@ -92,9 +124,9 @@ class AttachmentController extends ChangeNotifier {
     try {
       await client.attachmentCommand(projectId, command, mutation: true);
       await refresh();
-      _say(success);
+      _outcome(success);
     } on ViewerPendingReceiptFailure catch (failure) {
-      _say(
+      _outcome(
         'Attachment outcome pending. Check pending change ${failure.requestId}.',
       );
     } on ViewerTimeoutFailure {
@@ -106,18 +138,20 @@ class AttachmentController extends ChangeNotifier {
           failure.code == 'unparsed_error') {
         await _unknown();
       } else {
-        _say(attachmentFailureMessage(failure));
+        _outcome(attachmentFailureMessage(failure));
       }
     } finally {
       slow.cancel();
       busy = false;
+      _confirmationSkipped = false;
       _notify();
     }
+    return true;
   }
 
   Future<void> _unknown() async {
     if (client.usesRemoteReceipts) {
-      _say(
+      _outcome(
         'Attachment outcome pending. Check pending change ${pendingRequestId ?? ''}.',
       );
       return;
@@ -125,12 +159,12 @@ class AttachmentController extends ChangeNotifier {
     try {
       await refresh();
     } on ViewerFailure catch (failure) {
-      _say(
+      _outcome(
         'Attachment outcome unknown; check the list before retrying. ${failure.message}',
       );
       return;
     }
-    _say('Attachment outcome unknown; check the list before retrying');
+    _outcome('Attachment outcome unknown; check the list before retrying');
   }
 
   Future<T?> _choose<T>(Future<T> Function() action) async {
@@ -148,10 +182,15 @@ class AttachmentController extends ChangeNotifier {
   }
 
   Future<void> addFiles() async {
-    if (!enabled) return;
+    notice = null;
+    if (!_checkEnabled()) return;
     final version = task.version;
     final files = await _choose(dialogs.openFiles);
-    if (!enabled || files == null || files.isEmpty) return;
+    if (!_checkEnabled()) return;
+    if (files == null || files.isEmpty) {
+      if (notice == null) _say('Attachment add cancelled');
+      return;
+    }
     await _write(
       [
         'add',
@@ -164,68 +203,96 @@ class AttachmentController extends ChangeNotifier {
     );
   }
 
-  Future<void> paste(Future<bool> Function(AttachmentClipboard) confirm) async {
-    if (!enabled) return;
-    final version = task.version;
-    clipboardRetryAvailable = false;
-    notice = null;
-    _busyMessage = 'Reading clipboard...';
-    busy = true;
-    _notify();
-    AttachmentClipboard? clipboard;
+  /// True only after a mutation starts. Every other result allows Tasks search
+  /// paste to try its text clipboard seam; [notice] explains an unavailable attach.
+  Future<bool> paste(
+    Future<bool> Function(AttachmentClipboard) confirm, {
+    bool ignoreEmpty = false,
+  }) async {
     try {
-      clipboard = AttachmentClipboard.fromJson(
-        (await client.attachmentCommand(projectId, [
-          'clipboard',
-        ], clipboard: true)).data,
-      );
-    } on ViewerFailure catch (failure) {
-      clipboardRetryAvailable =
-          failure is ViewerTimeoutFailure ||
-          (failure is ViewerCliErrorFailure && failure.code == 'interop');
-      _say(attachmentFailureMessage(failure));
-    } finally {
-      busy = false;
+      notice = null;
+      noticeAnnounced = false;
+      if (!_checkEnabled()) return false;
+      final version = task.version;
+      clipboardRetryAvailable = false;
+      _busyMessage = 'Reading clipboard...';
+      busy = true;
       _notify();
+      AttachmentClipboard? clipboard;
+      try {
+        clipboard = AttachmentClipboard.fromJson(
+          (await client.attachmentCommand(projectId, [
+            'clipboard',
+          ], clipboard: true)).data,
+        );
+      } on ViewerFailure catch (failure) {
+        if (ignoreEmpty &&
+            failure is ViewerCliErrorFailure &&
+            failure.code == 'clipboard_empty') {
+          notice = attachmentFailureMessage(failure);
+          return false;
+        }
+        clipboardRetryAvailable =
+            failure is ViewerTimeoutFailure ||
+            (failure is ViewerCliErrorFailure && failure.code == 'interop');
+        _say(attachmentFailureMessage(failure));
+      } finally {
+        busy = false;
+        _notify();
+      }
+      if (clipboard == null || !_checkEnabled()) return false;
+      final accepted = await _choose(() => confirm(clipboard!));
+      if (accepted != true) {
+        if (notice == null) _say('Attachment paste cancelled');
+        return false;
+      }
+      if (!_checkEnabled()) return false;
+      return await _write(
+        [
+          'add',
+          '${task.id}',
+          '--expect-version',
+          '$version',
+          '--clipboard',
+          '--clipboard-token',
+          clipboard.token,
+        ],
+        'Attached ${clipboard.items.length} ${clipboard.items.length == 1 ? 'file' : 'files'} to ${task.canonicalId}',
+      );
+    } finally {
+      _confirmationSkipped = false;
     }
-    if (clipboard == null ||
-        !enabled ||
-        await _choose(() => confirm(clipboard!)) != true ||
-        !enabled) {
-      return;
-    }
-    await _write(
-      [
-        'add',
-        '${task.id}',
-        '--expect-version',
-        '$version',
-        '--clipboard',
-        '--clipboard-token',
-        clipboard.token,
-      ],
-      'Attached ${clipboard.items.length} ${clipboard.items.length == 1 ? 'file' : 'files'} to ${task.canonicalId}',
-    );
   }
 
   Future<void> detach(
     AttachmentSummary item,
     Future<bool> Function() confirm,
   ) async {
-    if (!enabled) return;
-    final version = task.version;
-    if (await _choose(confirm) != true || !enabled) return;
-    await _write([
-      'detach',
-      '${task.id}',
-      item.displayId,
-      '--expect-version',
-      '$version',
-    ], 'Detached ${item.name}');
+    try {
+      notice = null;
+      if (!_checkEnabled()) return;
+      final version = task.version;
+      if (await _choose(confirm) != true || !_checkEnabled()) return;
+      await _write([
+        'detach',
+        '${task.id}',
+        item.displayId,
+        '--expect-version',
+        '$version',
+      ], 'Detached ${item.name}');
+    } finally {
+      _confirmationSkipped = false;
+    }
   }
 
   Future<String?> materialize(AttachmentSummary item, {String? out}) async {
-    if (!enabled) return null;
+    notice = null;
+    if (!_checkEnabled()) return null;
+    busy = true;
+    _busyMessage = out == null
+        ? 'Opening ${item.name}...'
+        : 'Saving ${item.name}...';
+    _say(_busyMessage);
     try {
       final result = await client.attachmentCommand(projectId, [
         'get',
@@ -233,7 +300,10 @@ class AttachmentController extends ChangeNotifier {
         item.displayId,
         if (out != null) ...['--out', out, '--overwrite'],
       ]);
-      if (!current) return null;
+      if (!current) {
+        _say('The selected task changed. Select the task again.');
+        return null;
+      }
       final items = result.data['items'];
       if (result.data['id'] != task.id || items is! List || items.length != 1) {
         throw const ViewerMalformedResponseFailure(
@@ -257,18 +327,27 @@ class AttachmentController extends ChangeNotifier {
           'attachment get returned a mismatched item',
         );
       }
+      _say(out == null ? 'Opened ${item.name}' : 'Saved ${item.name}');
       return entry['path']! as String;
     } on ViewerFailure catch (failure) {
       _say(attachmentFailureMessage(failure));
       return null;
+    } finally {
+      busy = false;
+      _notify();
     }
   }
 
   Future<void> saveAs(AttachmentSummary item) async {
-    if (!enabled) return;
+    notice = null;
+    if (!_checkEnabled()) return;
     final path = await _choose(() => dialogs.saveAs(item.name));
-    if (path == null || !enabled) return;
-    if (await materialize(item, out: path) != null) _say('Saved ${item.name}');
+    if (!_checkEnabled()) return;
+    if (path == null) {
+      if (notice == null) _say('Save cancelled');
+      return;
+    }
+    await materialize(item, out: path);
   }
 
   @override

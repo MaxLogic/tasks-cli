@@ -27,6 +27,212 @@ const png =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
 
 void main() {
+  for (final image in [true, false]) {
+    testWidgets(
+      'real CLI empty panel add View Save as detach ${image ? "PNG" : "log"}',
+      (tester) async {
+        if (!available(cli)) return;
+        final h = (await tester.runAsync(Harness.start))!;
+        final source = File(
+          '${h.root.path}/${image ? "pixel.png" : "source.log"}',
+        );
+        source.writeAsBytesSync(
+          image
+              ? base64Decode(png)
+              : utf8.encode('Exact log bytes: lambda \u03bb\n'),
+        );
+        h.dialogs.files = [source.path];
+        h.dialogs.output =
+            '${h.root.path}/saved-${image ? "pixel.png" : "source.log"}';
+        tester.view.physicalSize = const Size(1600, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final announcements = AnnouncementController(
+          clipPlayer: support.RecordingClipPlayer(),
+        );
+        addTearDown(announcements.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ViewerWorkspaceHost(
+              environment: h.environment,
+              attachmentDialogs: h.dialogs,
+              readers: ViewerDataReader(
+                projects: h.client,
+                tasks: h.client,
+                detail: h.client,
+                update: h.client,
+                probe: h.client.probe,
+              ),
+              announcements: announcements,
+            ),
+          ),
+        );
+        await waitFor(
+          tester,
+          () => find.byType(ViewerWorkspaceScope).evaluate().isNotEmpty,
+        );
+        final model = tester
+            .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
+            .model;
+        await tester.runAsync(() async {
+          await model.projectList.refresh();
+          model.selectProjectIndex(0);
+          await model.tasks!.refresh();
+          await model.openTaskIndex(0);
+        });
+        await tester.pumpAndSettle();
+        await support.pressKey(tester, LogicalKeyboardKey.f3);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit5);
+        await tester.pumpAndSettle();
+        final controller = tester
+            .widget<AttachmentPanel>(find.byType(AttachmentPanel))
+            .controller;
+        await tester.runAsync(() async {
+          await tester.tap(find.text('Add files (Alt+F)'));
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+        });
+        await waitFor(
+          tester,
+          () => controller.task.attachments.length == 1 && !controller.busy,
+        );
+        await tester.pumpAndSettle();
+        final panel = tester.state<AttachmentPanelState>(
+          find.byType(AttachmentPanel),
+        );
+        expect(
+          panel.item,
+          isNotNull,
+          reason: 'The newly attached row must be selected',
+        );
+        expect(controller.enabled, isTrue);
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'View (Alt+W)'),
+              )
+              .onPressed,
+          isNotNull,
+          reason: 'View must remain enabled after the real workspace refresh',
+        );
+        await tester.runAsync(
+          () => support.pressAlt(tester, LogicalKeyboardKey.keyW),
+        );
+        await waitFor(
+          tester,
+          () => find.byType(AttachmentPreviewDialog).evaluate().isNotEmpty,
+        );
+        expect(
+          find.byType(AttachmentPreviewDialog),
+          findsOneWidget,
+          reason: controller.notice,
+        );
+        if (image) {
+          await waitFor(
+            tester,
+            () => find
+                .bySemanticsLabel(RegExp('Image pixel.png, 1 by 1 pixels'))
+                .evaluate()
+                .isNotEmpty,
+          );
+        } else {
+          await waitFor(
+            tester,
+            () => find
+                .text('Exact log bytes: lambda \u03bb\n')
+                .evaluate()
+                .isNotEmpty,
+          );
+        }
+        await support.pressKey(tester, LogicalKeyboardKey.escape);
+        await tester.runAsync(
+          () => support.pressAlt(tester, LogicalKeyboardKey.keyS),
+        );
+        await waitFor(
+          tester,
+          () => controller.notice == 'Saved ${source.uri.pathSegments.last}',
+        );
+        final output = File(h.dialogs.output!);
+        expect(output.readAsBytesSync(), source.readAsBytesSync());
+        final hashes = await tester.runAsync(
+          () async => [await hash(source), await hash(output)],
+        );
+        expect(hashes![1], hashes[0]);
+        expect(controller.task.attachments.single.sha256, hashes[0]);
+        await tester.runAsync(() => tester.tap(find.text('Detach (Alt+X)')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Detach (Alt+D)'));
+        await tester.pumpAndSettle();
+        await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+        });
+        await waitFor(
+          tester,
+          () => controller.task.attachments.isEmpty && !controller.busy,
+        );
+        expect(
+          announcements.liveRegionText,
+          'Detached ${source.uri.pathSegments.last}',
+        );
+        await tester.runAsync(() => tester.tap(find.text('Add files (Alt+F)')));
+        await waitFor(
+          tester,
+          () => controller.task.attachments.length == 1 && !controller.busy,
+        );
+        expect(
+          tester.state<AttachmentPanelState>(find.byType(AttachmentPanel)).item,
+          isNotNull,
+          reason:
+              'The first attachment after emptying the list must be actionable',
+        );
+        await tester.runAsync(() => tester.tap(find.text('View (Alt+W)')));
+        await waitFor(
+          tester,
+          () => find.byType(AttachmentPreviewDialog).evaluate().isNotEmpty,
+        );
+        h.dialogs.output = null;
+        final previewSave = find.descendant(
+          of: find.byType(AttachmentPreviewDialog),
+          matching: find.text('Save as (Alt+S)'),
+        );
+        await tester.runAsync(() => tester.tap(previewSave));
+        await waitFor(tester, () => controller.notice == 'Save cancelled');
+        expect(
+          find.descendant(
+            of: find.byType(AttachmentPreviewDialog),
+            matching: find.text('Save cancelled'),
+          ),
+          findsOneWidget,
+        );
+        h.dialogs.output = '${h.root.path}/missing-parent/saved.bin';
+        await tester.runAsync(() => tester.tap(previewSave));
+        await waitFor(
+          tester,
+          () => controller.notice?.contains('missing-parent') == true,
+        );
+        expect(controller.notice, contains('missing-parent'));
+        expect(File(h.dialogs.output!).existsSync(), isFalse);
+        h.dialogs.saveFailure = const FileSystemException('Picker unavailable');
+        await tester.runAsync(() => tester.tap(previewSave));
+        await waitFor(
+          tester,
+          () =>
+              controller.notice != null &&
+              controller.notice!.contains('Picker unavailable'),
+        );
+        expect(
+          find.descendant(
+            of: find.byType(AttachmentPreviewDialog),
+            matching: find.textContaining('Could not open attachment dialog'),
+          ),
+          findsOneWidget,
+        );
+        await tester.pumpWidget(const SizedBox());
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+      },
+    );
+  }
+
   testWidgets(
     'real viewer info exposes the Attachments tab in the real shell',
     (tester) async {
@@ -380,10 +586,16 @@ Future<String> hash(File file) async {
 class Dialogs implements AttachmentFileDialogs {
   List<String> files = [];
   String? output;
+  Object? saveFailure;
+  Completer<String?>? saveGate;
   @override
   Future<List<String>> openFiles() async => files;
   @override
-  Future<String?> saveAs(String suggestedName) async => output;
+  Future<String?> saveAs(String suggestedName) async {
+    if (saveFailure case final failure?) throw failure;
+    if (saveGate case final gate?) return gate.future;
+    return output;
+  }
 }
 
 class Harness {
@@ -395,6 +607,7 @@ class Harness {
     this.environment,
     this.client,
     this.clipboardFixture,
+    this.launcher,
   );
   final Directory root;
   final String executable, project;
@@ -402,11 +615,15 @@ class Harness {
   final ViewerEnvironment environment;
   final ViewerCliClient client;
   final Directory? clipboardFixture;
+  final TrackingLauncher launcher;
   final dialogs = Dialogs();
   late TaskDetail detail;
   late AttachmentController controller;
 
-  static Future<Harness> start({bool clipboard = false}) async {
+  static Future<Harness> start({
+    bool clipboard = false,
+    ViewerCliClient Function(ViewerEnvironment, ProcessLauncher)? clientFactory,
+  }) async {
     final root = Directory.systemTemp.createTempSync(
       'viewer-real-attachments-',
     );
@@ -468,12 +685,14 @@ class Harness {
       dataRoot: store,
       tasksExe: executable,
     );
-    final client = ViewerCliClient(
-      environment: env,
-      launcher: fixture == null
+    final launcher = TrackingLauncher(
+      fixture == null
           ? const SystemProcessLauncher()
           : FixtureLauncher(fixture.path),
     );
+    final client =
+        clientFactory?.call(env, launcher) ??
+        ViewerCliClient(environment: env, launcher: launcher);
     await client.probe();
     final h = Harness(
       root,
@@ -483,6 +702,7 @@ class Harness {
       env,
       client,
       fixture,
+      launcher,
     );
     await h.refresh();
     h.controller = AttachmentController(
@@ -515,6 +735,35 @@ class Harness {
     'json',
     ...args,
   ]);
+}
+
+class TrackingLauncher implements ProcessLauncher {
+  TrackingLauncher(this.inner);
+  final ProcessLauncher inner;
+  final calls = <List<String>>[];
+  var active = 0;
+  Completer<void>? _idle;
+  Future<void> get idle => _idle?.future ?? Future.value();
+  @override
+  Future<ViewerProcessHandle> start(
+    String executable,
+    List<String> arguments,
+  ) async {
+    calls.add(List.of(arguments));
+    if (active++ == 0) _idle = Completer<void>();
+    try {
+      final handle = await inner.start(executable, arguments);
+      unawaited(handle.exitCode.whenComplete(_ended));
+      return handle;
+    } catch (_) {
+      _ended();
+      rethrow;
+    }
+  }
+
+  void _ended() {
+    if (--active == 0) _idle!.complete();
+  }
 }
 
 Future<Map<String, dynamic>> run(String exe, List<String> args) async {

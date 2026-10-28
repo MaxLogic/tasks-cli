@@ -209,7 +209,15 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   /// Ctrl+V on the list: the clipboard text (a copied task ID, say) replaces
   /// the search and applies at once, and the keyboard stays in the list.
   Future<void> _pasteIntoSearch(TaskController tasks) async {
-    final text = await readClipboardSearchText(widget.api, widget.model);
+    final attachment = await widget.model.pasteAttachment?.call();
+    if (attachment?.started == true) return;
+    if (!mounted || !identical(tasks, _tasks)) return;
+    final text = await readClipboardSearchText(
+      widget.api,
+      widget.model,
+      noTextReason: attachment?.reason,
+      alreadyAnnounced: attachment?.announced ?? false,
+    );
     if (text == null || !mounted || !identical(tasks, _tasks)) {
       return;
     }

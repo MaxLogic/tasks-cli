@@ -245,6 +245,7 @@ class RemoteFixture {
     this.project,
     this.id,
     this.capabilities,
+    this.launcher,
   );
   final Directory root;
   final Process process;
@@ -254,6 +255,7 @@ class RemoteFixture {
   final String project;
   final int id;
   final List<dynamic> capabilities;
+  final local.TrackingLauncher launcher;
   bool dropNextAttachment = false;
   final attachmentRequests = <String>[];
 
@@ -526,7 +528,8 @@ class RemoteFixture {
         dataRoot: clientRoot,
         tasksExe: local.cli,
       );
-      final client = ViewerCliClient(environment: env);
+      final launcher = local.TrackingLauncher(const SystemProcessLauncher());
+      final client = ViewerCliClient(environment: env, launcher: launcher);
       fixture = RemoteFixture(
         root,
         process,
@@ -536,6 +539,7 @@ class RemoteFixture {
         projectId,
         task['data']['id'] as int,
         advertised,
+        launcher,
       );
       return fixture;
     } on Object {
@@ -566,6 +570,7 @@ class RemoteFixture {
       environment,
       client,
       null,
+      launcher,
     );
     await h.refresh();
     h.controller = AttachmentController(

@@ -261,8 +261,10 @@ void main() {
           ),
         ),
       );
-      await att.settleFileIo(tester);
       final notes = find.byKey(const ValueKey('attachment-preview-notes'));
+      for (var i = 0; i < 30 && notes.evaluate().isEmpty; i++) {
+        await att.settleFileIo(tester);
+      }
       expect(tester.widget<Semantics>(notes).container, isTrue);
       final data = tester.getSemantics(notes).getSemanticsData();
       expect(data.label, contains('Showing first 1 MiB; preview truncated.'));

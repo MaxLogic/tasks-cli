@@ -58,11 +58,13 @@ class AttachmentPreviewDialog extends StatefulWidget {
     required this.path,
     required this.announce,
     required this.onSaveAs,
+    this.saveNotice,
   });
   final AttachmentSummary item;
   final String path;
   final void Function(String) announce;
   final Future<void> Function() onSaveAs;
+  final String? Function()? saveNotice;
   @override
   State<AttachmentPreviewDialog> createState() =>
       _AttachmentPreviewDialogState();
@@ -101,6 +103,23 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog>
   bool splitLines = false;
   bool _announcedSplit = false;
   String? imageError;
+  String? _saveNotice;
+  bool _saving = false;
+  Future<void> _saveAs() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      await widget.onSaveAs();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+          _saveNotice = widget.saveNotice?.call();
+        });
+      }
+    }
+  }
+
   bool get image =>
       widget.item.kind == 'image' &&
       widget.item.originalSize <= 64 * 1024 * 1024 &&
@@ -208,7 +227,7 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog>
       const SingleActivator(LogicalKeyboardKey.keyC, alt: true): () =>
           Navigator.pop(context),
       const SingleActivator(LogicalKeyboardKey.keyS, alt: true): () {
-        widget.onSaveAs();
+        _saveAs();
       },
       if (widget.item.kind == 'text' &&
           widget.item.originalSize > attachmentTextPreviewLimit)
@@ -224,15 +243,23 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog>
       content: SizedBox(
         width: 720,
         height: 480,
-        child: image
-            ? _image()
-            : widget.item.kind == 'text'
-            ? _text()
-            : _fallback(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_saveNotice != null) _saveResult(context),
+            Expanded(
+              child: image
+                  ? _image()
+                  : widget.item.kind == 'text'
+                  ? _text()
+                  : _fallback(),
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton.icon(
-          onPressed: widget.onSaveAs,
+          onPressed: _saveAs,
           icon: const Icon(ViewerIcons.saveAs),
           label: const Text('Save as (Alt+S)'),
         ),
@@ -244,6 +271,51 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog>
       ],
     ),
   );
+  Widget _saveResult(BuildContext context) {
+    final success = _saveNotice!.startsWith('Saved ');
+    final cancelled = _saveNotice == 'Save cancelled';
+    final colors = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          border: Border.all(
+            color: success || cancelled ? colors.outline : colors.error,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              success
+                  ? Icons.check_circle_outline
+                  : cancelled
+                  ? Icons.info_outline
+                  : Icons.error_outline,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    success
+                        ? 'Success'
+                        : cancelled
+                        ? 'Cancelled'
+                        : 'Error',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Text(_saveNotice!),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _fallback({bool nested = false}) => SelectableText(
     '${widget.item.rowLabel}\nPreview unavailable',
     autofocus: !nested,

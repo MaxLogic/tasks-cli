@@ -33,6 +33,11 @@ const Duration viewerStaleRefreshAfter = Duration(seconds: 30);
 
 /// One-time handshake a reader may need before its first data read.
 typedef ViewerProbe = Future<ViewerInfo> Function({bool force});
+typedef AttachmentPasteAttempt = ({
+  bool started,
+  String? reason,
+  bool announced,
+});
 
 /// The read surface one workspace uses, as one injectable bundle.
 ///
@@ -127,6 +132,11 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   /// The pane that can show the editor's dialogs; the Details pane sets this
   /// while it is mounted, so a headless model simply cannot ask.
   ViewerEditorHost? editorHost;
+
+  /// Read-mode attachment paste. An unavailable attempt lets Tasks try text
+  /// search and report [AttachmentPasteAttempt.reason] when no text is present,
+  /// unless [AttachmentPasteAttempt.announced] already supplied that feedback.
+  Future<AttachmentPasteAttempt> Function()? pasteAttachment;
 
   final Map<String, TaskListState> _taskStates = <String, TaskListState>{};
 

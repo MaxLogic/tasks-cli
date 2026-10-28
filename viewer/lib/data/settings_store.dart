@@ -214,6 +214,10 @@ String encodeSettingsDocument(ViewerSettingsDraft draft) {
     'project_state': draft.projectState.wireValue,
     'project_sort': draft.projectSort.wireValue,
     'project_direction': draft.projectDirection.wireValue,
+    'confirmations': {
+      for (final choice in ViewerConfirmation.values)
+        choice.wireName: draft.confirmationEnabled(choice),
+    },
   });
 }
 
@@ -305,8 +309,26 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
   if (animationValue != null && animationValue is! String) {
     throw const FormatException('field "animations" must be a string');
   }
+  final confirmations = document['confirmations'];
+  if (confirmations != null && confirmations is! Map<String, dynamic>) {
+    throw const FormatException('field "confirmations" must be an object');
+  }
+  final skippedConfirmations = <ViewerConfirmation>{};
+  for (final choice in ViewerConfirmation.values) {
+    if (confirmations is Map<String, dynamic> &&
+        confirmations.containsKey(choice.wireName)) {
+      final enabled = confirmations[choice.wireName];
+      if (enabled is! bool) {
+        throw FormatException(
+          'confirmation "${choice.wireName}" must be a boolean',
+        );
+      }
+      if (!enabled) skippedConfirmations.add(choice);
+    }
+  }
   const defaults = ViewerSettingsDraft();
   return ViewerSettingsDraft(
+    skippedConfirmations: Set.unmodifiable(skippedConfirmations),
     cliPath: optionalPath('cli_path'),
     dataRoot: optionalPath('data_root'),
     themeMode: named('theme_mode', ViewerThemeMode.values, defaults.themeMode),

@@ -5,6 +5,7 @@ import '../controllers/attachment_controller.dart';
 import '../controllers/editor_controller.dart';
 import '../data/models.dart';
 import '../data/editor_models.dart';
+import '../data/settings_draft.dart';
 import 'editor_dialogs.dart';
 import 'dialog_scope.dart';
 import 'viewer_icons.dart';
@@ -15,7 +16,42 @@ import 'app_shell.dart';
 import 'attachment_preview_dialog.dart';
 import 'viewer_format.dart';
 
-class AttachmentConfirmationDialog extends StatelessWidget {
+String attachmentClipboardDescription(AttachmentClipboard clip) => [
+  ...clip.items.map(
+    (i) =>
+        '${i['name']}, ${i['kind']}, ${attachmentSizeLabel(i['original_size']! as int)}',
+  ),
+  ...clip.skipped.map((i) => 'Skipped ${i['path']}: ${i['reason']}'),
+].join('\n');
+
+Future<bool> confirmAttachmentPaste(
+  ViewerShellApi api,
+  TaskDetail task,
+  AttachmentClipboard clip, {
+  VoidCallback? onSkip,
+}) async {
+  if (!api.settings.confirmationEnabled(ViewerConfirmation.attachmentPaste)) {
+    return true;
+  }
+  return await api.showModal<bool>(
+        CommandScope.attachmentAttach,
+        (_) => AttachmentConfirmationDialog(
+          title: 'Attach to ${task.canonicalId}?',
+          accept: 'Attach (Alt+A)',
+          content: attachmentClipboardDescription(clip),
+          onSkip: () {
+            api.setConfirmationEnabled(
+              ViewerConfirmation.attachmentPaste,
+              false,
+            );
+            onSkip?.call();
+          },
+        ),
+      ) ??
+      false;
+}
+
+class AttachmentConfirmationDialog extends StatefulWidget {
   const AttachmentConfirmationDialog({
     super.key,
     required this.title,
@@ -23,10 +59,32 @@ class AttachmentConfirmationDialog extends StatelessWidget {
     required this.accept,
     this.cancelDefault = false,
     this.acceptIcon = ViewerIcons.attach,
+    this.onSkip,
   });
   final String title, content, accept;
   final bool cancelDefault;
   final IconData acceptIcon;
+  final VoidCallback? onSkip;
+  @override
+  State<AttachmentConfirmationDialog> createState() =>
+      _AttachmentConfirmationDialogState();
+}
+
+class _AttachmentConfirmationDialogState
+    extends State<AttachmentConfirmationDialog> {
+  bool _skip = false;
+  final _skipFocus = FocusNode(debugLabel: 'Skip attachment confirmation');
+  @override
+  void dispose() {
+    _skipFocus.dispose();
+    super.dispose();
+  }
+
+  void _accept() {
+    if (_skip) widget.onSkip?.call();
+    Navigator.pop(context, true);
+  }
+
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
@@ -35,23 +93,49 @@ class AttachmentConfirmationDialog extends StatelessWidget {
       const SingleActivator(LogicalKeyboardKey.keyC, alt: true): () =>
           Navigator.pop(context, false),
       SingleActivator(
-        cancelDefault ? LogicalKeyboardKey.keyD : LogicalKeyboardKey.keyA,
+        widget.cancelDefault
+            ? LogicalKeyboardKey.keyD
+            : LogicalKeyboardKey.keyA,
         alt: true,
       ): () =>
-          Navigator.pop(context, true),
+          _accept(),
+      if (widget.onSkip != null)
+        const SingleActivator(LogicalKeyboardKey.keyG, alt: true): () {
+          setState(() => _skip = !_skip);
+          _skipFocus.requestFocus();
+        },
     },
     child: AttachmentDialogFrame(
-      title: title,
-      content: SingleChildScrollView(child: SelectableText(content)),
+      title: widget.title,
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SelectableText(widget.content),
+            if (widget.onSkip != null)
+              CheckboxListTile(
+                focusNode: _skipFocus,
+                title: const Text("Don't show this again (Alt+G)"),
+                subtitle: const Text(
+                  'Re-enable this confirmation in Settings > Confirmations.',
+                ),
+                value: _skip,
+                onChanged: (value) => setState(() => _skip = value ?? false),
+                controlAffinity: ListTileControlAffinity.leading,
+              ),
+          ],
+        ),
+      ),
       actions: [
         TextButton.icon(
-          autofocus: !cancelDefault,
-          onPressed: () => Navigator.pop(context, true),
-          icon: Icon(acceptIcon),
-          label: Text(accept),
+          autofocus: !widget.cancelDefault,
+          onPressed: _accept,
+          icon: Icon(widget.acceptIcon),
+          label: Text(widget.accept),
         ),
         TextButton.icon(
-          autofocus: cancelDefault,
+          autofocus: widget.cancelDefault,
           onPressed: () => Navigator.pop(context, false),
           icon: const Icon(ViewerIcons.close),
           label: const Text('Cancel (Alt+C)'),
@@ -71,12 +155,45 @@ class AttachmentPanel extends StatefulWidget {
 
 class AttachmentPanelState extends State<AttachmentPanel> {
   final list = VirtualListController();
-  int? selected = 0;
   AttachmentController get c => widget.controller;
-  AttachmentSummary? get item =>
-      selected != null && selected! < c.task.attachments.length
-      ? c.task.attachments[selected!]
-      : null;
+  AttachmentSummary? get item {
+    final selected = list.selectedIndex;
+    return selected != null &&
+            selected >= 0 &&
+            selected < c.task.attachments.length
+        ? c.task.attachments[selected]
+        : null;
+  }
+
+  bool _selectionRebuildPending = false;
+  // The list clamps its own selection during child layout. Re-read it after
+  // controller/parent updates so action enabled states use that same index.
+  void _afterListUpdate() {
+    if (_selectionRebuildPending) return;
+    _selectionRebuildPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _selectionRebuildPending = false;
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    c.addListener(_afterListUpdate);
+    _afterListUpdate();
+  }
+
+  @override
+  void didUpdateWidget(covariant AttachmentPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != c) {
+      oldWidget.controller.removeListener(_afterListUpdate);
+      c.addListener(_afterListUpdate);
+    }
+    _afterListUpdate();
+  }
+
   void focusList() => list.focusRegion();
   Future<T?> _showModal<T>(Widget dialog, CommandScope scope) async {
     ModalRoute<T>? route;
@@ -112,51 +229,75 @@ class AttachmentPanelState extends State<AttachmentPanel> {
   Future<bool> _confirm(Widget dialog, CommandScope scope) async =>
       await _showModal<bool>(dialog, scope) ?? false;
   Future<void> paste() => c.paste(
-    (clip) => _confirm(
-      AttachmentConfirmationDialog(
-        title: 'Attach to ${c.task.canonicalId}?',
-        accept: 'Attach (Alt+A)',
-        content: [
-          ...clip.items.map(
-            (i) =>
-                '${i['name']}, ${i['kind']}, ${attachmentSizeLabel(i['original_size']! as int)}',
+    (clip) => widget.api != null
+        ? confirmAttachmentPaste(
+            widget.api!,
+            c.task,
+            clip,
+            onSkip: c.confirmationWasSkipped,
+          )
+        : _confirm(
+            AttachmentConfirmationDialog(
+              title: 'Attach to ${c.task.canonicalId}?',
+              accept: 'Attach (Alt+A)',
+              content: attachmentClipboardDescription(clip),
+            ),
+            CommandScope.attachmentAttach,
           ),
-          ...clip.skipped.map((i) => 'Skipped ${i['path']}: ${i['reason']}'),
-        ].join('\n'),
-      ),
-      CommandScope.attachmentAttach,
-    ),
   );
   Future<void> detach() async {
+    final returnToList = list.hasListFocus;
+    final previousFocus = FocusManager.instance.primaryFocus;
     final current = item;
-    if (current == null) return;
+    if (current == null) {
+      c.noSelection();
+      return;
+    }
     await c.detach(
       current,
-      () => _confirm(
-        AttachmentConfirmationDialog(
-          title: 'Detach ${current.name} from ${c.task.canonicalId}?',
-          content: "The file stays in the backlog's history.",
-          accept: 'Detach (Alt+D)',
-          acceptIcon: ViewerIcons.detach,
-          cancelDefault: true,
-        ),
-        CommandScope.attachmentDetach,
-      ),
+      () =>
+          widget.api?.settings.confirmationEnabled(
+                ViewerConfirmation.attachmentDetach,
+              ) ==
+              false
+          ? Future.value(true)
+          : _confirm(
+              AttachmentConfirmationDialog(
+                title: 'Detach ${current.name} from ${c.task.canonicalId}?',
+                content: "The file stays in the backlog's history.",
+                accept: 'Detach (Alt+D)',
+                acceptIcon: ViewerIcons.detach,
+                cancelDefault: true,
+                onSkip: widget.api == null
+                    ? null
+                    : () {
+                        widget.api!.setConfirmationEnabled(
+                          ViewerConfirmation.attachmentDetach,
+                          false,
+                        );
+                        c.confirmationWasSkipped();
+                      },
+              ),
+              CommandScope.attachmentDetach,
+            ),
     );
     if (!mounted) return;
-    final count = c.task.attachments.length;
-    selected = count == 0 ? null : (selected ?? 0).clamp(0, count - 1);
-    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (selected != null) list.selectIndex(selected);
-      list.focusRegion();
+      if (returnToList) {
+        list.focusRegion();
+      } else if (previousFocus?.canRequestFocus == true) {
+        previousFocus!.requestFocus();
+      }
     });
   }
 
   Future<void> view() async {
     final current = item;
-    if (current == null) return;
+    if (current == null) {
+      c.noSelection();
+      return;
+    }
     final path = await c.materialize(current);
     if (path == null || !mounted) return;
     await _showModal<void>(
@@ -165,6 +306,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
         path: path,
         announce: c.announce,
         onSaveAs: () => c.saveAs(current),
+        saveNotice: () => c.notice,
       ),
       CommandScope.attachmentPreview,
     );
@@ -175,6 +317,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
 
   @override
   void dispose() {
+    c.removeListener(_afterListUpdate);
     list.dispose();
     super.dispose();
   }
@@ -194,7 +337,11 @@ class AttachmentPanelState extends State<AttachmentPanel> {
         const SingleActivator(LogicalKeyboardKey.keyW, alt: true): () =>
             unawaited(view()),
         const SingleActivator(LogicalKeyboardKey.keyS, alt: true): () {
-          if (item != null) unawaited(c.saveAs(item!));
+          if (item case final current?) {
+            unawaited(c.saveAs(current));
+          } else {
+            c.noSelection();
+          }
         },
         const SingleActivator(LogicalKeyboardKey.keyX, alt: true): () =>
             unawaited(detach()),
@@ -207,31 +354,43 @@ class AttachmentPanelState extends State<AttachmentPanel> {
             runSpacing: 4,
             children: [
               TextButton.icon(
-                onPressed: c.enabled ? c.addFiles : null,
+                onPressed: c.addFiles,
                 icon: const Icon(ViewerIcons.attach),
                 label: const Text('Add files (Alt+F)'),
               ),
               TextButton.icon(
-                onPressed: c.enabled ? paste : null,
+                onPressed: paste,
                 icon: const Icon(ViewerIcons.paste),
                 label: const Text('Paste (Alt+U)'),
               ),
               TextButton.icon(
-                onPressed: c.enabled && item != null ? view : null,
+                onPressed: view,
                 icon: const Icon(ViewerIcons.view),
                 label: const Text('View (Alt+W)'),
               ),
               TextButton.icon(
-                onPressed: c.enabled && item != null
-                    ? () => c.saveAs(item!)
-                    : null,
+                onPressed: () {
+                  if (item case final current?) {
+                    unawaited(c.saveAs(current));
+                  } else {
+                    c.noSelection();
+                  }
+                },
                 icon: const Icon(ViewerIcons.saveAs),
                 label: const Text('Save as (Alt+S)'),
               ),
-              TextButton.icon(
-                onPressed: c.enabled && item != null ? detach : null,
-                icon: const Icon(ViewerIcons.detach),
-                label: const Text('Detach (Alt+X)'),
+              Tooltip(
+                message:
+                    'Detach selected attachment (Delete on the attachment list)',
+                child: Semantics(
+                  hint:
+                      'Delete also detaches the selected attachment from the list',
+                  child: TextButton.icon(
+                    onPressed: detach,
+                    icon: const Icon(ViewerIcons.detach),
+                    label: const Text('Detach (Alt+X)'),
+                  ),
+                ),
               ),
             ],
           ),
@@ -249,27 +408,37 @@ class AttachmentPanelState extends State<AttachmentPanel> {
               label: const Text('Check pending change'),
             ),
           Expanded(
-            child: AccessibleVirtualList(
-              controller: list,
-              itemCount: c.task.attachments.length,
-              motionKey: ListMotionKey(
-                scope: c.task.canonicalId,
-                epoch: c.task.attachments,
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(
+                  LogicalKeyboardKey.delete,
+                  includeRepeats: false,
+                ): () =>
+                    unawaited(detach()),
+              },
+              child: AccessibleVirtualList(
+                controller: list,
+                itemCount: c.task.attachments.length,
+                motionKey: ListMotionKey(
+                  scope: c.task.canonicalId,
+                  epoch: c.task.attachments,
+                ),
+                itemExtent: 64,
+                listLabel:
+                    'Attachments (Alt+A). Delete detaches the selected attachment',
+                emptyLabel:
+                    'No attachments. Add files (Alt+F) or paste an image or files (Ctrl+V).',
+                itemKeyBuilder: (i) => ValueKey(c.task.attachments[i].id),
+                rowSemanticsBuilder: (i) => AccessibleRowSemantics(
+                  label: rowLabel(context, c.task.attachments[i]),
+                ),
+                rowBuilder: (context, i, selected) => Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text(rowLabel(context, c.task.attachments[i])),
+                ),
+                onSelectedIndexChanged: (_) => setState(() {}),
+                onActivate: (_) => unawaited(view()),
               ),
-              itemExtent: 64,
-              listLabel: 'Attachments (Alt+A)',
-              emptyLabel:
-                  'No attachments. Add files (Alt+F) or paste an image or files (Ctrl+V).',
-              itemKeyBuilder: (i) => ValueKey(c.task.attachments[i].id),
-              rowSemanticsBuilder: (i) => AccessibleRowSemantics(
-                label: rowLabel(context, c.task.attachments[i]),
-              ),
-              rowBuilder: (context, i, selected) => Padding(
-                padding: const EdgeInsets.all(8),
-                child: Text(rowLabel(context, c.task.attachments[i])),
-              ),
-              onSelectedIndexChanged: (i) => setState(() => selected = i),
-              onActivate: (_) => unawaited(view()),
             ),
           ),
         ],

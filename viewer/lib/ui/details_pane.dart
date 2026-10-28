@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import '../controllers/detail_controller.dart';
 import '../controllers/attachment_controller.dart';
 import '../data/cli_client.dart';
+import '../platform/file_dialogs.dart';
 import 'attachment_dialogs.dart';
 import '../controllers/editor_controller.dart';
 import '../data/editor_models.dart';
@@ -81,7 +82,13 @@ class _TabUnderlineState extends State<_TabUnderline> {
 
 /// Task details region bound to one workspace model.
 class ViewerDetailsPane extends StatefulWidget {
-  const ViewerDetailsPane({super.key, required this.api, required this.model});
+  const ViewerDetailsPane({
+    super.key,
+    required this.api,
+    required this.model,
+    this.attachmentDialogs = const SystemAttachmentFileDialogs(),
+  });
+  final AttachmentFileDialogs attachmentDialogs;
 
   final ViewerShellApi api;
   final ViewerWorkspaceModel model;
@@ -156,6 +163,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       _attachments?.dispose();
       final boundDetail = widget.model.detail!;
       _attachments = AttachmentController(
+        dialogs: widget.attachmentDialogs,
         client: _attachmentClient!,
         isCurrent: () => _attachmentContextMatches(project, detail.id),
         projectId: project,
@@ -177,12 +185,12 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
 
   bool _attachmentContextMatches(String project, int taskId) =>
       mounted &&
-      _attachmentsActive &&
-      _attachmentPanelKey.currentState?.mounted == true &&
       widget.model.detail?.projectId == project &&
       widget.model.detail?.taskId == taskId &&
       widget.model.detail?.detailMatchesSelection == true;
   bool get _canDispatchAttachment =>
+      _attachmentsActive &&
+      _attachmentPanelKey.currentState?.mounted == true &&
       _attachments != null &&
       _attachmentContextMatches(_attachments!.projectId, _attachments!.task.id);
 
@@ -201,6 +209,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     widget.api.registerScopeCommands(CommandScope.statusBar, _onStatusCommand);
     widget.model.addListener(_syncExternalContent);
     widget.model.editorHost = this;
+    widget.model.pasteAttachment = _pasteAttachment;
     _syncExternalContent();
   }
 
@@ -208,6 +217,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   void dispose() {
     if (identical(widget.model.editorHost, this)) {
       widget.model.editorHost = null;
+      widget.model.pasteAttachment = null;
     }
     widget.api.registerScopeCommands(CommandScope.details, null);
     widget.api.registerScopeCommands(CommandScope.statusBar, null);
@@ -249,6 +259,14 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   }
 
   KeyEventResult _onScopeCommand(String id) {
+    if (id == 'details.pasteClipboard') {
+      if (_editor.isEditing) return KeyEventResult.ignored;
+      final editable = FocusManager.instance.primaryFocus?.context
+          ?.findAncestorWidgetOfExactType<EditableText>();
+      if (editable != null && !editable.readOnly) return KeyEventResult.ignored;
+      unawaited(_pasteFromDetails());
+      return KeyEventResult.handled;
+    }
     if (_editor.isEditing &&
         (id == 'details.tabAttachments' ||
             id.startsWith('details.attachment'))) {
@@ -372,6 +390,66 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       default:
         return KeyEventResult.ignored;
     }
+  }
+
+  Future<void> _pasteFromDetails() async {
+    final result = await _pasteAttachment();
+    if (!result.started && !result.announced && result.reason != null) {
+      widget.api.announce(result.reason!, dynamic: true);
+    }
+  }
+
+  Future<AttachmentPasteAttempt> _pasteAttachment() async {
+    final detail = widget.model.detail?.detail;
+    if (!_hasAttachments || widget.model.detail?.taskId == null) {
+      return (started: false, reason: null, announced: false);
+    }
+    if (detail == null || widget.model.detail?.detailMatchesSelection != true) {
+      return (
+        started: false,
+        reason: 'The selected task changed. Select the task again.',
+        announced: false,
+      );
+    }
+    if (_editor.isEditing) {
+      return (
+        started: false,
+        reason: 'Save or cancel your edits first',
+        announced: false,
+      );
+    }
+    if (widget.api.hasOpenModal) {
+      return (
+        started: false,
+        reason: 'Close the open dialog before attaching files',
+        announced: false,
+      );
+    }
+    final controller = _attachmentController(detail);
+    if (!controller.enabled) {
+      return (
+        started: false,
+        reason: controller.disabledReason,
+        announced: false,
+      );
+    }
+    final started = await controller.paste(
+      (clip) => confirmAttachmentPaste(
+        widget.api,
+        detail,
+        clip,
+        onSkip: controller.confirmationWasSkipped,
+      ),
+      ignoreEmpty: true,
+    );
+    return (
+      started: started,
+      reason:
+          started || controller.notice == 'The clipboard has no image or files'
+          ? null
+          : controller.notice,
+      announced: controller.noticeAnnounced,
+    );
   }
 
   // ------------------------------------------------------- external content
@@ -1788,7 +1866,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
               child: AccessibleVirtualList(
                 controller: _handles.list,
                 itemCount: events.length,
-                itemExtent: viewerRowExtent(context),
+                itemExtent: viewerRowExtent(context, textLines: 3),
                 listLabel: 'History of ${state.canonicalTaskId ?? 'the task'}',
                 emptyLabel: state.isHistoryLoading || !state.historyLoaded
                     ? 'Loading history'

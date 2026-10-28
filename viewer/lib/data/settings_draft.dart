@@ -18,6 +18,16 @@ enum ViewerThemeMode {
 
 enum ViewerAnimations { followWindows, off }
 
+/// Only binary, non-destructive choices can be skipped. Draft/conflict and
+/// overwrite decisions stay mandatory.
+enum ViewerConfirmation {
+  attachmentPaste('attachment_paste', 'Confirm clipboard attachment paste'),
+  attachmentDetach('attachment_detach', 'Confirm attachment detach');
+
+  const ViewerConfirmation(this.wireName, this.label);
+  final String wireName, label;
+}
+
 /// Text-size choices offered by Settings (design.md section 3).
 const List<int> viewerTextScalePercentChoices = <int>[100, 125, 150, 175, 200];
 
@@ -38,6 +48,7 @@ class ViewerSettingsDraft {
     this.projectState = ProjectStateFilter.hasOpen,
     this.projectSort = ProjectSort.lastWrite,
     this.projectDirection = SortDirection.descending,
+    this.skippedConfirmations = const {},
   });
 
   /// Absolute path of the tasks executable, or null when unresolved.
@@ -61,6 +72,9 @@ class ViewerSettingsDraft {
   final ProjectStateFilter projectState;
   final ProjectSort projectSort;
   final SortDirection projectDirection;
+  final Set<ViewerConfirmation> skippedConfirmations;
+  bool confirmationEnabled(ViewerConfirmation confirmation) =>
+      !skippedConfirmations.contains(confirmation);
 
   ViewerSettingsDraft copyWith({
     String? cliPath,
@@ -79,6 +93,7 @@ class ViewerSettingsDraft {
     ProjectStateFilter? projectState,
     ProjectSort? projectSort,
     SortDirection? projectDirection,
+    Set<ViewerConfirmation>? skippedConfirmations,
   }) {
     return ViewerSettingsDraft(
       cliPath: clearCliPath ? null : (cliPath ?? this.cliPath),
@@ -95,6 +110,9 @@ class ViewerSettingsDraft {
       projectState: projectState ?? this.projectState,
       projectSort: projectSort ?? this.projectSort,
       projectDirection: projectDirection ?? this.projectDirection,
+      skippedConfirmations: Set.unmodifiable(
+        skippedConfirmations ?? this.skippedConfirmations,
+      ),
     );
   }
 

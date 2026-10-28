@@ -316,6 +316,7 @@ void main() {
       final panel = tester.state<AttachmentPanelState>(
         find.byType(AttachmentPanel),
       );
+      await tester.pumpAndSettle();
       for (final label in [
         'View (Alt+W)',
         'Save as (Alt+S)',
@@ -329,8 +330,9 @@ void main() {
         );
       }
       panel.list.goToIndex(1);
+      panel.focusList();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Detach (Alt+X)'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
       await tester.pumpAndSettle();
       rig.mutation('attachment_detach');
       rig.controller.task.attachments.removeLast();
@@ -338,7 +340,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(panel.list.hasFocus, isTrue);
       expect(panel.list.focusedRowIndex, 0);
-      await tester.tap(find.text('Detach (Alt+X)'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cancel (Alt+C)'));
       await tester.pumpAndSettle();
@@ -932,7 +934,9 @@ void main() {
     );
     expect(notices.last, contains('last 1 MiB; preview truncated'));
   });
-  testWidgets('attachment panel rows and edit-mode disabling', (tester) async {
+  testWidgets('attachment panel rows and edit-mode action guard', (
+    tester,
+  ) async {
     await rig.probe();
     final semantics = tester.ensureSemantics();
     rig.controller.editing = true;
@@ -951,7 +955,12 @@ void main() {
     final add = tester.widget<TextButton>(
       find.widgetWithText(TextButton, 'Add files (Alt+F)'),
     );
-    expect(add.onPressed, isNull);
+    expect(add.onPressed, isNotNull);
+    final calls = rig.launcher.launches.length;
+    await tester.tap(find.text('Add files (Alt+F)'));
+    await tester.pumpAndSettle();
+    expect(rig.launcher.launches.length, calls);
+    expect(rig.announcements.last, 'Save or cancel your edits first');
     semantics.dispose();
   });
   testWidgets('attachments-only conflict explains and offers explicit review', (

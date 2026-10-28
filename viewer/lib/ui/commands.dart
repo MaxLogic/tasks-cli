@@ -878,6 +878,15 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
         'Show retained attachments when the CLI and server support them.',
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.digit5)],
   ),
+  CommandSpec(
+    id: 'details.pasteClipboard',
+    scope: CommandScope.details,
+    group: HelpGroup.details,
+    label: 'Paste attachments',
+    description:
+        'Attach clipboard images or files from any task details tab. Editable fields and dialogs keep native paste.',
+    activators: <ShortcutActivator>[_pasteKey],
+  ),
   for (final entry in <String, (String, LogicalKeyboardKey)>{
     'attachmentList': ('Attachment list', LogicalKeyboardKey.keyA),
     'attachmentAdd': ('Add files', LogicalKeyboardKey.keyF),
@@ -899,9 +908,10 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     scope: CommandScope.details,
     group: HelpGroup.details,
     label: 'Attachment preview and paste',
-    shortcutText: 'Ctrl+V; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
+    shortcutText:
+        'Ctrl+V; Delete; Enter; Ctrl+Plus/Minus; Ctrl+0/1; arrows; Alt+H/T',
     description:
-        'Paste on the attachment panel, Enter to view. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
+        'Ctrl+V attaches images or files from the task list or any task details tab. Editable fields and dialogs keep native paste. Delete on the attachment list detaches the selected file with confirmation; Enter views it. In image preview zoom, fit/actual size and pan. In text preview read Head or Tail. Escape or Alt+C closes a preview.',
   ),
   // ---------------------------------------------------------------- editor
   CommandSpec(
@@ -1044,6 +1054,28 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     description: 'Focus the animation preference selector.',
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyN)],
   ),
+  CommandSpec(
+    id: 'settings.confirmations',
+    scope: CommandScope.settings,
+    group: HelpGroup.dialogs,
+    label: 'Confirmations',
+    description:
+        'Focus the confirmation checkboxes. Tab moves between choices; Space toggles whether each confirmation is shown.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyF)],
+  ),
+  for (final scope in [
+    CommandScope.attachmentAttach,
+    CommandScope.attachmentDetach,
+  ])
+    CommandSpec(
+      id: '${scope.name}.skipConfirmation',
+      scope: scope,
+      group: HelpGroup.dialogs,
+      label: "Don't show this again",
+      description:
+          'Toggle whether this confirmation is skipped next time. The choice is saved only when accepting the action.',
+      activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyG)],
+    ),
   CommandSpec(
     id: 'settings.textSize',
     scope: CommandScope.settings,

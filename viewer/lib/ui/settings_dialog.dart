@@ -78,6 +78,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
     debugLabel: 'settings animations',
   );
   late ViewerAnimations _animations = widget.initial.animations;
+  late final Set<ViewerConfirmation> _skippedConfirmations = {
+    ...widget.initial.skippedConfirmations,
+  };
+  final _confirmationNodes = {
+    for (final choice in ViewerConfirmation.values)
+      choice: FocusNode(debugLabel: 'settings ${choice.wireName}'),
+  };
   final FocusNode _themeNode = FocusNode(debugLabel: 'settings theme');
   final FocusNode _textSizeNode = FocusNode(debugLabel: 'settings text size');
   final FocusNode _projectsWidthNode = FocusNode(
@@ -120,6 +127,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _startupNode.dispose();
     _modeNode.dispose();
     _volumeNode.dispose();
+    for (final node in _confirmationNodes.values) {
+      node.dispose();
+    }
     super.dispose();
   }
 
@@ -199,6 +209,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       startWithWindows: _startWithWindows,
       announcementMode: _mode,
       bellaVolumePercent: _volume,
+      skippedConfirmations: _skippedConfirmations,
     );
     widget.announcements.setMode(_mode);
     widget.announcements.setVolume(draft.bellaVolume);
@@ -361,6 +372,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
         _themeNode.requestFocus();
       case 'settings.animations':
         _animationsNode.requestFocus();
+      case 'settings.confirmations':
+        _confirmationNodes.values.first.requestFocus();
       case 'settings.textSize':
         _textSizeNode.requestFocus();
       case 'settings.projectsWidth':
@@ -698,6 +711,33 @@ class _SettingsDialogState extends State<SettingsDialog> {
                             padding: const EdgeInsets.only(left: 16, top: 4),
                             child: _buildStartupStatus(context),
                           ),
+                          const SizedBox(height: 8),
+                          const Divider(),
+                          Semantics(
+                            header: true,
+                            child: Text(
+                              'Confirmations (Alt+F)',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          const Text(
+                            'Checked confirmations are shown. Uncheck to skip them. '
+                            'Unsaved drafts, conflict choices and file overwrite confirmations always require a decision.',
+                          ),
+                          for (final choice in ViewerConfirmation.values)
+                            CheckboxListTile(
+                              focusNode: _confirmationNodes[choice],
+                              title: Text(choice.label),
+                              value: !_skippedConfirmations.contains(choice),
+                              controlAffinity: ListTileControlAffinity.leading,
+                              onChanged: (enabled) => setState(() {
+                                if (enabled == true) {
+                                  _skippedConfirmations.remove(choice);
+                                } else {
+                                  _skippedConfirmations.add(choice);
+                                }
+                              }),
+                            ),
                           const SizedBox(height: 8),
                           Semantics(
                             header: true,

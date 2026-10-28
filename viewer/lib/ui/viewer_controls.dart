@@ -228,18 +228,23 @@ class ViewerStatusLine extends StatelessWidget {
 /// are.
 Future<String?> readClipboardSearchText(
   ViewerShellApi api,
-  ViewerWorkspaceModel model,
-) async {
+  ViewerWorkspaceModel model, {
+  String? noTextReason,
+  bool alreadyAnnounced = false,
+}) async {
   final String? raw;
   try {
     raw = await model.clipboard.clipboard.readText();
   } on ViewerFailure catch (failure) {
-    api.announce(failure.message, dynamic: true);
+    if (!alreadyAnnounced) api.announce(failure.message, dynamic: true);
     return null;
   }
   final text = viewerClipboardSearchText(raw);
-  if (text == null) {
-    api.announce('The clipboard has no text to search for.', dynamic: true);
+  if (text == null && !alreadyAnnounced) {
+    api.announce(
+      noTextReason ?? 'The clipboard has no text to search for.',
+      dynamic: true,
+    );
   }
   return text;
 }

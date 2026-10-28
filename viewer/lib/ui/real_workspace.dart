@@ -17,6 +17,7 @@ import '../data/settings_draft.dart';
 import '../data/models.dart';
 import '../data/settings_store.dart';
 import '../platform/clipboard_text.dart';
+import '../platform/file_dialogs.dart';
 import '../platform/viewer_startup.dart';
 import 'app_shell.dart';
 import 'details_pane.dart';
@@ -32,10 +33,12 @@ class ViewerWorkspaceScope extends InheritedWidget {
   const ViewerWorkspaceScope({
     super.key,
     required this.model,
+    this.attachmentDialogs = const SystemAttachmentFileDialogs(),
     required super.child,
   });
 
   final ViewerWorkspaceModel model;
+  final AttachmentFileDialogs attachmentDialogs;
 
   static ViewerWorkspaceModel of(BuildContext context) {
     final scope = context.getInheritedWidgetOfExactType<ViewerWorkspaceScope>();
@@ -57,7 +60,13 @@ ViewerWorkspace buildViewerWorkspace(BuildContext context, ViewerShellApi api) {
   return ViewerWorkspace(
     projectsPane: ViewerProjectsPane(api: api, model: model),
     tasksPane: ViewerTasksPane(api: api, model: model),
-    detailsPane: ViewerDetailsPane(api: api, model: model),
+    detailsPane: ViewerDetailsPane(
+      api: api,
+      model: model,
+      attachmentDialogs: context
+          .getInheritedWidgetOfExactType<ViewerWorkspaceScope>()!
+          .attachmentDialogs,
+    ),
   );
 }
 
@@ -72,6 +81,7 @@ class ViewerWorkspaceProvider extends StatefulWidget {
     required this.readers,
     required this.announcements,
     this.viewerClipboard,
+    this.attachmentDialogs = const SystemAttachmentFileDialogs(),
     required this.child,
     this.drafts,
     this.closeGuard,
@@ -87,6 +97,7 @@ class ViewerWorkspaceProvider extends StatefulWidget {
 
   /// Clipboard the preview reads; null uses the real platform clipboard.
   final ViewerClipboard? viewerClipboard;
+  final AttachmentFileDialogs attachmentDialogs;
 
   /// Recovery-draft persistence; null keeps drafts in memory.
   final RecoveryDraftSink? drafts;
@@ -189,7 +200,11 @@ class _ViewerWorkspaceProviderState extends State<ViewerWorkspaceProvider>
 
   @override
   Widget build(BuildContext context) {
-    return ViewerWorkspaceScope(model: _model, child: widget.child);
+    return ViewerWorkspaceScope(
+      model: _model,
+      attachmentDialogs: widget.attachmentDialogs,
+      child: widget.child,
+    );
   }
 }
 
@@ -225,6 +240,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
     this.onSettingsChanged,
     this.onProjectPreferencesChanged,
     this.viewerClipboard,
+    this.attachmentDialogs = const SystemAttachmentFileDialogs(),
     this.drafts,
     this.closeGuard,
     this.startup,
@@ -240,6 +256,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
 
   /// Clipboard the preview reads; null uses the real platform clipboard.
   final ViewerClipboard? viewerClipboard;
+  final AttachmentFileDialogs attachmentDialogs;
 
   final RecoveryDraftSink? drafts;
   final ViewerCloseGuard? closeGuard;
@@ -255,6 +272,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
       readers: readers,
       announcements: announcements,
       viewerClipboard: viewerClipboard,
+      attachmentDialogs: attachmentDialogs,
       drafts: drafts,
       closeGuard: closeGuard,
       initialSettings: initialSettings ?? const ViewerSettingsDraft(),

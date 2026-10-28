@@ -154,6 +154,8 @@ class ViewerShellActions {
 /// Services the workspace is allowed to use.
 abstract class ViewerShellApi {
   ViewerEnvironment get environment;
+  ViewerSettingsDraft get settings;
+  void setConfirmationEnabled(ViewerConfirmation confirmation, bool enabled);
 
   ViewerRegionHandles handlesFor(ViewerRegion region);
 
@@ -381,7 +383,22 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       <CommandScope, CommandDispatch>{};
 
   /// Preferences currently in effect; widget tests read this.
+  @override
   ViewerSettingsDraft get settings => _settings;
+
+  @override
+  void setConfirmationEnabled(ViewerConfirmation confirmation, bool enabled) {
+    final skipped = {..._settings.skippedConfirmations};
+    if (enabled) {
+      skipped.remove(confirmation);
+    } else {
+      skipped.add(confirmation);
+    }
+    setState(
+      () => _settings = _settings.copyWith(skippedConfirmations: skipped),
+    );
+    widget.actions.onSettingsChanged?.call(_settings);
+  }
 
   @override
   void initState() {
@@ -779,6 +796,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
         return true;
       case 'projects.pasteFilter':
       case 'tasks.pasteFilter':
+      case 'details.pasteClipboard':
         // The pane takes Ctrl+V only while its list has focus; everywhere
         // else the key keeps the focused text field's native paste.
         return false;
