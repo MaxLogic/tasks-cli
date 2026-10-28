@@ -32,7 +32,7 @@ class IdentityTest(unittest.TestCase):
         self.root.mkdir()
         self.store = self.base / "store"
         self.run_cmd(["git", "init", str(self.root)])
-        result = self.run_cmd([str(EXE), "--data-root", str(self.store), "--format", "json", "init", "--root", str(self.root)])
+        result = self.run_cmd([str(EXE), "--data-root", str(self.store), "--format", "json", "init", "--root", str(self.root), "--key", "IDT"])
         self.project = json.loads(result.stdout)["project_id"]
         (self.root / ".tasks.json").write_text(json.dumps({"project_id": self.project}), encoding="utf-8")
         self.run_cmd(["git", "-C", str(self.root), "add", ".tasks.json"])
@@ -110,7 +110,7 @@ class IdentityTest(unittest.TestCase):
         self.run_cmd([str(EXE), "--data-root", str(self.store), "--project", self.project, "rules", "set", "--body-file", str(body), "--expect-version", "1"])
         result = self.invoke(self.root, "create", "--title=--project", "--body-file", str(body))
         task_id = json.loads(result.stdout)["data"]["id"]
-        self.assertEqual(json.loads(self.invoke(self.root, "show", f"T-{task_id}").stdout)["data"]["rules"], "rules Ω 日本語")
+        self.assertEqual(json.loads(self.invoke(self.root, "show", f"IDT-{task_id}", "--rules").stdout)["data"]["rules"], "rules Ω 日本語")
         result = self.invoke(self.root, "search", "--", "--project")
         self.assertEqual(json.loads(result.stdout)["data"]["items"][0]["id"], task_id)
 
