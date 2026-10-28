@@ -9,6 +9,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'accessible_virtual_list.dart';
+import 'viewer_icons.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 
@@ -275,9 +276,10 @@ class _KeyboardHelpDialogState extends State<KeyboardHelpDialog> {
                     const SizedBox(height: 8),
                     Align(
                       alignment: Alignment.centerRight,
-                      child: TextButton(
+                      child: TextButton.icon(
                         onPressed: _close,
-                        child: const Text('Close (Alt+C)'),
+                        icon: const Icon(ViewerIcons.close),
+                        label: const Text('Close (Alt+C)'),
                       ),
                     ),
                   ],

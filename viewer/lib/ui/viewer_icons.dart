@@ -1,0 +1,54 @@
+import 'package:flutter/material.dart';
+
+/// Decorative action glyphs. Labels alone supply accessible button names.
+abstract final class ViewerIcons {
+  static const IconData save = Icons.save_outlined;
+  static const IconData close = Icons.close;
+  static const IconData discard = Icons.delete_outline;
+  static const IconData copy = Icons.content_copy;
+  static const IconData check = Icons.check;
+  static const IconData retry = Icons.replay;
+  static const IconData refresh = Icons.refresh;
+  static const IconData settings = Icons.settings_outlined;
+  static const IconData help = Icons.help_outline;
+  static const IconData clearSearch = Icons.clear;
+  static const IconData clearFilters = Icons.filter_alt_off_outlined;
+  static const IconData sync = Icons.sync;
+  static const IconData enrich = Icons.auto_fix_high_outlined;
+  static const IconData preview = Icons.preview_outlined;
+  static const IconData more = Icons.more_horiz;
+  static const IconData filters = Icons.tune;
+  static const IconData hideFilters = Icons.expand_less;
+  static const IconData label = Icons.label_outline;
+  static const IconData edit = Icons.edit_outlined;
+  static const IconData markDone = Icons.task_alt;
+  static const IconData back = Icons.arrow_back;
+  static const IconData nextMatch = Icons.keyboard_arrow_down;
+  static const IconData previousMatch = Icons.keyboard_arrow_up;
+  static const IconData expand = Icons.expand_more;
+  static const IconData snapshot = Icons.text_snippet_outlined;
+  static const IconData busy = Icons.hourglass_top;
+  static const IconData review = Icons.difference_outlined;
+  static const IconData reload = Icons.restart_alt;
+  static const IconData returnToEditor = Icons.edit_note;
+  static const IconData apply = Icons.done_all;
+  static const IconData restore = Icons.restore;
+  static const IconData attach = Icons.attach_file;
+  static const IconData paste = Icons.content_paste;
+  static const IconData view = Icons.visibility_outlined;
+  static const IconData saveAs = Icons.save_as_outlined;
+  static const IconData detach = Icons.link_off;
+  static const IconData zoomIn = Icons.zoom_in;
+  static const IconData zoomOut = Icons.zoom_out;
+  static const IconData fit = Icons.fit_screen_outlined;
+  static const IconData actualSize = Icons.photo_size_select_actual_outlined;
+  static const IconData head = Icons.vertical_align_top;
+  static const IconData tail = Icons.vertical_align_bottom;
+  static const IconData packagedCli = Icons.inventory_2_outlined;
+  static const IconData taskStore = Icons.storage;
+  static const IconData connection = Icons.network_check;
+  static const IconData resetLayout = Icons.settings_backup_restore;
+  static const IconData voice = Icons.record_voice_over_outlined;
+  static const IconData info = Icons.info_outline;
+  static const IconData sortArrow = Icons.arrow_upward;
+}

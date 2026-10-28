@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'viewer_icons.dart';
 import 'package:flutter/semantics.dart';
 
 import '../controllers/announcement_controller.dart';
@@ -137,12 +138,17 @@ class _StatusBarState extends State<StatusBar> {
                 ),
               ),
             if (widget.onDetails != null)
-              TextButton(
+              TextButton.icon(
                 onPressed: widget.onDetails,
-                child: const Text('Details'),
+                icon: const Icon(ViewerIcons.info),
+                label: const Text('Details'),
               ),
             if (widget.onRetry != null)
-              TextButton(onPressed: widget.onRetry, child: const Text('Retry')),
+              TextButton.icon(
+                onPressed: widget.onRetry,
+                icon: const Icon(ViewerIcons.retry),
+                label: const Text('Retry'),
+              ),
           ],
         ),
       ),

@@ -11,6 +11,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'viewer_motion.dart';
 import 'commands.dart';
 
 /// Runs one command id for a scope.
@@ -45,7 +46,7 @@ class DialogCommandHost extends StatelessWidget {
       shortcuts: shortcutMapForScope(scope),
       child: Actions(
         actions: commandActionsForScope(scope, _handle),
-        child: child,
+        child: ViewerDialogEntrance(child: child),
       ),
     );
   }

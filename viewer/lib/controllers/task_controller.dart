@@ -147,6 +147,9 @@ class TaskController extends ChangeNotifier {
 
   bool get isLoading => _loading;
 
+  int _resultEpoch = 0;
+  int get resultEpoch => _resultEpoch;
+
   bool get hasRows => _totalCount > 0;
 
   /// True while any confirmed rows are on screen (possibly stale).
@@ -539,6 +542,7 @@ class TaskController extends ChangeNotifier {
       }
       _resetRows();
       _applyPage(page, pageIndex: 0);
+      _resultEpoch++;
       _firstLoadError = null;
       _refreshFailure = null;
       _notice = null;

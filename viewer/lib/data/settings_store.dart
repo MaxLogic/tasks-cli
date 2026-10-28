@@ -201,6 +201,9 @@ String encodeSettingsDocument(ViewerSettingsDraft draft) {
     'cli_path': draft.cliPath,
     'data_root': draft.dataRoot,
     'theme_mode': draft.themeMode.name,
+    'animations': draft.animations == ViewerAnimations.off
+        ? 'off'
+        : 'follow_windows',
     'text_scale_percent': draft.textScalePercent,
     'projects_pane_percent': draft.projectsPanePercent,
     'tasks_pane_percent': draft.tasksPanePercent,
@@ -298,11 +301,18 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
     throw FormatException('field "$key" must be a string');
   }
 
+  final animationValue = document['animations'];
+  if (animationValue != null && animationValue is! String) {
+    throw const FormatException('field "animations" must be a string');
+  }
   const defaults = ViewerSettingsDraft();
   return ViewerSettingsDraft(
     cliPath: optionalPath('cli_path'),
     dataRoot: optionalPath('data_root'),
     themeMode: named('theme_mode', ViewerThemeMode.values, defaults.themeMode),
+    animations: animationValue == 'off'
+        ? ViewerAnimations.off
+        : ViewerAnimations.followWindows,
     textScalePercent: percent('text_scale_percent', defaults.textScalePercent),
     projectsPanePercent: percent(
       'projects_pane_percent',

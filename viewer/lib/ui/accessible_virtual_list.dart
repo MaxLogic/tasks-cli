@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'viewer_motion.dart';
 
 /// What a screen reader says for one row: the identifying content once, plus an
 /// optional non-duplicating position label.
@@ -88,6 +89,13 @@ class VirtualListController extends ChangeNotifier {
 typedef VirtualRowBuilder =
     Widget Function(BuildContext context, int index, bool selected);
 
+@immutable
+class ListMotionKey {
+  const ListMotionKey({required this.scope, required this.epoch});
+  final Object scope;
+  final Object epoch;
+}
+
 /// A virtualized, keyboard-navigable, screen-reader-friendly list.
 class AccessibleVirtualList extends StatefulWidget {
   const AccessibleVirtualList({
@@ -108,6 +116,8 @@ class AccessibleVirtualList extends StatefulWidget {
     this.cacheExtent,
     this.onFocusChange,
     this.emptyAction,
+    this.motionKey,
+    this.emptyIsTransient = false,
   });
 
   final VirtualListController controller;
@@ -152,12 +162,124 @@ class AccessibleVirtualList extends StatefulWidget {
   /// It is the next Tab stop after the empty list and keeps its own
   /// accessible name.
   final Widget? emptyAction;
+  final ListMotionKey? motionKey;
+  final bool emptyIsTransient;
 
   @override
   State<AccessibleVirtualList> createState() => _AccessibleVirtualListState();
 }
 
-class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
+class _AccessibleVirtualListState extends State<AccessibleVirtualList>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _motion = AnimationController(
+    vsync: this,
+    value: 1,
+    duration: const Duration(milliseconds: 292),
+  );
+  final Map<Key, _VirtualRowState> _mountedRows = {};
+  Map<Key, double>? _pendingSnapshot;
+  Duration? _snapshotAt;
+  Map<Key, double>? _playSnapshot;
+  int _motionGeneration = 0;
+  bool _motionEnabled = false;
+  double _snapshotViewport = 0;
+  int _snapshotFirstIndex = 0;
+  int _snapshotLastIndex = 0;
+  bool _fadeReorder = false;
+
+  // Compare only the previously mounted window. A dense crossing (notably a
+  // reversal) is more legible as staggered entry at the final row positions.
+  bool _mostlyCrossing(Map<Key, double> snapshot) {
+    final first = _snapshotFirstIndex;
+    final last = math.min(_snapshotLastIndex, widget.itemCount - 1);
+    if (last - first >= 80) return true;
+    final positions = <double>[];
+    for (var i = first; i <= last; i++) {
+      final oldY = snapshot[widget.itemKeyBuilder(i)];
+      if (oldY != null) positions.add(oldY);
+    }
+    final crossing = <int>{};
+    for (var i = 0; i < positions.length; i++) {
+      for (var j = i + 1; j < positions.length; j++) {
+        if (positions[i] > positions[j]) {
+          crossing.addAll([i, j]);
+        }
+      }
+    }
+    return crossing.length > positions.length / 2;
+  }
+
+  void _finishMotion() {
+    if (_motion.value != 1) _motion.value = 1;
+  }
+
+  void _captureMotion() {
+    if (_mountedRows.isEmpty ||
+        _mountedRows.length > 80 ||
+        _pendingIndex != null ||
+        !_scroll.hasClients) {
+      return;
+    }
+    if (_mountedRows.values.any((row) => !row.widget.ready)) return;
+    final offset = _scroll.offset;
+    _pendingSnapshot = {
+      for (final entry in _mountedRows.entries)
+        entry.key: entry.value.widget.index * widget.itemExtent - offset,
+    };
+    _snapshotAt = SchedulerBinding.instance.currentFrameTimeStamp;
+    _snapshotViewport = _scroll.position.viewportDimension;
+    final indices = _mountedRows.values.map((row) => row.widget.index);
+    _snapshotFirstIndex = indices.reduce(math.min);
+    _snapshotLastIndex = indices.reduce(math.max);
+  }
+
+  void _updateMotion(AccessibleVirtualList oldWidget) {
+    final before = oldWidget.motionKey;
+    final after = widget.motionKey;
+    final changed = before?.epoch != after?.epoch;
+    if (!_motionEnabled ||
+        before == null ||
+        after == null ||
+        before.scope != after.scope ||
+        _pendingIndex != null ||
+        _mountedRows.length > 80) {
+      _finishMotion();
+      _pendingSnapshot = null;
+      _playSnapshot = null;
+      return;
+    }
+    if (changed) _finishMotion();
+    if (oldWidget.itemCount > 0 && widget.itemCount == 0) _captureMotion();
+    if (!changed || widget.itemCount == 0) return;
+    if (_pendingSnapshot == null) _captureMotion();
+    final snapshot = _pendingSnapshot;
+    final age = _snapshotAt == null
+        ? null
+        : SchedulerBinding.instance.currentFrameTimeStamp - _snapshotAt!;
+    _pendingSnapshot = null;
+    if (snapshot == null || age == null || age > const Duration(seconds: 1)) {
+      return;
+    }
+    _playSnapshot = snapshot;
+    _fadeReorder = _mostlyCrossing(snapshot);
+    final generation = ++_motionGeneration;
+    _motion.forward(from: 0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && generation == _motionGeneration) _playSnapshot = null;
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _motionEnabled = ViewerMotion.enabled(context);
+    if (!_motionEnabled) {
+      _finishMotion();
+      _pendingSnapshot = null;
+      _playSnapshot = null;
+    }
+  }
+
   static const Duration _slowRowThreshold = Duration(milliseconds: 500);
 
   final ScrollController _scroll = ScrollController();
@@ -183,6 +305,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   @override
   void initState() {
     super.initState();
+    _motion.value = 1;
     widget.controller._attach(this);
     _syncSelectionWithItemCount();
   }
@@ -190,6 +313,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   @override
   void didUpdateWidget(covariant AccessibleVirtualList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _updateMotion(oldWidget);
     if (oldWidget.controller != widget.controller) {
       oldWidget.controller._detach(this);
       widget.controller._attach(this);
@@ -211,6 +335,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
   @override
   void dispose() {
     _cancelSlowTimer();
+    _motion.dispose();
     widget.controller._detach(this);
     _containerFocus.dispose();
     _scroll.dispose();
@@ -301,6 +426,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
       return;
     }
     _refusedFocusIndex = null;
+    _finishMotion();
+    _pendingSnapshot = null;
     final target = index.clamp(0, widget.itemCount - 1);
     _setSelectedIndex(target, notify: true);
     if (!moveFocus) {
@@ -564,6 +691,8 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
+    _finishMotion();
+    _pendingSnapshot = null;
     // A key in the list is a deliberate move, so a refusal that never handed
     // focus back cannot claim a later focus change.
     _refusedFocusIndex = null;
@@ -631,10 +760,13 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 ExcludeSemantics(
-                  child: Text(
-                    widget.emptyLabel,
-                    textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyMedium,
+                  child: _TransientEmptyText(
+                    transient: widget.emptyIsTransient,
+                    child: Text(
+                      widget.emptyLabel,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                   ),
                 ),
                 if (widget.emptyAction case final action?) ...<Widget>[
@@ -670,21 +802,29 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList> {
         focusable: true,
         focused: _containerFocused,
         label: widget.listLabel,
-        child: ListView.builder(
-          controller: _scroll,
-          itemExtent: widget.itemExtent,
-          scrollCacheExtent: widget.cacheExtent == null
-              ? null
-              : ScrollCacheExtent.pixels(widget.cacheExtent!),
-          itemCount: widget.itemCount,
-          itemBuilder: (context, index) => _VirtualRow(
-            key: widget.itemKeyBuilder(index),
-            index: index,
-            selected: index == _selectedIndex,
-            semantics: widget.rowSemanticsBuilder(index),
-            owner: this,
-            onKeyEvent: _handleKeyEvent,
-            child: widget.rowBuilder(context, index, index == _selectedIndex),
+        child: NotificationListener<ScrollStartNotification>(
+          onNotification: (_) {
+            _finishMotion();
+            _pendingSnapshot = null;
+            return false;
+          },
+          child: ListView.builder(
+            controller: _scroll,
+            itemExtent: widget.itemExtent,
+            scrollCacheExtent: widget.cacheExtent == null
+                ? null
+                : ScrollCacheExtent.pixels(widget.cacheExtent!),
+            itemCount: widget.itemCount,
+            itemBuilder: (context, index) => _VirtualRow(
+              key: widget.itemKeyBuilder(index),
+              index: index,
+              selected: index == _selectedIndex,
+              ready: widget.isRowReady?.call(index) ?? true,
+              semantics: widget.rowSemanticsBuilder(index),
+              owner: this,
+              onKeyEvent: _handleKeyEvent,
+              child: widget.rowBuilder(context, index, index == _selectedIndex),
+            ),
           ),
         ),
       ),
@@ -697,6 +837,7 @@ class _VirtualRow extends StatefulWidget {
     super.key,
     required this.index,
     required this.selected,
+    required this.ready,
     required this.semantics,
     required this.owner,
     required this.onKeyEvent,
@@ -705,6 +846,7 @@ class _VirtualRow extends StatefulWidget {
 
   final int index;
   final bool selected;
+  final bool ready;
   final AccessibleRowSemantics semantics;
   final _AccessibleVirtualListState owner;
   final KeyEventResult Function(FocusNode node, KeyEvent event) onKeyEvent;
@@ -720,16 +862,65 @@ class _VirtualRowState extends State<_VirtualRow> {
     skipTraversal: true,
   );
   bool _focused = false;
+  bool _hovered = false;
+  double _fromY = 0;
+  bool _entering = false;
+  double _delay = 0;
+  int _generation = -1;
+
+  void _prepareMotion() {
+    final owner = widget.owner;
+    if (_generation == owner._motionGeneration) return;
+    _generation = owner._motionGeneration;
+    final snapshot = owner._playSnapshot;
+    _fromY = 0;
+    _entering = false;
+    _delay = 0;
+    if (snapshot == null ||
+        !(owner.widget.isRowReady?.call(widget.index) ?? true)) {
+      return;
+    }
+    final newY =
+        widget.index * owner.widget.itemExtent -
+        (owner._scroll.hasClients ? owner._scroll.offset : 0);
+    final oldY = snapshot[widget.key];
+    if (!owner._fadeReorder &&
+        oldY != null &&
+        (oldY - newY).abs() <=
+            math.min(owner._snapshotViewport, owner.widget.itemExtent * 3)) {
+      _fromY = oldY - newY;
+    } else {
+      _fromY = 6;
+      _entering = true;
+      final rank = math.max(0, (newY / owner.widget.itemExtent).floor());
+      _delay = math.min(rank, ViewerMotion.staggerMaxRows) * 12 / 292;
+    }
+  }
+
+  @override
+  void didUpdateWidget(_VirtualRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.index != widget.index || oldWidget.owner != widget.owner) {
+      oldWidget.owner._unregisterRowNode(oldWidget.index, _node);
+      widget.owner._registerRowNode(widget.index, _node);
+    }
+    _prepareMotion();
+  }
 
   @override
   void initState() {
     super.initState();
     widget.owner._registerRowNode(widget.index, _node);
+    widget.owner._mountedRows[widget.key!] = this;
+    _prepareMotion();
   }
 
   @override
   void dispose() {
     widget.owner._unregisterRowNode(widget.index, _node);
+    if (identical(widget.owner._mountedRows[widget.key], this)) {
+      widget.owner._mountedRows.remove(widget.key);
+    }
     _node.dispose();
     super.dispose();
   }
@@ -771,31 +962,143 @@ class _VirtualRowState extends State<_VirtualRow> {
             moveFocus: true,
             forceFocus: true,
           ),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border(
-                left: stroke > 0
-                    ? BorderSide(color: borderColor, width: stroke)
-                    : BorderSide.none,
-                top: stroke > 0
-                    ? BorderSide(color: borderColor, width: stroke)
-                    : BorderSide.none,
-                right: stroke > 0
-                    ? BorderSide(color: borderColor, width: stroke)
-                    : BorderSide.none,
-                bottom: BorderSide(
-                  color: stroke > 0 ? borderColor : colors.outlineVariant,
-                  width: stroke > 0 ? stroke : 1,
+          child: _RowMotion(
+            driver: widget.owner._motion,
+            fromY: _fromY,
+            entering: _entering,
+            delay: _delay,
+            child: MouseRegion(
+              onEnter: (_) => setState(() => _hovered = true),
+              onExit: (_) => setState(() => _hovered = false),
+              child: AnimatedContainer(
+                duration: _focused || widget.selected
+                    ? Duration.zero
+                    : ViewerMotion.of(context, ViewerMotion.short),
+                color: _hovered && !_focused && !widget.selected
+                    ? colors.onSurface.withValues(alpha: .06)
+                    : colors.onSurface.withValues(alpha: 0),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      left: stroke > 0
+                          ? BorderSide(color: borderColor, width: stroke)
+                          : BorderSide.none,
+                      top: stroke > 0
+                          ? BorderSide(color: borderColor, width: stroke)
+                          : BorderSide.none,
+                      right: stroke > 0
+                          ? BorderSide(color: borderColor, width: stroke)
+                          : BorderSide.none,
+                      bottom: BorderSide(
+                        color: stroke > 0 ? borderColor : colors.outlineVariant,
+                        width: stroke > 0 ? stroke : 1,
+                      ),
+                    ),
+                  ),
+                  child: ExcludeSemantics(
+                    excluding: widget.owner.widget.excludeRowChildSemantics,
+                    child: widget.child,
+                  ),
                 ),
               ),
-            ),
-            child: ExcludeSemantics(
-              excluding: widget.owner.widget.excludeRowChildSemantics,
-              child: widget.child,
             ),
           ),
         ),
       ),
     );
   }
+}
+
+/// Only the transform and opacity rebuild per tick; row content is the child.
+class _RowMotion extends StatelessWidget {
+  const _RowMotion({
+    required this.driver,
+    required this.fromY,
+    required this.entering,
+    required this.delay,
+    required this.child,
+  });
+  final Animation<double> driver;
+  final double fromY, delay;
+  final bool entering;
+  final Widget child;
+  @override
+  Widget build(BuildContext context) {
+    final progress = CurveTween(
+      curve: Interval(
+        delay,
+        (delay + 220 / 292).clamp(0, 1),
+        curve: entering ? ViewerMotion.enter : ViewerMotion.move,
+      ),
+    ).animate(driver);
+    return AnimatedBuilder(
+      animation: progress,
+      child: FadeTransition(
+        opacity: entering ? progress : const AlwaysStoppedAnimation(1.0),
+        alwaysIncludeSemantics: true,
+        child: child,
+      ),
+      builder: (context, child) => Transform.translate(
+        offset: Offset(0, fromY * (1 - progress.value)),
+        child: ColoredBox(
+          color: driver.value < 1
+              ? Theme.of(context).colorScheme.surface
+              : Colors.transparent,
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _TransientEmptyText extends StatefulWidget {
+  const _TransientEmptyText({required this.transient, required this.child});
+  final bool transient;
+  final Widget child;
+  @override
+  State<_TransientEmptyText> createState() => _TransientEmptyTextState();
+}
+
+class _TransientEmptyTextState extends State<_TransientEmptyText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _driver = AnimationController(
+    vsync: this,
+    value: 1,
+    duration: const Duration(milliseconds: 330),
+  );
+  bool _wasTransient = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _update();
+  }
+
+  @override
+  void didUpdateWidget(_TransientEmptyText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _update();
+  }
+
+  void _update() {
+    if (widget.transient && !_wasTransient && ViewerMotion.enabled(context)) {
+      _driver.forward(from: 0);
+    }
+    if (!widget.transient || !ViewerMotion.enabled(context)) _driver.value = 1;
+    _wasTransient = widget.transient;
+  }
+
+  @override
+  void dispose() {
+    _driver.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    alwaysIncludeSemantics: true,
+    opacity: CurveTween(
+      curve: const Interval(150 / 330, 1, curve: ViewerMotion.enter),
+    ).animate(_driver),
+    child: widget.child,
+  );
 }

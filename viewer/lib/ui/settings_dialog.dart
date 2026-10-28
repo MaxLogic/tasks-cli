@@ -19,6 +19,7 @@ import '../data/cli_client.dart';
 import '../data/models.dart';
 import '../data/settings_draft.dart';
 import '../platform/viewer_startup.dart';
+import 'viewer_icons.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 
@@ -73,6 +74,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   final FocusNode _cliNode = FocusNode(debugLabel: 'settings cli path');
   final FocusNode _dataRootNode = FocusNode(debugLabel: 'settings data root');
+  final FocusNode _animationsNode = FocusNode(
+    debugLabel: 'settings animations',
+  );
+  late ViewerAnimations _animations = widget.initial.animations;
   final FocusNode _themeNode = FocusNode(debugLabel: 'settings theme');
   final FocusNode _textSizeNode = FocusNode(debugLabel: 'settings text size');
   final FocusNode _projectsWidthNode = FocusNode(
@@ -107,6 +112,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _cliNode.dispose();
     _dataRootNode.dispose();
     _themeNode.dispose();
+    _animationsNode.dispose();
     _textSizeNode.dispose();
     _projectsWidthNode.dispose();
     _tasksWidthNode.dispose();
@@ -185,6 +191,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       dataRoot: dataRoot.isEmpty ? null : dataRoot,
       clearDataRoot: dataRoot.isEmpty,
       themeMode: _theme,
+      animations: _animations,
       textScalePercent: _textScale,
       projectsPanePercent: projects,
       tasksPanePercent: tasks,
@@ -318,11 +325,12 @@ class _SettingsDialogState extends State<SettingsDialog> {
               ),
             ],
             if (needsAction)
-              TextButton(
+              TextButton.icon(
                 onPressed: startup.busy
                     ? null
                     : () => unawaited(startup.applyDesired(_startWithWindows)),
-                child: const Text('Retry registration (Alt+G)'),
+                icon: const Icon(ViewerIcons.retry),
+                label: const Text('Retry registration (Alt+G)'),
               ),
           ],
         );
@@ -351,6 +359,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
         unawaited(_testConnection());
       case 'settings.theme':
         _themeNode.requestFocus();
+      case 'settings.animations':
+        _animationsNode.requestFocus();
       case 'settings.textSize':
         _textSizeNode.requestFocus();
       case 'settings.projectsWidth':
@@ -470,9 +480,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           ),
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: TextButton(
+                            child: TextButton.icon(
                               onPressed: _useBundledCli,
-                              child: const Text('Use packaged CLI (Alt+B)'),
+                              icon: const Icon(ViewerIcons.packagedCli),
+                              label: const Text('Use packaged CLI (Alt+B)'),
                             ),
                           ),
                           const SizedBox(height: 12),
@@ -493,20 +504,26 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           ),
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: TextButton(
+                            child: TextButton.icon(
                               onPressed: _useStandardDataRoot,
-                              child: const Text(
+                              icon: const Icon(ViewerIcons.taskStore),
+                              label: const Text(
                                 'Use standard task store (Alt+O)',
                               ),
                             ),
                           ),
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: TextButton(
+                            child: TextButton.icon(
                               onPressed: _testingConnection
                                   ? null
                                   : () => unawaited(_testConnection()),
-                              child: Text(
+                              icon: Icon(
+                                _testingConnection
+                                    ? ViewerIcons.busy
+                                    : ViewerIcons.connection,
+                              ),
+                              label: Text(
                                 _testingConnection
                                     ? 'Testing connection'
                                     : 'Test connection (Alt+T)',
@@ -559,6 +576,28 @@ class _SettingsDialogState extends State<SettingsDialog> {
                             ],
                             onChanged: (value) =>
                                 setState(() => _theme = value ?? _theme),
+                          ),
+                          const SizedBox(height: 12),
+                          DropdownButtonFormField<ViewerAnimations>(
+                            initialValue: _animations,
+                            focusNode: _animationsNode,
+                            decoration: const InputDecoration(
+                              labelText: 'Animations (Alt+N)',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: const [
+                              DropdownMenuItem(
+                                value: ViewerAnimations.followWindows,
+                                child: Text('Follow Windows'),
+                              ),
+                              DropdownMenuItem(
+                                value: ViewerAnimations.off,
+                                child: Text('Off'),
+                              ),
+                            ],
+                            onChanged: (value) => setState(
+                              () => _animations = value ?? _animations,
+                            ),
                           ),
                           const SizedBox(height: 12),
                           DropdownButtonFormField<int>(
@@ -628,10 +667,11 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           const SizedBox(height: 8),
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: TextButton(
+                            child: TextButton.icon(
                               onPressed: () =>
                                   _onCommand('settings.resetLayout'),
-                              child: const Text('Reset layout (Alt+R)'),
+                              icon: const Icon(ViewerIcons.resetLayout),
+                              label: const Text('Reset layout (Alt+R)'),
                             ),
                           ),
                           const Divider(height: 24),
@@ -763,9 +803,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
                           ),
                           Align(
                             alignment: Alignment.centerLeft,
-                            child: TextButton(
+                            child: TextButton.icon(
                               onPressed: _testVoice,
-                              child: const Text('Test voice (Alt+Y)'),
+                              icon: const Icon(ViewerIcons.voice),
+                              label: const Text('Test voice (Alt+Y)'),
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -795,14 +836,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: <Widget>[
-                      TextButton(
+                      TextButton.icon(
                         onPressed: () => _close(null),
-                        child: const Text('Cancel (Alt+C)'),
+                        icon: const Icon(ViewerIcons.close),
+                        label: const Text('Cancel (Alt+C)'),
                       ),
                       const SizedBox(width: 8),
-                      FilledButton(
+                      FilledButton.icon(
                         onPressed: _save,
-                        child: Text(
+                        icon: const Icon(ViewerIcons.save),
+                        label: Text(
                           widget.firstSetup
                               ? 'Save and continue (Ctrl+S)'
                               : 'Save (Ctrl+S)',

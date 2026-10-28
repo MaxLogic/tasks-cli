@@ -24,6 +24,22 @@ Directory _newRoot(String name) {
 }
 
 void main() {
+  test('animations wire default, off and unknown are forwards compatible', () {
+    for (final (wire, expected) in [
+      ('off', 'off'),
+      ('future', 'follow_windows'),
+      (null, 'follow_windows'),
+    ]) {
+      final decoded = decodeSettingsDocument(
+        jsonEncode({'schema_version': 1, 'animations': ?wire}),
+      );
+      expect(
+        (jsonDecode(encodeSettingsDocument(decoded)) as Map)['animations'],
+        expected,
+      );
+    }
+  });
+
   setUp(() {
     _root = _newRoot('settings');
   });

@@ -16,6 +16,8 @@ import '../data/models.dart';
 import '../platform/project_launch.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'enrichment_preview_dialog.dart';
 import 'viewer_controls.dart';
@@ -45,6 +47,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   );
   final ProjectLauncher _projectLauncher = const ProjectLauncher();
   String? _pendingRecoveryError;
+  final _copyFlash = ViewerFlashController();
 
   ProjectController get _projects => widget.model.projectList;
 
@@ -61,6 +64,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
   @override
   void dispose() {
+    _copyFlash.dispose();
     widget.api.registerScopeCommands(CommandScope.projects, null);
     _projects.removeListener(_syncExternalQuery);
     _search.dispose();
@@ -188,6 +192,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       return;
     }
     await Clipboard.setData(ClipboardData(text: id));
+    if (mounted) _copyFlash.flash();
     widget.api.announce('Project ID copied', clipId: 'project_id_copied');
   }
 
@@ -262,29 +267,41 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _search,
-                  focusNode: handles.filterFocus,
-                  onChanged: projects.setQuery,
-                  onSubmitted: (_) => unawaited(projects.submitQuery()),
-                  decoration: const InputDecoration(
-                    labelText: 'Search projects (Ctrl+F)',
-                    helperText: 'Search name, path or ID; use | for OR',
-                    isDense: true,
-                    border: OutlineInputBorder(),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+              final inline = constraints.maxWidth >= 440 * scale;
+              return Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.start,
+                children: <Widget>[
+                  SizedBox(
+                    width: inline
+                        ? constraints.maxWidth - 152 * scale
+                        : constraints.maxWidth,
+                    child: TextField(
+                      controller: _search,
+                      focusNode: handles.filterFocus,
+                      onChanged: projects.setQuery,
+                      onSubmitted: (_) => unawaited(projects.submitQuery()),
+                      decoration: const InputDecoration(
+                        labelText: 'Search projects (Ctrl+F)',
+                        helperText: 'Search name, path or ID; use | for OR',
+                        helperMaxLines: 2,
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: _clearSearch,
-                child: const Text('Clear search'),
-              ),
-            ],
+                  TextButton.icon(
+                    onPressed: _clearSearch,
+                    icon: const Icon(ViewerIcons.clearSearch),
+                    label: const Text('Clear search'),
+                  ),
+                ],
+              );
+            },
           ),
           // Room for the search field's helper line before the next floating
           // label, and between wrapped runs of outlined fields.
@@ -371,12 +388,17 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 excludeFromSemantics: true,
                 child: IconButton(
                   focusNode: _directionFocus,
-                  icon: Icon(
-                    projects.direction == SortDirection.ascending
-                        ? Icons.arrow_upward
-                        : Icons.arrow_downward,
-                    semanticLabel:
-                        '${projects.direction.label}; reverse sort (Alt+I)',
+                  icon: AnimatedRotation(
+                    turns: projects.direction == SortDirection.ascending
+                        ? 0
+                        : .5,
+                    duration: ViewerMotion.of(context, ViewerMotion.short),
+                    curve: ViewerMotion.move,
+                    child: Icon(
+                      ViewerIcons.sortArrow,
+                      semanticLabel:
+                          '${projects.direction.label}; reverse sort (Alt+I)',
+                    ),
                   ),
                   onPressed: () => projects.setDirection(
                     projects.direction == SortDirection.ascending
@@ -387,9 +409,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               ),
               Tooltip(
                 message: 'Alt+C',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: _clearFilters,
-                  child: const Text('Clear filters'),
+                  icon: const Icon(ViewerIcons.clearFilters),
+                  label: const Text('Clear filters'),
                 ),
               ),
             ],
@@ -416,7 +439,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ),
-          TextButton(
+          TextButton.icon(
             onPressed: () async {
               try {
                 await widget.model.checkPendingRemoteChange(receipt.requestId);
@@ -437,7 +460,8 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 );
               }
             },
-            child: const Text('Check pending change'),
+            icon: const Icon(ViewerIcons.sync),
+            label: const Text('Check pending change'),
           ),
         ],
       ),
@@ -517,6 +541,11 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       child: AccessibleVirtualList(
         controller: handles.list,
         itemCount: itemCount,
+        motionKey: ListMotionKey(
+          scope: 'projects',
+          epoch: projects.resultEpoch,
+        ),
+        emptyIsTransient: projects.isLoading,
         itemExtent: viewerRowExtent(context, textLines: 3),
         listLabel: 'Projects',
         emptyLabel: projects.isLoading
@@ -526,9 +555,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
             ? null
             : Tooltip(
                 message: 'Alt+C',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: _clearFilters,
-                  child: const Text('Clear filters'),
+                  icon: const Icon(ViewerIcons.clearFilters),
+                  label: const Text('Clear filters'),
                 ),
               ),
         itemKeyBuilder: (index) => ValueKey<String>(
@@ -884,27 +914,30 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
           children: <Widget>[
             // One primary action; the rest are tonal, and every label names
             // its shortcut.
-            FilledButton(
+            FilledButton.icon(
               onPressed: item == null
                   ? null
                   : () => unawaited(_copyProjectId()),
-              child: const Text('Copy project ID (Alt+Y)'),
+              icon: ViewerFlashIcon(controller: _copyFlash),
+              label: const Text('Copy project ID (Alt+Y)'),
             ),
             if (item != null && item.stats == null)
-              FilledButton.tonal(
+              FilledButton.tonalIcon(
                 onPressed: () => unawaited(projects.retry()),
-                child: const Text('Retry'),
+                icon: const Icon(ViewerIcons.retry),
+                label: const Text('Retry'),
               ),
             Tooltip(
               message:
                   reason ??
                   'Enrich the clipboard in ${item?.name ?? 'the selected '
                           'project'} and write the result back.',
-              child: FilledButton.tonal(
+              child: FilledButton.tonalIcon(
                 onPressed: canEnrich
                     ? () => unawaited(_enrichClipboard())
                     : null,
-                child: const Text('Enrich clipboard (Alt+E)'),
+                icon: const Icon(ViewerIcons.enrich),
+                label: const Text('Enrich clipboard (Alt+E)'),
               ),
             ),
             Tooltip(
@@ -912,11 +945,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                   reason ?? 'Preview enrichment without writing the clipboard.',
               child: Focus(
                 focusNode: _previewFocus,
-                child: FilledButton.tonal(
+                child: FilledButton.tonalIcon(
                   onPressed: canEnrich
                       ? () => unawaited(_previewEnrichment())
                       : null,
-                  child: const Text('Preview enrichment (Alt+P)'),
+                  icon: const Icon(ViewerIcons.preview),
+                  label: const Text('Preview enrichment (Alt+P)'),
                 ),
               ),
             ),
@@ -1102,7 +1136,7 @@ class _ProjectRowTile extends StatelessWidget {
                 iconSize: 18,
                 onPressed: () => onMenu(context),
                 icon: Icon(
-                  Icons.more_horiz,
+                  ViewerIcons.more,
                   semanticLabel: 'Actions for ${item.name}',
                 ),
               ),

@@ -20,6 +20,8 @@ import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
 import '../platform/viewer_startup.dart';
 import 'accessible_virtual_list.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 import 'keyboard_help_dialog.dart';
@@ -915,6 +917,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       return await showDialog<T>(
         context: context,
         barrierDismissible: false,
+        animationStyle: viewerDialogAnimationStyle(context),
         builder: (dialogContext) => DialogCommandHost(
           scope: scope,
           onHotkeyHelp: openHelp,
@@ -1042,7 +1045,10 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
             excludeFromSemantics: true,
             child: IconButton(
               onPressed: _refresh,
-              icon: const Icon(Icons.refresh, semanticLabel: 'Refresh (F5)'),
+              icon: const Icon(
+                ViewerIcons.refresh,
+                semanticLabel: 'Refresh (F5)',
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -1052,7 +1058,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
             child: IconButton(
               onPressed: () => unawaited(openSettings()),
               icon: const Icon(
-                Icons.settings_outlined,
+                ViewerIcons.settings,
                 semanticLabel: 'Settings (Ctrl+,)',
               ),
             ),
@@ -1064,7 +1070,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
             child: IconButton(
               onPressed: () => unawaited(openHelp()),
               icon: const Icon(
-                Icons.help_outline,
+                ViewerIcons.help,
                 semanticLabel: 'Hotkey help (F10)',
               ),
             ),

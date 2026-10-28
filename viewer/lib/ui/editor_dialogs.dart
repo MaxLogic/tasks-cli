@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import '../controllers/editor_controller.dart';
 import '../data/editor_models.dart';
 import '../data/settings_store.dart';
+import 'viewer_icons.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 import 'button_theme.dart';
@@ -166,19 +167,22 @@ class ViewerUnsavedChangesDialog extends StatelessWidget {
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: <Widget>[
-              FilledButton(
+              FilledButton.icon(
                 onPressed: () => _close(context, EditorLeaveDecision.save),
-                child: const Text('Save (Alt+S)'),
+                icon: const Icon(ViewerIcons.save),
+                label: const Text('Save (Alt+S)'),
               ),
-              OutlinedButton(
+              OutlinedButton.icon(
                 style: viewerDestructiveButtonStyle(context),
                 onPressed: () => _close(context, EditorLeaveDecision.discard),
-                child: const Text('Discard (Alt+D)'),
+                icon: const Icon(ViewerIcons.discard),
+                label: const Text('Discard (Alt+D)'),
               ),
-              TextButton(
+              TextButton.icon(
                 autofocus: true,
                 onPressed: () => _close(context, EditorLeaveDecision.cancel),
-                child: const Text('Cancel (Alt+C)'),
+                icon: const Icon(ViewerIcons.close),
+                label: const Text('Cancel (Alt+C)'),
               ),
             ],
           ),
@@ -236,21 +240,24 @@ class ViewerMarkDoneDirtyDialog extends StatelessWidget {
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: <Widget>[
-              FilledButton(
+              FilledButton.icon(
                 onPressed: () =>
                     _close(context, MarkDoneDirtyDecision.saveAndMarkDone),
-                child: const Text('Save changes and mark done (Alt+S)'),
+                icon: const Icon(ViewerIcons.markDone),
+                label: const Text('Save changes and mark done (Alt+S)'),
               ),
-              OutlinedButton(
+              OutlinedButton.icon(
                 style: viewerDestructiveButtonStyle(context),
                 onPressed: () =>
                     _close(context, MarkDoneDirtyDecision.discardAndMarkDone),
-                child: const Text('Discard changes and mark done (Alt+D)'),
+                icon: const Icon(ViewerIcons.discard),
+                label: const Text('Discard changes and mark done (Alt+D)'),
               ),
-              TextButton(
+              TextButton.icon(
                 autofocus: true,
                 onPressed: () => _close(context, MarkDoneDirtyDecision.cancel),
-                child: const Text('Cancel (Alt+C)'),
+                icon: const Icon(ViewerIcons.close),
+                label: const Text('Cancel (Alt+C)'),
               ),
             ],
           ),
@@ -379,21 +386,24 @@ class ViewerConflictDialog extends StatelessWidget {
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: <Widget>[
-              OutlinedButton(
+              OutlinedButton.icon(
                 onPressed: () => _close(context, EditorConflictDecision.review),
-                child: const Text('Review against current (Alt+V)'),
+                icon: const Icon(ViewerIcons.review),
+                label: const Text('Review against current (Alt+V)'),
               ),
-              OutlinedButton(
+              OutlinedButton.icon(
                 style: viewerDestructiveButtonStyle(context),
                 onPressed: () =>
                     _close(context, EditorConflictDecision.reloadAndDiscard),
-                child: const Text('Reload current and discard draft (Alt+R)'),
+                icon: const Icon(ViewerIcons.reload),
+                label: const Text('Reload current and discard draft (Alt+R)'),
               ),
-              FilledButton(
+              FilledButton.icon(
                 autofocus: true,
                 onPressed: () =>
                     _close(context, EditorConflictDecision.returnToEditor),
-                child: const Text('Return to editor (Alt+E)'),
+                icon: const Icon(ViewerIcons.returnToEditor),
+                label: const Text('Return to editor (Alt+E)'),
               ),
             ],
           ),
@@ -557,16 +567,18 @@ class _ViewerConflictReviewDialogState
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: <Widget>[
-              FilledButton(
+              FilledButton.icon(
                 onPressed: _isResolved
                     ? () => Navigator.of(context).pop(_choices)
                     : null,
-                child: const Text('Apply choices (Alt+A)'),
+                icon: const Icon(ViewerIcons.apply),
+                label: const Text('Apply choices (Alt+A)'),
               ),
-              TextButton(
+              TextButton.icon(
                 autofocus: true,
                 onPressed: () => Navigator.of(context).pop(null),
-                child: const Text('Cancel (Alt+C)'),
+                icon: const Icon(ViewerIcons.close),
+                label: const Text('Cancel (Alt+C)'),
               ),
             ],
           ),
@@ -659,15 +671,17 @@ class ViewerRestoreDraftDialog extends StatelessWidget {
             runSpacing: 8,
             alignment: WrapAlignment.end,
             children: <Widget>[
-              FilledButton(
+              FilledButton.icon(
                 autofocus: true,
                 onPressed: () => close(EditorRestoreDecision.restore),
-                child: const Text('Restore draft (Alt+R)'),
+                icon: const Icon(ViewerIcons.restore),
+                label: const Text('Restore draft (Alt+R)'),
               ),
-              TextButton(
+              TextButton.icon(
                 style: viewerDestructiveButtonStyle(context),
                 onPressed: () => close(EditorRestoreDecision.discard),
-                child: const Text('Discard (Alt+D)'),
+                icon: const Icon(ViewerIcons.discard),
+                label: const Text('Discard (Alt+D)'),
               ),
             ],
           ),
@@ -708,10 +722,11 @@ class ViewerSlowSaveCloseDialog extends StatelessWidget {
           const SizedBox(height: 16),
           Align(
             alignment: Alignment.centerRight,
-            child: FilledButton(
+            child: FilledButton.icon(
               autofocus: true,
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Keep waiting (Alt+W)'),
+              icon: const Icon(ViewerIcons.busy),
+              label: const Text('Keep waiting (Alt+W)'),
             ),
           ),
         ],

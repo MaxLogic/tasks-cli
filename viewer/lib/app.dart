@@ -8,6 +8,8 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
+import 'platform/motion_preference.dart';
 
 import 'app_environment.dart';
 import 'controllers/announcement_controller.dart';
@@ -36,7 +38,10 @@ class TasksViewerApp extends StatefulWidget {
     this.closeGuard,
     this.startup,
     this.onSettingsPersist,
+    this.windowsAnimationsEnabled,
   });
+
+  final bool Function()? windowsAnimationsEnabled;
 
   /// Resolved paths and modes for this launch.
   final ViewerEnvironment environment;
@@ -81,7 +86,45 @@ class TasksViewerApp extends StatefulWidget {
   State<TasksViewerApp> createState() => _TasksViewerAppState();
 }
 
-class _TasksViewerAppState extends State<TasksViewerApp> {
+class _TasksViewerAppState extends State<TasksViewerApp>
+    with WidgetsBindingObserver, WindowListener {
+  late bool _windowsAnimationsEnabled =
+      (widget.windowsAnimationsEnabled ?? readWindowsAnimationsEnabled)();
+  bool get _motionOff =>
+      _settings.animations == ViewerAnimations.off ||
+      !_windowsAnimationsEnabled ||
+      WidgetsBinding
+          .instance
+          .platformDispatcher
+          .accessibilityFeatures
+          .disableAnimations;
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    windowManager.addListener(this);
+  }
+
+  void _refreshMotion() {
+    final enabled =
+        (widget.windowsAnimationsEnabled ?? readWindowsAnimationsEnabled)();
+    if (enabled != _windowsAnimationsEnabled && mounted) {
+      setState(() => _windowsAnimationsEnabled = enabled);
+    }
+  }
+
+  @override
+  void onWindowFocus() => _refreshMotion();
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshMotion();
+  }
+
+  @override
+  void didChangeAccessibilityFeatures() {
+    if (mounted) setState(() {});
+  }
+
   late final AnnouncementController _announcements =
       widget.announcements ??
       AnnouncementController(clipPlayer: SilentClipPlayer());
@@ -93,6 +136,8 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
+    WidgetsBinding.instance.removeObserver(this);
     if (widget.announcements == null) {
       _announcements.dispose();
     }
@@ -103,6 +148,18 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: viewerWindowTitle(),
+      themeAnimationDuration: _motionOff
+          ? Duration.zero
+          : kThemeAnimationDuration,
+      builder: (context, child) {
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          data: mq.copyWith(
+            disableAnimations: _motionOff || mq.disableAnimations,
+          ),
+          child: child!,
+        );
+      },
       debugShowCheckedModeBanner: false,
       theme: _theme(
         Brightness.light,
@@ -253,6 +310,7 @@ class _TasksViewerAppState extends State<TasksViewerApp> {
           ),
         ),
         highContrast: highContrast,
+        motionOff: _motionOff,
       );
 }
 

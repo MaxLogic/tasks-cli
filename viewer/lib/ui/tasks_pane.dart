@@ -15,6 +15,8 @@ import '../controllers/task_controller.dart';
 import '../data/models.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'viewer_controls.dart';
 import 'viewer_format.dart';
@@ -380,10 +382,12 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
                       _buildHeading(context),
-                      if (_filtersVisible)
-                        _buildFilters(context, tasks)
-                      else
-                        _buildCollapsedFilters(context, tasks),
+                      ViewerDisclosureTransition(
+                        transitionKey: _filtersVisible,
+                        child: _filtersVisible
+                            ? _buildFilters(context, tasks)
+                            : _buildCollapsedFilters(context, tasks),
+                      ),
                     ],
                   ),
                 ),
@@ -439,7 +443,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             child: TextButton.icon(
               focusNode: _filtersToggleFocus,
               onPressed: () => _toggleFilters(true),
-              icon: const Icon(Icons.tune),
+              icon: const Icon(ViewerIcons.filters),
               label: _FiltersButtonLabel(tasks: tasks),
             ),
           ),
@@ -463,7 +467,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
               child: TextButton.icon(
                 focusNode: _filtersToggleFocus,
                 onPressed: () => _toggleFilters(false),
-                icon: const Icon(Icons.expand_less),
+                icon: const Icon(ViewerIcons.hideFilters),
                 label: const Text('Hide filters'),
               ),
             ),
@@ -486,13 +490,14 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 ),
               ),
               const SizedBox(width: 8),
-              TextButton(
+              TextButton.icon(
                 onPressed: () {
                   _search.clear();
                   tasks.setQuery('');
                   unawaited(tasks.submitQuery());
                 },
-                child: const Text('Clear search'),
+                icon: const Icon(ViewerIcons.clearSearch),
+                label: const Text('Clear search'),
               ),
             ],
           ),
@@ -653,12 +658,15 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 excludeFromSemantics: true,
                 child: IconButton(
                   focusNode: _directionFocus,
-                  icon: Icon(
-                    tasks.direction == SortDirection.ascending
-                        ? Icons.arrow_upward
-                        : Icons.arrow_downward,
-                    semanticLabel:
-                        '${tasks.direction.label}; reverse sort (Alt+I)',
+                  icon: AnimatedRotation(
+                    turns: tasks.direction == SortDirection.ascending ? 0 : .5,
+                    duration: ViewerMotion.of(context, ViewerMotion.short),
+                    curve: ViewerMotion.move,
+                    child: Icon(
+                      ViewerIcons.sortArrow,
+                      semanticLabel:
+                          '${tasks.direction.label}; reverse sort (Alt+I)',
+                    ),
                   ),
                   onPressed: () => tasks.setDirection(
                     tasks.direction == SortDirection.ascending
@@ -669,9 +677,10 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
               ),
               Tooltip(
                 message: 'Alt+C',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: _clearFilters,
-                  child: const Text('Clear filters'),
+                  icon: const Icon(ViewerIcons.clearFilters),
+                  label: const Text('Clear filters'),
                 ),
               ),
             ],
@@ -743,10 +752,11 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
           ),
         ),
         const SizedBox(width: 8),
-        TextButton(
+        TextButton.icon(
           focusNode: _applyLabelsFocus,
           onPressed: _applyLabels,
-          child: const Text('Apply labels'),
+          icon: const Icon(ViewerIcons.label),
+          label: const Text('Apply labels'),
         ),
       ],
     );
@@ -911,6 +921,11 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       child: AccessibleVirtualList(
         controller: handles.list,
         itemCount: itemCount,
+        motionKey: ListMotionKey(
+          scope: tasks.projectId,
+          epoch: tasks.resultEpoch,
+        ),
+        emptyIsTransient: tasks.isLoading,
         itemExtent: viewerRowExtent(context),
         listLabel: 'Tasks in ${widget.model.selectedProjectName}',
         emptyLabel: tasks.isLoading
@@ -922,9 +937,10 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
             ? null
             : Tooltip(
                 message: 'Alt+C',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: _clearFilters,
-                  child: const Text('Clear filters'),
+                  icon: const Icon(ViewerIcons.clearFilters),
+                  label: const Text('Clear filters'),
                 ),
               ),
         itemKeyBuilder: (index) => ValueKey<String>(
@@ -973,7 +989,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                     excludeFromSemantics: true,
                     child: IconButton(
                       icon: Icon(
-                        Icons.more_horiz,
+                        ViewerIcons.more,
                         semanticLabel: 'Actions for ${item.canonicalId}',
                       ),
                       onPressed: () => unawaited(_showTaskMenu(item, index)),
@@ -1149,14 +1165,15 @@ class _ActiveFilterChip extends StatelessWidget {
           label: 'Remove $label',
           onTap: onRemove,
           child: ExcludeSemantics(
-            child: TextButton(
+            child: TextButton.icon(
               onPressed: onRemove,
               style: TextButton.styleFrom(
                 minimumSize: const Size(1, 32),
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: const Text('Remove'),
+              icon: const Icon(ViewerIcons.close, size: 16),
+              label: const Text('Remove'),
             ),
           ),
         ),

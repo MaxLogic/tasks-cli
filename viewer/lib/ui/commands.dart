@@ -1037,6 +1037,14 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyH)],
   ),
   CommandSpec(
+    id: 'settings.animations',
+    scope: CommandScope.settings,
+    group: HelpGroup.dialogs,
+    label: 'Animations',
+    description: 'Focus the animation preference selector.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyN)],
+  ),
+  CommandSpec(
     id: 'settings.textSize',
     scope: CommandScope.settings,
     group: HelpGroup.dialogs,

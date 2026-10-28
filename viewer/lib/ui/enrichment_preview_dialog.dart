@@ -9,6 +9,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../controllers/clipboard_controller.dart';
+import 'viewer_icons.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 
@@ -157,9 +158,10 @@ class _ViewerEnrichmentPreviewDialogState
                   const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerRight,
-                    child: FilledButton(
+                    child: FilledButton.icon(
                       onPressed: _close,
-                      child: const Text('Close (Alt+C)'),
+                      icon: const Icon(ViewerIcons.close),
+                      label: const Text('Close (Alt+C)'),
                     ),
                   ),
                 ],

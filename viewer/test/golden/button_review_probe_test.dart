@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/ui/button_theme.dart';
+import 'package:tasks_viewer/ui/viewer_icons.dart';
 import 'package:tasks_viewer/ui/editor_dialogs.dart';
 
 const _segoe = [
@@ -75,41 +76,55 @@ void main() {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   row('normal', [
-                    FilledButton(onPressed: () {}, child: const Text('Filled')),
-                    FilledButton.tonal(
+                    FilledButton.icon(
                       onPressed: () {},
-                      child: const Text('Tonal'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Filled'),
                     ),
-                    OutlinedButton(
+                    FilledButton.tonalIcon(
                       onPressed: () {},
-                      child: const Text('Outlined'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Tonal'),
                     ),
-                    TextButton(onPressed: () {}, child: const Text('Text')),
+                    OutlinedButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Outlined'),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Text'),
+                    ),
                     IconButton(
                       onPressed: () {},
                       icon: const Icon(Icons.refresh),
                     ),
                   ]),
                   row('focused', [
-                    FilledButton(
+                    FilledButton.icon(
                       focusNode: f[0],
                       onPressed: () {},
-                      child: const Text('Filled'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Filled'),
                     ),
-                    FilledButton.tonal(
+                    FilledButton.tonalIcon(
                       focusNode: f[1],
                       onPressed: () {},
-                      child: const Text('Tonal'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Tonal'),
                     ),
-                    OutlinedButton(
+                    OutlinedButton.icon(
                       focusNode: f[2],
                       onPressed: () {},
-                      child: const Text('Outlined'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Outlined'),
                     ),
-                    TextButton(
+                    TextButton.icon(
                       focusNode: f[3],
                       onPressed: () {},
-                      child: const Text('Text'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Text'),
                     ),
                     IconButton(
                       focusNode: f[4],
@@ -118,16 +133,26 @@ void main() {
                     ),
                   ]),
                   row('disabled', [
-                    const FilledButton(onPressed: null, child: Text('Filled')),
-                    const FilledButton.tonal(
+                    FilledButton.icon(
                       onPressed: null,
-                      child: Text('Tonal'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Filled'),
                     ),
-                    const OutlinedButton(
+                    FilledButton.tonalIcon(
                       onPressed: null,
-                      child: Text('Outlined'),
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Tonal'),
                     ),
-                    const TextButton(onPressed: null, child: Text('Text')),
+                    OutlinedButton.icon(
+                      onPressed: null,
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Outlined'),
+                    ),
+                    TextButton.icon(
+                      onPressed: null,
+                      icon: const Icon(ViewerIcons.save),
+                      label: const Text('Text'),
+                    ),
                     const IconButton(
                       onPressed: null,
                       icon: Icon(Icons.refresh),

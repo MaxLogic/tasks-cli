@@ -7,6 +7,8 @@ import '../data/models.dart';
 import '../data/editor_models.dart';
 import 'editor_dialogs.dart';
 import 'dialog_scope.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
@@ -20,9 +22,11 @@ class AttachmentConfirmationDialog extends StatelessWidget {
     required this.content,
     required this.accept,
     this.cancelDefault = false,
+    this.acceptIcon = ViewerIcons.attach,
   });
   final String title, content, accept;
   final bool cancelDefault;
+  final IconData acceptIcon;
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
@@ -40,15 +44,17 @@ class AttachmentConfirmationDialog extends StatelessWidget {
       title: title,
       content: SingleChildScrollView(child: SelectableText(content)),
       actions: [
-        TextButton(
+        TextButton.icon(
           autofocus: !cancelDefault,
           onPressed: () => Navigator.pop(context, true),
-          child: Text(accept),
+          icon: Icon(acceptIcon),
+          label: Text(accept),
         ),
-        TextButton(
+        TextButton.icon(
           autofocus: cancelDefault,
           onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel (Alt+C)'),
+          icon: const Icon(ViewerIcons.close),
+          label: const Text('Cancel (Alt+C)'),
         ),
       ],
     ),
@@ -87,6 +93,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
       result = await showDialog<T>(
         context: context,
         barrierDismissible: false,
+        animationStyle: viewerDialogAnimationStyle(context),
         builder: (dialogContext) => DialogCommandHost(
           scope: scope,
           onCommand: (id) {
@@ -130,6 +137,7 @@ class AttachmentPanelState extends State<AttachmentPanel> {
           title: 'Detach ${current.name} from ${c.task.canonicalId}?',
           content: "The file stays in the backlog's history.",
           accept: 'Detach (Alt+D)',
+          acceptIcon: ViewerIcons.detach,
           cancelDefault: true,
         ),
         CommandScope.attachmentDetach,
@@ -198,41 +206,51 @@ class AttachmentPanelState extends State<AttachmentPanel> {
             spacing: 8,
             runSpacing: 4,
             children: [
-              TextButton(
+              TextButton.icon(
                 onPressed: c.enabled ? c.addFiles : null,
-                child: const Text('Add files (Alt+F)'),
+                icon: const Icon(ViewerIcons.attach),
+                label: const Text('Add files (Alt+F)'),
               ),
-              TextButton(
+              TextButton.icon(
                 onPressed: c.enabled ? paste : null,
-                child: const Text('Paste (Alt+U)'),
+                icon: const Icon(ViewerIcons.paste),
+                label: const Text('Paste (Alt+U)'),
               ),
-              TextButton(
+              TextButton.icon(
                 onPressed: c.enabled && item != null ? view : null,
-                child: const Text('View (Alt+W)'),
+                icon: const Icon(ViewerIcons.view),
+                label: const Text('View (Alt+W)'),
               ),
-              TextButton(
+              TextButton.icon(
                 onPressed: c.enabled && item != null
                     ? () => c.saveAs(item!)
                     : null,
-                child: const Text('Save as (Alt+S)'),
+                icon: const Icon(ViewerIcons.saveAs),
+                label: const Text('Save as (Alt+S)'),
               ),
-              TextButton(
+              TextButton.icon(
                 onPressed: c.enabled && item != null ? detach : null,
-                child: const Text('Detach (Alt+X)'),
+                icon: const Icon(ViewerIcons.detach),
+                label: const Text('Detach (Alt+X)'),
               ),
             ],
           ),
           if (c.disabledReason != null) Text(c.disabledReason!),
           if (c.notice != null) Text(c.notice!),
           if (c.pendingRequestId != null)
-            TextButton(
+            TextButton.icon(
               onPressed: c.busy ? null : c.recover,
-              child: const Text('Check pending change'),
+              icon: const Icon(ViewerIcons.sync),
+              label: const Text('Check pending change'),
             ),
           Expanded(
             child: AccessibleVirtualList(
               controller: list,
               itemCount: c.task.attachments.length,
+              motionKey: ListMotionKey(
+                scope: c.task.canonicalId,
+                epoch: c.task.attachments,
+              ),
               itemExtent: 64,
               listLabel: 'Attachments (Alt+A)',
               emptyLabel:
@@ -293,21 +311,24 @@ class AttachmentOnlyConflictDialog extends StatelessWidget {
       title: 'Version conflict',
       content: const Text('Only attachments changed since you started editing'),
       actions: [
-        TextButton(
+        TextButton.icon(
           autofocus: true,
           onPressed: () =>
               Navigator.pop(context, EditorConflictDecision.returnToEditor),
-          child: const Text('Return to editor (Alt+E)'),
+          icon: const Icon(ViewerIcons.returnToEditor),
+          label: const Text('Return to editor (Alt+E)'),
         ),
-        TextButton(
+        TextButton.icon(
           onPressed: () =>
               Navigator.pop(context, EditorConflictDecision.reloadAndDiscard),
-          child: const Text('Reload current and discard draft (Alt+R)'),
+          icon: const Icon(ViewerIcons.reload),
+          label: const Text('Reload current and discard draft (Alt+R)'),
         ),
-        TextButton(
+        TextButton.icon(
           onPressed: () =>
               Navigator.pop(context, EditorConflictDecision.review),
-          child: const Text('Review against current (Alt+V)'),
+          icon: const Icon(ViewerIcons.review),
+          label: const Text('Review against current (Alt+V)'),
         ),
       ],
     ),

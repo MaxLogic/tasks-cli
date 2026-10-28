@@ -26,6 +26,8 @@ import '../data/settings_store.dart';
 import 'accessible_virtual_list.dart';
 import 'app_shell.dart';
 import 'body_text.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'editor_dialogs.dart';
 import 'editor_form.dart';
@@ -35,6 +37,47 @@ import 'workspace_model.dart';
 
 /// How long a read may run before the pane says it is still loading.
 const Duration viewerSlowReadAfter = Duration(milliseconds: 500);
+
+/// Layout changes snap the bar to its new geometry. Only changing tabs may
+/// slide it; ordinary model rebuilds must not interrupt an in-flight slide.
+class _TabUnderline extends StatefulWidget {
+  const _TabUnderline({
+    required this.index,
+    required this.tabWidth,
+    required this.animate,
+    required this.child,
+  });
+  final int index;
+  final double tabWidth;
+  final bool animate;
+  final Widget child;
+  @override
+  State<_TabUnderline> createState() => _TabUnderlineState();
+}
+
+class _TabUnderlineState extends State<_TabUnderline> {
+  bool _slide = false;
+  @override
+  void didUpdateWidget(_TabUnderline oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabWidth != widget.tabWidth || !widget.animate) {
+      _slide = false;
+    } else if (oldWidget.index != widget.index) {
+      _slide = true;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedPositioned(
+    left: widget.index * widget.tabWidth,
+    bottom: 0,
+    width: widget.tabWidth,
+    height: 3,
+    duration: _slide ? ViewerMotion.long : Duration.zero,
+    curve: ViewerMotion.enter,
+    child: widget.child,
+  );
+}
 
 /// Task details region bound to one workspace model.
 class ViewerDetailsPane extends StatefulWidget {
@@ -75,6 +118,12 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   TaskDetailController? _boundController;
   String? _announcedNotice;
   bool _attachmentsActive = false;
+  Object? _paintTask;
+  int _paintTab = 0;
+  double _tabDirection = 1;
+  bool _samePaintTask = false;
+  final _copyReferenceFlash = ViewerFlashController();
+  final _copyDraftFlash = ViewerFlashController();
   AttachmentController? _attachments;
   String? _attachmentSelectionProject;
   int? _attachmentSelectionTask;
@@ -164,6 +213,8 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     widget.api.registerScopeCommands(CommandScope.statusBar, null);
     widget.model.removeListener(_syncExternalContent);
     _slowReadTimer?.cancel();
+    _copyReferenceFlash.dispose();
+    _copyDraftFlash.dispose();
     _editorFocus.dispose();
     _editActionFocus.dispose();
     _markDoneActionFocus.dispose();
@@ -864,6 +915,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     await Clipboard.setData(
       ClipboardData(text: '${detail.canonicalId}: ${detail.title}'),
     );
+    if (mounted) _copyReferenceFlash.flash();
     widget.api.announce('Task reference copied', clipId: 'reference_copied');
   }
 
@@ -1046,67 +1098,86 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           }
           return _buildMessage('Loading task ${state.canonicalTaskId}');
         }
-        // The editor replaces Details and the tab strip, so a half-written
-        // task can never sit next to a read view that claims it is stored.
-        if (_editor.isEditing) {
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              final budget = viewerPaneBudgetFor(
-                context,
-                constraints.maxHeight,
-              );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  ViewerPaneRegion(
-                    maxHeight: budget.header,
-                    child: _buildHeader(context, state, detail),
-                  ),
-                  Expanded(child: _buildEditor(context)),
-                ],
-              );
-            },
-          );
+        final identity = (state.projectId, state.taskId);
+        final tabIndex = _attachmentsActive ? 4 : state.tab.index;
+        _samePaintTask = _paintTask == identity;
+        if (_samePaintTask && tabIndex != _paintTab) {
+          _tabDirection = (tabIndex - _paintTab).sign.toDouble();
         }
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                ViewerPaneRegion(
-                  maxHeight: budget.header,
-                  child: _buildHeader(context, state, detail),
+        _paintTask = identity;
+        _paintTab = tabIndex;
+        return ViewerEnterTransition(
+          transitionKey: (identity, _editor.isEditing),
+          animate: _samePaintTask,
+          axis: Axis.vertical,
+          distance: 8,
+          duration: ViewerMotion.medium,
+          child: _buildLoaded(context, state, detail),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoaded(
+    BuildContext context,
+    TaskDetailController state,
+    TaskDetail detail,
+  ) {
+    // The editor replaces Details and the tab strip, so a half-written
+    // task can never sit next to a read view that claims it is stored.
+    if (_editor.isEditing) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              ViewerPaneRegion(
+                maxHeight: budget.header,
+                child: _buildHeader(context, state, detail),
+              ),
+              Expanded(child: _buildEditor(context)),
+            ],
+          );
+        },
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            ViewerPaneRegion(
+              maxHeight: budget.header,
+              child: _buildHeader(context, state, detail),
+            ),
+            if (state.detailIsStale)
+              ViewerPaneRegion(
+                maxHeight: budget.status,
+                child: ViewerStatusLine(
+                  text:
+                      'Showing the last confirmed read of '
+                      '${detail.canonicalId}.',
+                  detail: state.loadError?.message,
+                  warning: true,
                 ),
-                if (state.detailIsStale)
-                  ViewerPaneRegion(
-                    maxHeight: budget.status,
-                    child: ViewerStatusLine(
-                      text:
-                          'Showing the last confirmed read of '
-                          '${detail.canonicalId}.',
-                      detail: state.loadError?.message,
-                      warning: true,
-                    ),
-                  )
-                else if (state.isLoading)
-                  ViewerPaneRegion(
-                    maxHeight: budget.status,
-                    child: const ViewerStatusLine(
-                      text: 'Refreshing this task',
-                      detail:
-                          'The text below stays readable while the read runs.',
-                    ),
-                  ),
-                ViewerPaneRegion(
-                  maxHeight: budget.footer,
-                  child: _buildTabBar(context, state),
+              )
+            else if (state.isLoading)
+              ViewerPaneRegion(
+                maxHeight: budget.status,
+                child: const ViewerStatusLine(
+                  text: 'Refreshing this task',
+                  detail: 'The text below stays readable while the read runs.',
                 ),
-                const ViewerRule(),
-                Expanded(child: _buildPanel(context, state, detail)),
-              ],
-            );
-          },
+              ),
+            ViewerPaneRegion(
+              maxHeight: budget.footer,
+              child: _buildTabBar(context, state),
+            ),
+            const ViewerRule(),
+            Expanded(child: _buildPanel(context, state, detail)),
+          ],
         );
       },
     );
@@ -1167,6 +1238,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       },
       onCancel: _cancelEdit,
       onCopyDraft: _copyDraft,
+      copyFlash: _copyDraftFlash,
       onRetryReconciliation: _retryReconciliation,
       onCommand: (id) => widget.api.dispatchFromScope(CommandScope.details, id),
     );
@@ -1188,6 +1260,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
         '${field.wireName}: ${draft.textOf(field)}',
     ];
     await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+    if (mounted) _copyDraftFlash.flash();
     widget.api.announce('Draft copied to the clipboard.', dynamic: true);
   }
 
@@ -1247,10 +1320,11 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
               children: <Widget>[
                 Tooltip(
                   message: 'F4',
-                  child: TextButton(
+                  child: TextButton.icon(
                     focusNode: _editActionFocus,
                     onPressed: () => unawaited(beginEdit()),
-                    child: const Text('Edit'),
+                    icon: const Icon(ViewerIcons.edit),
+                    label: const Text('Edit'),
                   ),
                 ),
                 Tooltip(
@@ -1262,7 +1336,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      TextButton(
+                      TextButton.icon(
                         focusNode: _markDoneActionFocus,
                         onPressed: _markDoneEnabled
                             ? () => unawaited(_markDone(fromHeader: true))
@@ -1271,7 +1345,8 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                         // and explains a refusal if the loaded list is stale.
                         // Windows' bridge omits Semantics.hint, so put the
                         // prerequisite text in the native accessible name.
-                        child: Semantics(
+                        icon: const Icon(ViewerIcons.markDone),
+                        label: Semantics(
                           label: markDoneHint == null
                               ? 'Mark done'
                               : 'Mark done. $markDoneHint',
@@ -1299,17 +1374,19 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                 ),
                 Tooltip(
                   message: 'Alt+C',
-                  child: TextButton(
+                  child: TextButton.icon(
                     onPressed: () => unawaited(_copyReference()),
-                    child: const Text('Copy reference'),
+                    icon: ViewerFlashIcon(controller: _copyReferenceFlash),
+                    label: const Text('Copy reference'),
                   ),
                 ),
                 if (state.canGoBack)
                   Tooltip(
                     message: 'Alt+Left',
-                    child: TextButton(
+                    child: TextButton.icon(
                       onPressed: () => unawaited(widget.model.goBack()),
-                      child: const Text('Back'),
+                      icon: const Icon(ViewerIcons.back),
+                      label: const Text('Back'),
                     ),
                   ),
               ],
@@ -1328,19 +1405,39 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       explicitChildNodes: true,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-        // The tab row is stretched so every tab is the same height; the
-        // intrinsic pass keeps that working when the row scrolls inside the
-        // pane's capped tab region.
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              for (final tab in TaskDetailTab.values)
-                Expanded(child: _buildTab(context, state, tab)),
-              if (_hasAttachments)
-                Expanded(child: _buildAttachmentTab(context)),
-            ],
-          ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width =
+                constraints.maxWidth /
+                (TaskDetailTab.values.length + (_hasAttachments ? 1 : 0));
+            return Stack(
+              children: [
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final tab in TaskDetailTab.values)
+                        Expanded(child: _buildTab(context, state, tab)),
+                      if (_hasAttachments)
+                        Expanded(child: _buildAttachmentTab(context)),
+                    ],
+                  ),
+                ),
+                _TabUnderline(
+                  index: _paintTab,
+                  tabWidth: width,
+                  animate: _samePaintTask && ViewerMotion.enabled(context),
+                  child: IgnorePointer(
+                    child: ExcludeSemantics(
+                      child: ColoredBox(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -1373,17 +1470,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           child: InkWell(
             onTap: _activateAttachments,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    width: 3,
-                    color: _attachmentsActive
-                        ? Theme.of(context).colorScheme.primary
-                        : Colors.transparent,
-                  ),
-                ),
-              ),
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 7),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1432,17 +1519,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           child: InkWell(
             onTap: () => _activateTab(tab),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    width: 3,
-                    color: selected
-                        ? theme.colorScheme.primary
-                        : Colors.transparent,
-                  ),
-                ),
-              ),
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 7),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
@@ -1474,25 +1551,30 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       role: SemanticsRole.tabPanel,
       container: true,
       explicitChildNodes: true,
-      child: _attachmentsActive && _hasAttachments
-          ? AttachmentPanel(
-              key: _attachmentPanelKey,
-              api: widget.api,
-              controller: _attachmentController(detail),
-            )
-          : switch (state.tab) {
-              TaskDetailTab.details => _buildDetailsPanel(
-                context,
-                state,
-                detail,
-              ),
-              TaskDetailTab.dependencies => _buildDependenciesPanel(
-                context,
-                state,
-              ),
-              TaskDetailTab.history => _buildHistoryPanel(context, state),
-              TaskDetailTab.rules => _buildRulesPanel(context, detail),
-            },
+      child: ViewerEnterTransition(
+        transitionKey: ((state.projectId, state.taskId), _paintTab),
+        animate: _samePaintTask,
+        direction: _tabDirection,
+        child: _attachmentsActive && _hasAttachments
+            ? AttachmentPanel(
+                key: _attachmentPanelKey,
+                api: widget.api,
+                controller: _attachmentController(detail),
+              )
+            : switch (state.tab) {
+                TaskDetailTab.details => _buildDetailsPanel(
+                  context,
+                  state,
+                  detail,
+                ),
+                TaskDetailTab.dependencies => _buildDependenciesPanel(
+                  context,
+                  state,
+                ),
+                TaskDetailTab.history => _buildHistoryPanel(context, state),
+                TaskDetailTab.rules => _buildRulesPanel(context, detail),
+              },
+      ),
     );
   }
 
@@ -1582,16 +1664,18 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
             children: <Widget>[
               Tooltip(
                 message: 'Alt+N',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: () => _findStep(next: true),
-                  child: const Text('Next match'),
+                  icon: const Icon(ViewerIcons.nextMatch),
+                  label: const Text('Next match'),
                 ),
               ),
               Tooltip(
                 message: 'Alt+P',
-                child: TextButton(
+                child: TextButton.icon(
                   onPressed: () => _findStep(next: false),
-                  child: const Text('Previous match'),
+                  icon: const Icon(ViewerIcons.previousMatch),
+                  label: const Text('Previous match'),
                 ),
               ),
             ],
@@ -1763,17 +1847,19 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                 : '${state.historyEvents.length} events loaded',
             style: Theme.of(context).textTheme.bodySmall,
           ),
-          TextButton(
+          TextButton.icon(
             onPressed: state.historyHasMore ? _loadMoreHistory : null,
-            child: Text(
+            icon: const Icon(ViewerIcons.expand),
+            label: Text(
               state.historyHasMore ? 'Load more events' : 'No more events',
             ),
           ),
           Tooltip(
             message: 'Alt+E',
-            child: TextButton(
+            child: TextButton.icon(
               onPressed: _snapshotFocus.requestFocus,
-              child: const Text('Snapshot text'),
+              icon: const Icon(ViewerIcons.snapshot),
+              label: const Text('Snapshot text'),
             ),
           ),
         ],

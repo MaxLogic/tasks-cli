@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'package:flutter/services.dart';
 import '../data/models.dart';
 import 'attachment_dialogs.dart' show AttachmentDialogFrame;
@@ -66,7 +68,27 @@ class AttachmentPreviewDialog extends StatefulWidget {
       _AttachmentPreviewDialogState();
 }
 
-class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
+class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _zoomDriver =
+      AnimationController(vsync: this, duration: ViewerMotion.medium)
+        ..addListener(() {
+          final tween = _zoomTween;
+          if (tween != null) {
+            transform.value = tween.transform(
+              ViewerMotion.move.transform(_zoomDriver.value),
+            );
+          }
+        });
+  Matrix4Tween? _zoomTween;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!ViewerMotion.enabled(context) && _zoomDriver.isAnimating) {
+      _zoomDriver.value = 1;
+    }
+  }
+
   final transform = TransformationController();
   Future<AttachmentTextPreview>? text;
   bool tail = false;
@@ -92,6 +114,7 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
   @override
   void initState() {
     super.initState();
+    _zoomDriver.value = 0;
     if (widget.item.kind == 'text') _read(false);
     if (image) _loadImageSize();
   }
@@ -156,13 +179,21 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
   void _zoom(double value) {
     setState(() {
       zoom = value.clamp(0.00001, 16);
-      transform.value = Matrix4.diagonal3Values(zoom, zoom, 1);
+      final target = Matrix4.diagonal3Values(zoom, zoom, 1);
+      if (ViewerMotion.enabled(context)) {
+        _zoomTween = Matrix4Tween(begin: transform.value.clone(), end: target);
+        _zoomDriver.forward(from: 0);
+      } else {
+        _zoomDriver.stop();
+        transform.value = target;
+      }
     });
     widget.announce('Zoom ${(zoom * 100).round()} percent');
   }
 
   @override
   void dispose() {
+    _zoomDriver.dispose();
     contentFocus.dispose();
     transform.dispose();
     textController.dispose();
@@ -200,13 +231,15 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
             : _fallback(),
       ),
       actions: [
-        TextButton(
+        TextButton.icon(
           onPressed: widget.onSaveAs,
-          child: const Text('Save as (Alt+S)'),
+          icon: const Icon(ViewerIcons.saveAs),
+          label: const Text('Save as (Alt+S)'),
         ),
-        TextButton(
+        TextButton.icon(
           onPressed: () => Navigator.pop(context),
-          child: const Text('Close (Alt+C)'),
+          icon: const Icon(ViewerIcons.close),
+          label: const Text('Close (Alt+C)'),
         ),
       ],
     ),
@@ -261,18 +294,25 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
                 spacing: 8,
                 runSpacing: 4,
                 children: [
-                  TextButton(
+                  TextButton.icon(
                     onPressed: () => _zoom(zoom * 1.25),
-                    child: const Text('Zoom in'),
+                    icon: const Icon(ViewerIcons.zoomIn),
+                    label: const Text('Zoom in'),
                   ),
-                  TextButton(
+                  TextButton.icon(
                     onPressed: () => _zoom(zoom / 1.25),
-                    child: const Text('Zoom out'),
+                    icon: const Icon(ViewerIcons.zoomOut),
+                    label: const Text('Zoom out'),
                   ),
-                  TextButton(onPressed: _fit, child: const Text('Fit')),
-                  TextButton(
+                  TextButton.icon(
+                    onPressed: _fit,
+                    icon: const Icon(ViewerIcons.fit),
+                    label: const Text('Fit'),
+                  ),
+                  TextButton.icon(
                     onPressed: () => _zoom(1),
-                    child: const Text('Actual size'),
+                    icon: const Icon(ViewerIcons.actualSize),
+                    label: const Text('Actual size'),
                   ),
                 ],
               ),
@@ -334,13 +374,15 @@ class _AttachmentPreviewDialogState extends State<AttachmentPreviewDialog> {
           spacing: 8,
           runSpacing: 4,
           children: [
-            TextButton(
+            TextButton.icon(
               onPressed: () => setState(() => _read(false)),
-              child: const Text('Head (Alt+H)'),
+              icon: const Icon(ViewerIcons.head),
+              label: const Text('Head (Alt+H)'),
             ),
-            TextButton(
+            TextButton.icon(
               onPressed: () => setState(() => _read(true)),
-              child: const Text('Tail (Alt+T)'),
+              icon: const Icon(ViewerIcons.tail),
+              label: const Text('Tail (Alt+T)'),
             ),
           ],
         ),

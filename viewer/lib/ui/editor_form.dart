@@ -14,6 +14,8 @@ import 'package:flutter/material.dart';
 import '../controllers/editor_controller.dart';
 import '../data/editor_models.dart';
 import '../data/models.dart';
+import 'viewer_icons.dart';
+import 'viewer_motion.dart';
 import 'commands.dart';
 import 'dialog_scope.dart';
 import 'viewer_controls.dart';
@@ -72,10 +74,12 @@ class ViewerEditorForm extends StatefulWidget {
     required this.onCopyDraft,
     required this.onRetryReconciliation,
     this.onCommand,
+    this.copyFlash,
     this.statusValues = viewerTaskStatuses,
     this.priorityValues = viewerTaskPriorities,
   });
 
+  final ViewerFlashController? copyFlash;
   final ViewerEditorController editor;
   final ViewerEditorFocusSet focus;
 
@@ -266,9 +270,12 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    TextButton(
+                    TextButton.icon(
                       onPressed: () => unawaited(widget.onCopyDraft()),
-                      child: const Text('Copy draft'),
+                      icon: widget.copyFlash == null
+                          ? const Icon(ViewerIcons.copy)
+                          : ViewerFlashIcon(controller: widget.copyFlash!),
+                      label: const Text('Copy draft'),
                     ),
                   ],
                 ),
@@ -338,21 +345,25 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
                 children: <Widget>[
                   Tooltip(
                     message: 'Ctrl+S',
-                    child: FilledButton(
+                    child: FilledButton.icon(
                       focusNode: widget.focus.save,
                       onPressed: editor.saveEnabled
                           ? () => unawaited(widget.onSave())
                           : null,
-                      child: Text(editor.isSaving ? 'Saving' : 'Save (Ctrl+S)'),
+                      icon: Icon(
+                        editor.isSaving ? ViewerIcons.busy : ViewerIcons.save,
+                      ),
+                      label: Text(editor.isSaving ? 'Saving' : 'Save (Ctrl+S)'),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Tooltip(
                     message: 'Alt+C',
-                    child: TextButton(
+                    child: TextButton.icon(
                       focusNode: widget.focus.cancel,
                       onPressed: () => unawaited(widget.onCancel()),
-                      child: const Text('Cancel (Alt+C)'),
+                      icon: const Icon(ViewerIcons.close),
+                      label: const Text('Cancel (Alt+C)'),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -394,9 +405,12 @@ class _ViewerEditorFormState extends State<ViewerEditorForm> {
             ),
           ),
           const SizedBox(width: 8),
-          TextButton(
+          TextButton.icon(
             onPressed: () => unawaited(widget.onRetryReconciliation()),
-            child: Text(
+            icon: Icon(
+              editor.usesRemoteReceipts ? ViewerIcons.sync : ViewerIcons.retry,
+            ),
+            label: Text(
               editor.usesRemoteReceipts ? 'Check pending change' : 'Retry',
             ),
           ),

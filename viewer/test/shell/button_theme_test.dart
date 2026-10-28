@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:tasks_viewer/app.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/ui/editor_dialogs.dart';
+import 'package:tasks_viewer/ui/button_theme.dart';
 
 import '../support/viewer_test_support.dart';
 
@@ -17,6 +18,150 @@ double contrast(Color a, Color b) {
 }
 
 void main() {
+  testWidgets('decorative icons and labels meet rendered and inverted contrast', (
+    tester,
+  ) async {
+    Color invert(Color c) =>
+        Color.from(alpha: c.a, red: 1 - c.r, green: 1 - c.g, blue: 1 - c.b);
+    for (final mode in [
+      ViewerThemeMode.light,
+      ViewerThemeMode.dark,
+      ViewerThemeMode.highContrastLight,
+      ViewerThemeMode.highContrastDark,
+    ]) {
+      await tester.pumpWidget(
+        TasksViewerApp(
+          key: UniqueKey(),
+          environment: viewerTestEnvironment(suffix: 'contrast'),
+          initialSettings: ViewerSettingsDraft(themeMode: mode),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final theme = Theme.of(tester.element(find.text('Tasks Viewer')));
+      late BuildContext buttonContext;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: Scaffold(
+            body: Builder(
+              builder: (context) {
+                buttonContext = context;
+                return Wrap(
+                  children: [
+                    FilledButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Filled'),
+                    ),
+                    FilledButton.tonalIcon(
+                      onPressed: () {},
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Tonal'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Outlined'),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(Icons.save_outlined),
+                      label: const Text('Text'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () {},
+                      style: viewerDestructiveButtonStyle(context),
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Destructive'),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final label in [
+        'Filled',
+        'Tonal',
+        'Outlined',
+        'Text',
+        'Destructive',
+      ]) {
+        final button = find
+            .ancestor(
+              of: find.text(label),
+              matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+            )
+            .first;
+        final icon = find.descendant(of: button, matching: find.byType(Icon));
+        final foreground = IconTheme.of(tester.element(icon)).color!;
+        final textColour = DefaultTextStyle.of(
+          tester.element(find.text(label)),
+        ).style.color;
+        expect(foreground, textColour);
+        expect(tester.widget<Icon>(icon).semanticLabel, isNull);
+        final material = tester.widget<Material>(
+          find.descendant(of: button, matching: find.byType(Material)).first,
+        );
+        final background = Color.alphaBlend(
+          material.color ?? Colors.transparent,
+          Theme.of(buttonContext).colorScheme.surface,
+        );
+        final normal = contrast(foreground, background);
+        final inverted = contrast(invert(foreground), invert(background));
+        // Retained output records all 20 role/theme pairs for owner review.
+        debugPrint(
+          'contrast ${mode.name} $label normal=${normal.toStringAsFixed(3)} inverted=${inverted.toStringAsFixed(3)}',
+        );
+        expect(normal, greaterThanOrEqualTo(4.5));
+        expect(inverted, greaterThanOrEqualTo(3));
+      }
+    }
+  });
+
+  testWidgets(
+    'action icons share label colours and preserve accessible names',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+
+      await tester.pumpWidget(
+        TasksViewerApp(environment: viewerTestEnvironment(suffix: 'icons')),
+      );
+      await tester.pumpAndSettle();
+      final theme = Theme.of(tester.element(find.text('Tasks Viewer')));
+      for (final style in [
+        theme.textButtonTheme.style!,
+        theme.outlinedButtonTheme.style!,
+        theme.filledButtonTheme.style!,
+      ]) {
+        expect(style.iconSize?.resolve({}), 18);
+        for (final states in <Set<WidgetState>>[
+          {},
+          {WidgetState.hovered},
+          {WidgetState.focused},
+          {WidgetState.pressed},
+          {WidgetState.disabled},
+        ]) {
+          expect(
+            style.iconColor?.resolve(states),
+            style.foregroundColor?.resolve(states),
+          );
+        }
+      }
+      await tester.tap(find.byIcon(Icons.settings_outlined));
+      await tester.pumpAndSettle();
+      final save = find.widgetWithText(FilledButton, 'Save (Ctrl+S)');
+      expect(
+        find.descendant(of: save, matching: find.byIcon(Icons.save_outlined)),
+        findsOneWidget,
+      );
+      expect(tester.getSemantics(save).label, 'Save (Ctrl+S)');
+      semantics.dispose();
+    },
+  );
+
   for (final mode in [
     ViewerThemeMode.dark,
     ViewerThemeMode.highContrastDark,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'viewer_motion.dart';
 
 /// A separate 3px ring, with a 2px contrasting gap. It paints outside the
 /// unchanged button boundary, so focus never changes the role's fill or size.
@@ -41,6 +42,8 @@ ButtonStyle viewerDestructiveButtonStyle(BuildContext context) {
   final colors = Theme.of(context).colorScheme;
   return ButtonStyle(
     foregroundColor: WidgetStatePropertyAll(colors.onErrorContainer),
+    iconColor: WidgetStatePropertyAll(colors.onErrorContainer),
+    animationDuration: ViewerMotion.of(context, ViewerMotion.short),
     backgroundColor: WidgetStatePropertyAll(colors.errorContainer),
     side: WidgetStatePropertyAll(BorderSide(color: colors.onErrorContainer)),
     overlayColor: WidgetStateProperty.resolveWith(
@@ -57,7 +60,11 @@ ButtonStyle viewerDestructiveButtonStyle(BuildContext context) {
 
 /// Container and state treatments only. SDK widgets still own focus, actions,
 /// accessible names, roles and disabled semantics.
-ThemeData viewerButtonTheme(ThemeData theme, {required bool highContrast}) {
+ThemeData viewerButtonTheme(
+  ThemeData theme, {
+  required bool highContrast,
+  bool motionOff = false,
+}) {
   final colors = theme.colorScheme;
   ButtonStyle style({
     required bool filled,
@@ -66,6 +73,8 @@ ThemeData viewerButtonTheme(ThemeData theme, {required bool highContrast}) {
   }) {
     return ButtonStyle(
       visualDensity: VisualDensity.standard,
+      iconSize: const WidgetStatePropertyAll(18),
+      animationDuration: motionOff ? Duration.zero : ViewerMotion.short,
       minimumSize: WidgetStatePropertyAll(
         icon ? const Size(32, 32) : const Size(64, 36),
       ),
@@ -104,6 +113,16 @@ ThemeData viewerButtonTheme(ThemeData theme, {required bool highContrast}) {
             : colors.surfaceContainerLow;
       }),
       foregroundColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.disabled)) {
+          return colors.onSurface.withValues(alpha: .38);
+        }
+        return filled
+            ? null
+            : secondary
+            ? colors.onSecondaryContainer
+            : colors.onSurface;
+      }),
+      iconColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.disabled)) {
           return colors.onSurface.withValues(alpha: .38);
         }

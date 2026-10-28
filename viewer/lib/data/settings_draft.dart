@@ -16,6 +16,8 @@ enum ViewerThemeMode {
   highContrastDark,
 }
 
+enum ViewerAnimations { followWindows, off }
+
 /// Text-size choices offered by Settings (design.md section 3).
 const List<int> viewerTextScalePercentChoices = <int>[100, 125, 150, 175, 200];
 
@@ -26,6 +28,7 @@ class ViewerSettingsDraft {
     this.dataRoot,
     this.themeMode = ViewerThemeMode.system,
     this.textScalePercent = 100,
+    this.animations = ViewerAnimations.followWindows,
     this.projectsPanePercent = 22,
     this.tasksPanePercent = 33,
     this.detailsPanePercent = 45,
@@ -45,6 +48,7 @@ class ViewerSettingsDraft {
 
   final ViewerThemeMode themeMode;
   final int textScalePercent;
+  final ViewerAnimations animations;
   final int projectsPanePercent;
   final int tasksPanePercent;
   final int detailsPanePercent;
@@ -65,6 +69,7 @@ class ViewerSettingsDraft {
     bool clearDataRoot = false,
     ViewerThemeMode? themeMode,
     int? textScalePercent,
+    ViewerAnimations? animations,
     int? projectsPanePercent,
     int? tasksPanePercent,
     int? detailsPanePercent,
@@ -80,6 +85,7 @@ class ViewerSettingsDraft {
       dataRoot: clearDataRoot ? null : (dataRoot ?? this.dataRoot),
       themeMode: themeMode ?? this.themeMode,
       textScalePercent: textScalePercent ?? this.textScalePercent,
+      animations: animations ?? this.animations,
       projectsPanePercent: projectsPanePercent ?? this.projectsPanePercent,
       tasksPanePercent: tasksPanePercent ?? this.tasksPanePercent,
       detailsPanePercent: detailsPanePercent ?? this.detailsPanePercent,

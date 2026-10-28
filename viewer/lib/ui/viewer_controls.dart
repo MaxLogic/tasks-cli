@@ -8,6 +8,7 @@ library;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'viewer_icons.dart';
 
 import '../data/models.dart';
 import 'app_shell.dart';
@@ -167,7 +168,11 @@ class ViewerFailureView extends StatelessWidget {
               ),
               if (onRetry != null) ...<Widget>[
                 const SizedBox(height: 12),
-                FilledButton(onPressed: onRetry, child: const Text('Retry')),
+                FilledButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(ViewerIcons.retry),
+                  label: const Text('Retry'),
+                ),
               ],
             ],
           ),
