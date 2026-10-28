@@ -39,8 +39,10 @@ macOS has not been built or tested. Portable packages contain everything needed
 at runtime, including SQLite and, for the viewer, its Flutter runtime and a
 matching CLI.
 
-See [installation](installation.md) for checksum verification, PATH setup,
-building from source and a first-run example.
+[Download portable packages](https://github.com/MaxLogic/tasks-cli/releases/latest)
+for the Windows CLI, Linux CLI or Windows viewer. See [installation](installation.md)
+for checksum verification, PATH setup, building from source and a first-run
+example. The source is at [MaxLogic/tasks-cli](https://github.com/MaxLogic/tasks-cli).
 
 ## Quick tour
 
