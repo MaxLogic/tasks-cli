@@ -26,7 +26,7 @@ outside Git. A project identity alone does not transfer a local backlog to
 another machine.
 
 For a disposable store and two workers supervised by one architect, follow
-`integration/architect-workflow.md` in the tasks-cli source.
+https://github.com/MaxLogic/tasks-cli/blob/main/integration/architect-workflow.md.
 Every command there names a temporary data root.
 
 In WSL, keep native Linux storage on the Linux filesystem. To access a
@@ -34,5 +34,6 @@ Windows-owned local store, set `TASKS_WINDOWS_EXE` to your Windows `tasks.exe`
 path and let the Linux CLI delegate. Never open the same live SQLite database
 from native Windows and native Linux processes.
 
-Installation, backups and remote setup: `installation.md` in the tasks-cli source.
+Installation, backups and remote setup:
+https://github.com/MaxLogic/tasks-cli/blob/main/installation.md.
 The MIT license and dependency notices are included in this archive.

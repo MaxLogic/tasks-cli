@@ -3,7 +3,7 @@
 The CLI is a native executable. Local use requires no account, server or model
 API key. SQLite is bundled. Rust and a C compiler are build dependencies only.
 
-Download portable archives from the project's releases page.
+Download portable archives from [GitHub Releases](https://github.com/MaxLogic/tasks-cli/releases/latest).
 Local use starts with extraction; a source build is optional.
 
 ## Download and install
@@ -58,7 +58,7 @@ Install rustup and the native C build tools. On Windows, use the MSVC C++ build
 tools and Windows SDK. On Ubuntu, install the distribution's C build toolchain.
 The checkout pins Rust in `rust-toolchain.toml`; keep `Cargo.lock` intact.
 
-Clone the repository, then build from
+Clone [the repository](https://github.com/MaxLogic/tasks-cli), then build from
 its source directory on Windows:
 
 ```powershell
