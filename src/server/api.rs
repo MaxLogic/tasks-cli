@@ -97,7 +97,12 @@ fn not_found() -> AppError {
     AppError::NotFound("unknown server project".into())
 }
 pub(crate) fn catalogued(server: &OwnedServer, id: Uuid) -> Result<bool, ServiceError> {
-    Ok(server.connect()?.query_row(
+    let _catalog = super::timing::Phase::Catalog.start();
+    let connection = server
+        .catalog_connection
+        .lock()
+        .map_err(|_| AppError::Database("server catalog connection lock poisoned".into()))?;
+    Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1)",
         [id.to_string()],
         |r| r.get(0),
@@ -786,7 +791,12 @@ pub fn handle(
             Err(error) => return response(Err(error)),
         };
         let mut store = Store::open_readonly(server.data_root(), &project.to_string())?;
-        return response(query(server, &mut store, input));
+        let result = query(server, &mut store, input);
+        {
+            let _close = super::timing::Phase::Close.start();
+            drop(store);
+        }
+        return response(result);
     }
     if parts.len() == 5 && parts[4] == "export" && *method == Method::GET {
         return Err(ServiceError::Validation(

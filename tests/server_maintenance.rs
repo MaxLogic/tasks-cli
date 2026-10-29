@@ -163,6 +163,37 @@ fn super_command() -> std::process::Command {
 }
 
 #[test]
+fn restored_authority_reenters_wal_on_admin_open() {
+    let base = tempfile::tempdir().unwrap();
+    let source = base.path().join("source");
+    let server = OwnedServer::initialize(&source).unwrap();
+    let server_id = server.server_id();
+    let backup = base.path().join("backup");
+    maintenance::backup(&server, &backup).unwrap();
+    drop(server);
+    let restored = base.path().join("restored");
+    maintenance::restore(&backup, &restored).unwrap();
+    let journal_mode = || {
+        Connection::open(restored.join("server.sqlite"))
+            .unwrap()
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap()
+    };
+    assert_eq!(journal_mode(), "delete", "backup must be standalone");
+    let output = super_command()
+        .args(["--data-root", restored.to_str().unwrap(), "admin", "info"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(journal_mode(), "wal", "startup must restore WAL mode");
+    assert_eq!(OwnedServer::open(&restored).unwrap().server_id(), server_id);
+}
+
+#[test]
 fn backup_restores_catalog_credentials_receipts_and_unpublished_store() {
     let base = tempfile::tempdir().unwrap();
     let source = base.path().join("server");

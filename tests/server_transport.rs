@@ -504,10 +504,10 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(lines.len(), 3);
-    for line in &lines {
+    for (index, line) in lines.iter().enumerate() {
         assert!(Uuid::parse_str(line["request_id"].as_str().unwrap()).is_ok());
         assert!(line["duration_ms"].is_u64());
-        for field in [
+        let phases = [
             "auth_ms",
             "credential_ms",
             "signature_ms",
@@ -519,14 +519,42 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
             "open_ms",
             "schema_ms",
             "handler_ms",
+            "catalog_ms",
+            "close_ms",
             "query_ms",
             "encode_ms",
             "queue_ms",
-        ] {
+        ];
+        let mut expected = phases
+            .into_iter()
+            .chain([
+                "request_id",
+                "actor_id",
+                "project_id",
+                "operation",
+                "duration_ms",
+                "outcome",
+            ])
+            .collect::<std::collections::BTreeSet<_>>();
+        if index == 2 {
+            expected.extend(["item_count", "stored_bytes", "declared_original_bytes"]);
+        }
+        assert_eq!(
+            line.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected,
+            "request log must contain only the documented fields"
+        );
+        for field in phases {
             assert!(
                 line[field].as_f64().is_some_and(|ms| ms >= 0.0),
                 "{field}: {line}"
             );
+            let micros = line[field].as_f64().unwrap() * 1000.0;
+            assert!((micros - micros.round()).abs() < 1e-6, "{field}: {line}");
         }
     }
     assert_eq!(lines[0]["actor_id"], "owner");
@@ -551,6 +579,8 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
         "open_ms",
         "schema_ms",
         "handler_ms",
+        "catalog_ms",
+        "close_ms",
         "query_ms",
         "encode_ms",
         "queue_ms",

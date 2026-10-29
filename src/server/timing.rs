@@ -5,20 +5,43 @@ use std::{cell::Cell, time::Instant};
 
 #[derive(Clone, Copy, Default, Serialize)]
 pub(super) struct Timings {
+    #[serde(serialize_with = "milliseconds")]
     pub auth_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub credential_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub signature_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub nonce_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub nonce_open_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub nonce_sql_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub nonce_commit_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub nonce_close_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub open_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub schema_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub handler_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
+    pub catalog_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
+    pub close_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub query_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub encode_ms: f64,
+    #[serde(serialize_with = "milliseconds")]
     pub queue_ms: f64,
+}
+
+// Round only at serialization, after all captured worker intervals are added.
+fn milliseconds<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64((value * 1000.0).round() / 1000.0)
 }
 
 thread_local! {
@@ -37,6 +60,8 @@ pub(crate) enum Phase {
     Open,
     Schema,
     Handler,
+    Catalog,
+    Close,
     Query,
     Encode,
 }
@@ -69,6 +94,8 @@ impl Drop for Timer {
                     Phase::Open => &mut timings.open_ms,
                     Phase::Schema => &mut timings.schema_ms,
                     Phase::Handler => &mut timings.handler_ms,
+                    Phase::Catalog => &mut timings.catalog_ms,
+                    Phase::Close => &mut timings.close_ms,
                     Phase::Query => &mut timings.query_ms,
                     Phase::Encode => &mut timings.encode_ms,
                 };
@@ -115,6 +142,8 @@ impl Timings {
         self.open_ms += other.open_ms;
         self.schema_ms += other.schema_ms;
         self.handler_ms += other.handler_ms;
+        self.catalog_ms += other.catalog_ms;
+        self.close_ms += other.close_ms;
         self.query_ms += other.query_ms;
         self.encode_ms += other.encode_ms;
         self.queue_ms += other.queue_ms;

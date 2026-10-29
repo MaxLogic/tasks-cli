@@ -72,12 +72,13 @@ pub struct Registration {
 pub struct OwnedServer {
     root: PathBuf,
     id: Uuid,
-    // Keep the auth WAL open between operations without retaining a transaction
-    // or read snapshot. Otherwise every nonce commit is immediately followed by
-    // a last-connection checkpoint, unlink and later WAL recreation. Mutex only
-    // makes the idle Connection Sync; request workers never lock or use it.
+    // This query-only connection's shared main-file lock keeps the auth WAL
+    // open between operations, preventing last-close checkpoint/unlink work.
+    // Reuse it for short, serialized catalog lookups to avoid initializing a
+    // fresh WAL reader after every nonce commit. Never retain a transaction or
+    // read snapshot, or hold its mutex while opening/using a project Store.
     // Drop it before releasing root ownership (fields drop in declaration order).
-    _wal_anchor: std::sync::Mutex<Connection>,
+    catalog_connection: std::sync::Mutex<Connection>,
     _ownership: ExclusiveLock,
 }
 
@@ -117,7 +118,7 @@ impl OwnedServer {
         Ok(Self {
             root,
             id,
-            _wal_anchor: std::sync::Mutex::new(connection),
+            catalog_connection: std::sync::Mutex::new(connection),
             _ownership: ownership,
         })
     }
@@ -135,6 +136,7 @@ impl OwnedServer {
             root.join("server.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != 2 {
             return Err(ServiceError::Validation(
@@ -152,11 +154,21 @@ impl OwnedServer {
         if id.is_nil() {
             return Err(ServiceError::Validation("invalid stored server identity"));
         }
+        // SQLite-API backups are standalone DELETE-mode snapshots. Restore WAL
+        // before retaining the lifetime connection, including on admin opens.
+        let journal: String =
+            connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if journal != "wal" {
+            return Err(ServiceError::Validation(
+                "server authority requires WAL mode",
+            ));
+        }
+        connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         connection.pragma_update(None, "query_only", true)?;
         Ok(Self {
             root,
             id,
-            _wal_anchor: std::sync::Mutex::new(connection),
+            catalog_connection: std::sync::Mutex::new(connection),
             _ownership: ownership,
         })
     }

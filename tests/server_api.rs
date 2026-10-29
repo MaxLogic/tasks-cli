@@ -454,6 +454,31 @@ mod api_routes {
     }
 
     #[test]
+    fn catalog_reads_refresh_after_publication_across_workers() {
+        let f = ApiFixture::new();
+        let project = Uuid::new_v4();
+        let path = format!("/v1/projects/{project}/query");
+        let read = || f.request(Method::POST, &path, json!({"operation":"rules"}), None);
+        assert_eq!(read().status, 404);
+        assert_eq!(f.create(project).status, 200);
+        let expected = read();
+        assert_eq!(expected.status, 200);
+        // Sharing the catalog reader must neither retain the earlier missing
+        // snapshot nor hold its mutex while another worker opens a Store.
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let read = &read;
+                let expected = &expected;
+                scope.spawn(move || {
+                    for _ in 0..4 {
+                        assert_eq!(&read(), expected);
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
     fn attachment_viewer_operations_require_the_remote_attachment_capability() {
         let f = ApiFixture::new();
         let info = f.request(Method::GET, "/v1/info", json!(null), None);
