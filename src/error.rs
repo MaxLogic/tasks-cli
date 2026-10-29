@@ -4,6 +4,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
+    #[error("{0}")]
+    ClientUpgradeRequired(String),
+    #[error("{0}")]
+    ServerUpgradeRequired(String),
     #[error("{message}")]
     Coded {
         code: &'static str,
@@ -122,6 +126,8 @@ impl From<crate::attachment::AttachmentError> for AppError {
 impl AppError {
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ClientUpgradeRequired(_) => "client_upgrade_required",
+            Self::ServerUpgradeRequired(_) => "server_upgrade_required",
             Self::Coded { code, .. } => code,
             Self::Usage(_) => "usage",
             Self::DestinationExists(_) => "destination_exists",
@@ -148,6 +154,7 @@ impl AppError {
 
     pub fn exit_code(&self) -> i32 {
         match self {
+            Self::ClientUpgradeRequired(_) | Self::ServerUpgradeRequired(_) => 5,
             Self::Coded { exit, .. } => i32::from(*exit),
             Self::Usage(_) => 2,
             Self::DestinationExists(_) | Self::DestinationCollision(_) => 2,

@@ -18,13 +18,19 @@ pub enum SigningError {
     #[error("invalid signing input: {0}")]
     Validation(&'static str),
 }
-pub(crate) const COMPONENTS: [&str; 6] = [
+/// Protocol 2 makes version admission, attachments and request-bound receipts mandatory.
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const MIN_PROTOCOL_VERSION: u32 = 2;
+pub const MAX_PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_HEADER: &str = "x-tasks-protocol-version";
+pub(crate) const COMPONENTS: [&str; 7] = [
     "@method",
     "@path",
     "@query",
     "content-type",
     "content-digest",
     "x-tasks-server-id",
+    PROTOCOL_HEADER,
 ];
 pub struct SigningIdentity {
     pub credential_id: Uuid,
@@ -105,6 +111,11 @@ pub(crate) fn signature_base(
     };
     let mut base = format!("\"@method\": {method}\n\"@path\": {path}\n\"@query\": {query}");
     for name in &COMPONENTS[3..] {
+        // The verifier can authenticate a legacy request only to refuse it
+        // with an actionable upgrade error. Dispatch still requires version 2.
+        if *name == PROTOCOL_HEADER && !headers.contains_key(PROTOCOL_HEADER) {
+            continue;
+        }
         base.push_str(&format!("\n\"{name}\": {}", header(headers, name)?));
     }
     if mutation {
@@ -185,6 +196,7 @@ impl SigningIdentity {
             format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(body))),
         )?;
         insert("x-tasks-server-id", self.server_id.to_string())?;
+        insert(PROTOCOL_HEADER, PROTOCOL_VERSION.to_string())?;
         // Empty GETs need no framing header. Proxies may legitimately omit
         // Content-Length: 0, which would invalidate a signature covering it.
         // Keep length mandatory for uploads and signed for any download body;

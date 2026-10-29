@@ -39,6 +39,7 @@ fn create(f: &Fixture, project: &str, title: &str, deps: Option<&str>) -> Value 
     ok(run(&f.clients[0], &args))
 }
 
+#[cfg(feature = "test-hooks")]
 fn assert_attachment_operations(value: &Value, expected: bool) {
     let operations = value["operations"].as_array().unwrap();
     for operation in [
@@ -115,123 +116,6 @@ fn server_and_remote_viewer_attachment_advertisements_agree_with_capability_hook
     assert_attachment_operations(&ok(output)["data"], enabled);
 }
 
-#[test]
-fn remote_viewer_restricts_inconsistent_server_operations_by_server_capability() {
-    let f = Fixture::new();
-    let mut profile = tasks_cli::remote::config::load(&f.clients[0]).unwrap();
-    let client = tasks_cli::remote::client::RemoteClient::new(&profile).unwrap();
-    let info = client.info().unwrap();
-    let viewer = client
-        .read(http::Method::GET, "/v1/viewer/info", b"")
-        .unwrap();
-    assert_attachment_operations(&viewer["output"]["data"], true);
-    let project = f.project().to_string();
-    create(&f, &project, "capability target", None);
-    let query_route = format!("/v1/projects/{project}/query");
-    let listed = client
-        .read(
-            http::Method::POST,
-            &query_route,
-            &serde_json::to_vec(&tasks_cli::remote::protocol::ReadRequest::Attachments {
-                id: "1".into(),
-                all: false,
-                after: None,
-                limit: 100,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-    for case in [
-        "missing",
-        "without_attachments",
-        "capable",
-        "without_receipts",
-    ] {
-        let enabled = matches!(case, "capable" | "without_receipts");
-        let mut advertised = info.clone();
-        if case == "missing" {
-            advertised.as_object_mut().unwrap().remove("capabilities");
-        } else if case == "without_attachments" {
-            advertised["capabilities"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|v| v != "attachments-v1");
-        } else if case == "without_receipts" {
-            advertised["capabilities"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|v| v != "request-bound-receipts");
-        }
-        // Compatibility witness: an older server can return viewer operations
-        // that contradict /info. Only the client is under test in this case.
-        let gateway = support::https::TlsFixture::new(
-            "localhost",
-            false,
-            support::https::Reply::JsonRoutes(vec![
-                ("/v1/info".into(), advertised),
-                ("/v1/viewer/info".into(), viewer.clone()),
-                (query_route.clone(), listed.clone()),
-            ]),
-        );
-        let tasks_cli::remote::config::Profile::Remote {
-            server_url,
-            private_ca,
-            ..
-        } = &mut profile
-        else {
-            panic!("remote fixture")
-        };
-        *server_url = gateway.url();
-        *private_ca = gateway.options().private_ca;
-        tasks_cli::remote::config::save(&f.clients[0], &profile).unwrap();
-        assert_attachment_operations(
-            &ok(run(&f.clients[0], &["viewer", "info"]))["data"],
-            enabled,
-        );
-        let list = run(
-            &f.clients[0],
-            &["--project", &project, "attachment", "list", "1"],
-        );
-        if enabled {
-            assert_eq!(ok(list)["data"]["command"], "attachment_list", "{case}");
-        } else {
-            assert_eq!(list.status.code(), Some(5), "{case}");
-            let error: Value = serde_json::from_slice(&list.stderr).unwrap();
-            assert_eq!(error["error"]["code"], "remote_capability", "{case}");
-        }
-        if matches!(case, "missing" | "without_receipts") {
-            let legacy = tasks_cli::remote::client::RemoteClient::new(&profile).unwrap();
-            let denied = legacy
-                .write(
-                    &f.clients[0],
-                    http::Method::POST,
-                    &format!("/v1/projects/{project}/tasks"),
-                    json!({"title":"must not send"}),
-                )
-                .unwrap_err();
-            assert!(
-                denied.json().contains("remote_protocol"),
-                "{case}: {denied}"
-            );
-            if case == "without_receipts" {
-                let denied = legacy
-                    .write_binary(
-                        &f.clients[0],
-                        &format!("/v1/projects/{project}/tasks/1/attachments"),
-                        b"must not send",
-                        None,
-                    )
-                    .unwrap_err();
-                assert!(denied.json().contains("remote_protocol"), "{denied}");
-            }
-            assert!(tasks_cli::remote::pending::PendingStore::new(&f.clients[0])
-                .unwrap()
-                .list()
-                .unwrap()
-                .is_empty());
-        }
-    }
-}
 #[test]
 fn remote_viewer_catalog_paging_selection_history_and_attribution_keep_json_contracts() {
     let f = Fixture::new();

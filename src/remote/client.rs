@@ -17,7 +17,6 @@ pub struct RemoteClient {
     pub http: HttpsClient,
     pub server_id: Uuid,
     pub credential_id: Uuid,
-    capabilities: Option<super::capabilities::Capabilities>,
 }
 pub fn transport_error(error: ClientError) -> AppError {
     let code = match error {
@@ -87,6 +86,16 @@ fn parse_value(status: u16, mut value: Value) -> Result<Value, AppError> {
         .filter(|s| s.len() <= 4096)
         .ok_or_else(invalid_reply)?
         .to_string();
+    if let Some(error) = legacy_protocol_error(status, &value) {
+        return Err(error);
+    }
+    if status == 426 {
+        return match value["error"]["code"].as_str() {
+            Some("client_upgrade_required") => Err(AppError::ClientUpgradeRequired(message)),
+            Some("server_upgrade_required") => Err(AppError::ServerUpgradeRequired(message)),
+            _ => Err(invalid_reply()),
+        };
+    }
     let exit_code = match status {
         400 | 413 => 2,
         404 => 3,
@@ -98,6 +107,19 @@ fn parse_value(status: u16, mut value: Value) -> Result<Value, AppError> {
         payload: value,
         exit_code,
     })
+}
+
+/// Protocol-1 servers predate version admission. Their restricted signature
+/// verifier rejects the new covered component before any application dispatch.
+/// Recognize only that specific refusal, never a generic authentication error.
+fn legacy_protocol_error(status: u16, value: &Value) -> Option<AppError> {
+    (status == 401
+        && value["error"]["code"] == "authentication"
+        && value["error"]["message"] == "authentication failed: unexpected signed components")
+        .then(|| AppError::ServerUpgradeRequired(format!(
+            "update required: client protocol {}; server uses the protocol-1 signature profile; update tasks-server before using this client",
+            super::signing::PROTOCOL_VERSION
+        )))
 }
 pub fn api_output(value: Value) -> Result<ApiOutput, AppError> {
     let result: ApiOutput = serde_json::from_value(value).map_err(|_| invalid_reply())?;
@@ -141,81 +163,19 @@ impl RemoteClient {
             http,
             server_id: *server_id,
             credential_id: *credential_id,
-            capabilities: None,
         })
     }
-    pub(super) fn with_state(profile: &Profile, root: &Path) -> Result<Self, AppError> {
-        let mut client = Self::new(profile)?;
-        client.capabilities =
-            super::capabilities::Capabilities::new(root, profile, &client.http.private_ca_sha256)
-                .ok();
-        Ok(client)
-    }
-    pub(super) fn remember_capabilities(&self, root: &Path, profile: &Profile, info: &Value) {
-        if let Ok(cache) =
-            super::capabilities::Capabilities::new(root, profile, &self.http.private_ca_sha256)
-        {
-            cache.save(info);
-        }
-    }
-    fn service_info(&self) -> Result<Value, AppError> {
-        if let Some(cache) = &self.capabilities {
-            if let Some(info) = cache.get() {
-                if let Ok(info) = self.validate_info(info) {
-                    return Ok(info);
-                }
-            }
-        }
-        let reply = parse_reply(
-            self.http
-                .send(Method::GET, "/v1/info", b"", None)
-                .map_err(transport_error)?,
-        )?;
-        let reply = self.validate_info(reply)?;
-        if let Some(cache) = &self.capabilities {
-            cache.save(&reply);
-        }
-        Ok(reply)
-    }
-    fn validate_info(&self, reply: Value) -> Result<Value, AppError> {
+    /// Explicit setup probes the live identity/readiness once. Ordinary
+    /// commands rely on signed per-request protocol and server UUID admission.
+    pub fn info(&self) -> Result<Value, AppError> {
+        let reply = self.read(Method::GET, "/v1/info", b"")?;
         if reply["server_id"].as_str() != Some(self.server_id.to_string().as_str())
             || reply["ready"] != true
-            || reply["protocol_version"] != 1
-            || reply.get("capabilities").is_some_and(|value| {
-                !value
-                    .as_array()
-                    .is_some_and(|items| items.iter().all(Value::is_string))
-            })
+            || reply["protocol_version"] != super::signing::PROTOCOL_VERSION
         {
             return Err(invalid_reply());
         }
         Ok(reply)
-    }
-    /// Valid discovery retains the request-bound receipt gate. Configure uses
-    /// an uncached client so explicit setup always checks the live server.
-    pub fn info(&self) -> Result<Value, AppError> {
-        let reply = self.service_info()?;
-        if !reply["capabilities"]
-            .as_array()
-            .is_some_and(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|value| value == "request-bound-receipts")
-            })
-        {
-            return Err(invalid_reply());
-        }
-        Ok(reply)
-    }
-    /// Advertisement discovery is read-only. Legacy servers may omit this
-    /// field entirely; that means no advertised capabilities, not receipt safety.
-    pub fn has_attachment_capability(&self) -> Result<bool, AppError> {
-        let reply = self.service_info()?;
-        match reply.get("capabilities") {
-            None => Ok(false),
-            Some(Value::Array(items)) => Ok(items.iter().any(|v| v == "attachments-v1")),
-            Some(_) => Err(invalid_reply()),
-        }
     }
     pub fn read(&self, method: Method, target: &str, payload: &[u8]) -> Result<Value, AppError> {
         parse_reply(
@@ -223,12 +183,6 @@ impl RemoteClient {
                 .send(method, target, payload, None)
                 .map_err(transport_error)?,
         )
-    }
-    pub fn require_attachments(&self) -> Result<(), AppError> {
-        if !self.has_attachment_capability()? {
-            return Err(AppError::Remote { code:"remote_capability", message:"server does not support attachments-v1; upgrade the server before using attachments".into(), request_id:None });
-        }
-        Ok(())
     }
     pub fn transfer_timeout(&self, body_bytes: u64, original_bytes: u64) -> Duration {
         Duration::from_secs(
@@ -247,10 +201,6 @@ impl RemoteClient {
         body: &[u8],
         request_id: Option<Uuid>,
     ) -> Result<ApiOutput, AppError> {
-        self.require_attachments()?;
-        // Advertisement discovery deliberately permits receipt-less legacy
-        // reads; a new binary mutation still requires safe receipt recovery.
-        self.info()?;
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         if !store.list()?.is_empty() {
@@ -265,7 +215,7 @@ impl RemoteClient {
             request.request_id = id;
         }
         store.save_binary(&request, body)?;
-        self.send_pending(&store, &request, request_id.is_some())
+        self.send_pending(&store, &request, request_id.is_some(), true)
     }
     pub fn write(
         &self,
@@ -295,9 +245,6 @@ impl RemoteClient {
         request_id: Option<Uuid>,
         retain: bool,
     ) -> Result<ApiOutput, AppError> {
-        // Require live or unexpired discovery before saving or sending work.
-        // A later outage still follows the existing unknown-outcome recovery.
-        self.info()?;
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         if !store.list()?.is_empty() {
@@ -314,21 +261,21 @@ impl RemoteClient {
             request.request_id = id;
         }
         store.save(&request)?;
-        self.send_pending(&store, &request, retain)
+        self.send_pending(&store, &request, retain, true)
     }
     pub fn reconcile(&self, root: &Path, id: Uuid) -> Result<ApiOutput, AppError> {
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         let request = store.load(id)?;
         request.check_destination(self.server_id, self.credential_id)?;
-        self.send_pending(&store, &request, false)
+        self.send_pending(&store, &request, false, false)
     }
     pub fn reconcile_retained(&self, root: &Path, id: Uuid) -> Result<ApiOutput, AppError> {
         let store = PendingStore::new(root)?;
         let _lock = store.lock()?;
         let request = store.load(id)?;
         request.check_destination(self.server_id, self.credential_id)?;
-        self.send_pending(&store, &request, true)
+        self.send_pending(&store, &request, true, false)
     }
     pub fn acknowledge(&self, root: &Path, id: Uuid) -> Result<(), AppError> {
         let store = PendingStore::new(root)?;
@@ -342,6 +289,7 @@ impl RemoteClient {
         store: &PendingStore,
         request: &PendingWrite,
         retain: bool,
+        fresh: bool,
     ) -> Result<ApiOutput, AppError> {
         request.check_destination(self.server_id, self.credential_id)?;
         // Diagnostic categories must be fixed literals, never error Display
@@ -390,6 +338,13 @@ impl RemoteClient {
         .map_err(|_| unknown("transport", "transport"))?;
         let value: Value = serde_json::from_slice(&reply.body)
             .map_err(|_| unknown("response_json", "malformed_response_json"))?;
+        if let Some(AppError::ServerUpgradeRequired(message)) =
+            legacy_protocol_error(reply.status, &value)
+        {
+            // A legacy reply has no request-bound marker. Preserve the pending
+            // evidence, including on reconciliation, even for this known refusal.
+            return Err(AppError::ServerUpgradeRequired(format!("{message}; pending evidence retained: after updating, run tasks remote reconcile {}", request.request_id)));
+        }
         let receipt: super::protocol::RequestReceipt = serde_json::from_value(
             value
                 .get("receipt")
@@ -401,9 +356,26 @@ impl RemoteClient {
             || receipt.route != format!("{} {}", request.method, request.target)
             || receipt.payload_sha256 != request.payload_sha256()?
             || receipt.status != reply.status
-            || !matches!(reply.status, 200 | 400 | 404 | 409 | 413)
+            || !matches!(reply.status, 200 | 400 | 404 | 409 | 413 | 426)
         {
             return Err(unknown("receipt_validation", "receipt_mismatch"));
+        }
+        if reply.status == 426 {
+            let error = match parse_value(reply.status, value) {
+                Err(
+                    error @ (AppError::ClientUpgradeRequired(_)
+                    | AppError::ServerUpgradeRequired(_)),
+                ) => error,
+                _ => return Err(unknown("upgrade_refusal", "invalid_upgrade_refusal")),
+            };
+            if fresh {
+                store
+                    .remove(request.request_id)
+                    .map_err(|_| unknown("remove_upgrade_refusal", "pending_store"))?;
+            }
+            // Reconciliation may concern a previously committed request. A
+            // pre-admission refusal cannot resolve that earlier outcome.
+            return Err(error);
         }
         match parse_value(reply.status, value) {
             Ok(value) => {

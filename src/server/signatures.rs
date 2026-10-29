@@ -1,7 +1,9 @@
 //! The restricted RFC 9421/RFC 9530 application profile from spec.md.
 use super::{OwnedServer, Registration, ServiceError};
 use crate::model::{Attribution, AttributionSource};
-use crate::remote::signing::{header, signature_base, COMPONENTS};
+use crate::remote::signing::{
+    header, signature_base, COMPONENTS, MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_HEADER,
+};
 pub use crate::remote::signing::{is_mutation, SigningIdentity};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -132,6 +134,17 @@ impl OwnedServer {
                 "request is addressed to another server",
             ));
         }
+        let version = if headers.contains_key(PROTOCOL_HEADER) {
+            let text = header(headers, PROTOCOL_HEADER)?;
+            Some(
+                text.parse::<u32>()
+                    .ok()
+                    .filter(|v| v.to_string() == text)
+                    .ok_or(ServiceError::Unauthorized("invalid protocol version"))?,
+            )
+        } else {
+            None
+        };
         let input = header(headers, "signature-input")?;
         let dictionary = parse_dictionary(input)?;
         if dictionary.len() != 1 || input.bytes().filter(|byte| *byte == b';').count() != 5 {
@@ -149,6 +162,9 @@ impl OwnedServer {
         }
         let mutation = is_mutation(method, uri);
         let mut expected = COMPONENTS.to_vec();
+        if version.is_none() {
+            expected.retain(|name| *name != PROTOCOL_HEADER);
+        }
         if mutation {
             expected.push("idempotency-key");
         }
@@ -238,6 +254,35 @@ impl OwnedServer {
         let base = signature_base(method, uri, headers, parameters, mutation)?;
         key.verify_strict(base.as_bytes(), &signature)
             .map_err(|_| ServiceError::Unauthorized("signature verification failed"))?;
+        if version.is_none_or(|v| v < MIN_PROTOCOL_VERSION)
+            || version.is_some_and(|v| v > MAX_PROTOCOL_VERSION)
+        {
+            let (code, update) = if version.is_some_and(|v| v > MAX_PROTOCOL_VERSION) {
+                (
+                    "server_upgrade_required",
+                    "update tasks-server before using this client",
+                )
+            } else {
+                (
+                    "client_upgrade_required",
+                    "update the tasks CLI and viewer before retrying",
+                )
+            };
+            let client =
+                version.map_or_else(|| "1 (version header absent)".into(), |v| v.to_string());
+            return Err(ServiceError::UpgradeRequired {
+                code,
+                message: format!("update required: client protocol {client}; server supports protocols {MIN_PROTOCOL_VERSION}..={MAX_PROTOCOL_VERSION}; {update}"),
+                // This is a pre-admission refusal marker, never a stored
+                // mutation receipt or evidence about an earlier attempt.
+                receipt: idempotency_key.map(|request_id| crate::remote::protocol::RequestReceipt {
+                    request_id,
+                    route: format!("{method} {uri}"),
+                    payload_sha256: digest.iter().map(|b| format!("{b:02x}")).collect(),
+                    status: 426,
+                }),
+            });
+        }
         self.consume_nonce(credential_id, nonce, expires, now)?;
         Ok(AuthenticatedRequest {
             credential_id,

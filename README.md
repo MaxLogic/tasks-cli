@@ -247,6 +247,12 @@ maintenance commands (`import`, `bulk-import`, `backup`, `migrate`, `doctor`) ar
 refused against a remote profile. The server is built from this source; see
 [building from source](#building-from-source).
 
+Each request signs the client protocol version and configured server UUID.
+Incompatible versions fail with an actionable update-required error (exit 5),
+without retrying. Deploy the server before updating clients. Ordinary commands
+make no capability-discovery request; attachment get and keyed detach keep their
+metadata/key safety requests. Existing capability-cache files are ignored.
+
 ## Importing a Markdown backlog
 
 ```text

@@ -19,7 +19,7 @@ fn signed_fixture() -> (tempfile::TempDir, OwnedServer, SigningIdentity) {
 }
 
 #[test]
-fn download_authentication_preserves_the_legacy_signed_length_profile() {
+fn download_authentication_preserves_optional_signed_length_with_protocol_version() {
     use axum::http::HeaderMap;
     use base64::{engine::general_purpose::STANDARD, Engine};
     use ed25519_dalek::Signer;
@@ -28,7 +28,7 @@ fn download_authentication_preserves_the_legacy_signed_length_profile() {
     let uri: Uri = "/v1/projects/11111111-1111-4111-8111-111111111111/tasks/1/attachments/1"
         .parse()
         .unwrap();
-    // Construct the legacy wire profile independently of the client signer and
+    // Construct the protocol-2 wire profile independently of the client signer and
     // shared signature-base builder so future client changes cannot rewrite it.
     let headers = |signed_length: bool| {
         let component = if signed_length {
@@ -37,7 +37,7 @@ fn download_authentication_preserves_the_legacy_signed_length_profile() {
             ""
         };
         let parameters = format!(
-            "(\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\"{component});created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"{}\"",
+            "(\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\" \"x-tasks-protocol-version\"{component});created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"{}\"",
             signer.credential_id
         );
         let length_line = if signed_length {
@@ -46,7 +46,7 @@ fn download_authentication_preserves_the_legacy_signed_length_profile() {
             ""
         };
         let base = format!(
-            "\"@method\": GET\n\"@path\": {uri}\n\"@query\": ?\n\"content-type\": application/json\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"x-tasks-server-id\": {}\n{length_line}\"@signature-params\": {parameters}",
+            "\"@method\": GET\n\"@path\": {uri}\n\"@query\": ?\n\"content-type\": application/json\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"x-tasks-server-id\": {}\n\"x-tasks-protocol-version\": 2\n{length_line}\"@signature-params\": {parameters}",
             signer.server_id
         );
         let mut headers = HeaderMap::new();
@@ -59,6 +59,7 @@ fn download_authentication_preserves_the_legacy_signed_length_profile() {
             "x-tasks-server-id",
             signer.server_id.to_string().parse().unwrap(),
         );
+        headers.insert("x-tasks-protocol-version", HeaderValue::from_static("2"));
         headers.insert("content-length", HeaderValue::from_static("0"));
         headers.insert(
             "signature-input",
@@ -129,7 +130,8 @@ fn empty_get_signature_matches_an_independently_written_rfc_base() {
         "\"content-type\": application/json\n",
         "\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n",
         "\"x-tasks-server-id\": 11111111-1111-4111-8111-111111111111\n",
-        "\"@signature-params\": (\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\");created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"22222222-2222-4222-8222-222222222222\""
+        "\"x-tasks-protocol-version\": 2\n",
+        "\"@signature-params\": (\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\" \"x-tasks-protocol-version\");created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"22222222-2222-4222-8222-222222222222\""
     );
     let expected = format!(
         "tasks=:{}:",
@@ -218,6 +220,8 @@ fn tampered_metadata_and_invalid_signatures_cannot_consume_replay_capacity() {
         "digest",
         "server",
         "signature",
+        "version",
+        "duplicate-version",
         "duplicate",
         "algorithm",
         "components",
@@ -255,6 +259,12 @@ fn tampered_metadata_and_invalid_signatures_cannot_consume_replay_capacity() {
                     "x-tasks-server-id",
                     Uuid::new_v4().to_string().parse().unwrap(),
                 );
+            }
+            "version" => {
+                bad.insert("x-tasks-protocol-version", HeaderValue::from_static("3"));
+            }
+            "duplicate-version" => {
+                bad.append("x-tasks-protocol-version", HeaderValue::from_static("2"));
             }
             "signature" => {
                 bad.insert("signature", HeaderValue::from_static("tasks=:AA==:"));

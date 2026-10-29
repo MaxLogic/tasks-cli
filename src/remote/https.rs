@@ -43,7 +43,6 @@ pub struct HttpsClient {
     origin: Url,
     identity: SigningIdentity,
     pub request_timeout: Duration,
-    pub(super) private_ca_sha256: String,
 }
 pub(crate) fn validate_origin(endpoint: &str) -> Result<Url, ClientError> {
     let origin =
@@ -90,7 +89,6 @@ impl HttpsClient {
             .retry(reqwest::retry::never())
             .connect_timeout(options.connect_timeout)
             .timeout(options.request_timeout);
-        let mut private_ca_sha256 = String::new();
         if let Some(path) = options.private_ca {
             let file = std::fs::File::open(path)
                 .map_err(|_| ClientError::Configuration("cannot open private CA file"))?;
@@ -103,7 +101,6 @@ impl HttpsClient {
                     "private CA file exceeds 256 KiB",
                 ));
             }
-            private_ca_sha256 = crate::markdown::sha256(&pem);
             let certificates = reqwest::Certificate::from_pem_bundle(&pem)
                 .map_err(|_| ClientError::Configuration("invalid private CA PEM"))?;
             if certificates.is_empty() {
@@ -123,7 +120,6 @@ impl HttpsClient {
             origin,
             identity,
             request_timeout: options.request_timeout,
-            private_ca_sha256,
         })
     }
 

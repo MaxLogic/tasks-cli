@@ -699,7 +699,7 @@ pub fn handle(
         return Ok(ReceiptResponse {
             receipt: None,
             status: 200,
-            body: json!({"protocol_version":1,"server_id":server.server_id(),"ready":true,"capabilities":capabilities}),
+            body: json!({"protocol_version":crate::remote::signing::PROTOCOL_VERSION,"server_id":server.server_id(),"ready":true,"capabilities":capabilities}),
         });
     }
     if *method == Method::GET && uri.path() == "/v1/viewer/info" {

@@ -63,6 +63,12 @@ pub enum Reply {
     // HTTP intermediaries may omit Content-Length on an empty GET. Preserve
     // every other header and byte so this exercises the signed wire profile.
     ProxyWithoutEmptyGetLength(std::net::SocketAddr),
+    // A signed older/future client against the real binary's supported range.
+    ProxyProtocol {
+        address: std::net::SocketAddr,
+        version: Option<u32>,
+        identity: Box<tasks_cli::remote::signing::SigningIdentity>,
+    },
     ProxyWithLoss {
         address: std::net::SocketAddr,
         drop_next_mutation: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -190,7 +196,14 @@ impl TlsFixture {
                     }
                     Reply::Proxy(address)
                     | Reply::ProxyWithoutEmptyGetLength(address)
+                    | Reply::ProxyProtocol { address, .. }
                     | Reply::ProxyWithLoss { address, .. } => {
+                        if let Reply::ProxyProtocol {
+                            version, identity, ..
+                        } = &reply
+                        {
+                            resign_version(identity, &method, &uri, &mut headers, *version);
+                        }
                         let mut upstream = std::net::TcpStream::connect(address).unwrap();
                         upstream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();
                         upstream
@@ -291,6 +304,81 @@ impl TlsFixture {
     pub fn requests(&self) -> usize {
         self.requests.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+/// Independently assemble RFC 9421 input, so tests can exercise incompatible
+/// versions without adding production version overrides or a permissive server.
+pub fn resign_version(
+    identity: &tasks_cli::remote::signing::SigningIdentity,
+    method: &Method,
+    uri: &http::Uri,
+    headers: &mut http::HeaderMap,
+    version: Option<u32>,
+) {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use ed25519_dalek::Signer;
+    let input = headers["signature-input"].to_str().unwrap();
+    let (_, params) = input.split_once(')').unwrap();
+    let params = params.to_string();
+    let mut names = vec![
+        "@method",
+        "@path",
+        "@query",
+        "content-type",
+        "content-digest",
+        "x-tasks-server-id",
+    ];
+    if let Some(version) = version {
+        headers.insert(
+            "x-tasks-protocol-version",
+            version.to_string().parse().unwrap(),
+        );
+        names.push("x-tasks-protocol-version");
+    } else {
+        headers.remove("x-tasks-protocol-version");
+    }
+    if headers.contains_key("idempotency-key") {
+        names.push("idempotency-key");
+    }
+    if headers.contains_key("content-length")
+        && (tasks_cli::remote::signing::is_upload(method, uri)
+            || tasks_cli::remote::signing::is_download(method, uri))
+    {
+        names.push("content-length");
+    }
+    let parameters = format!(
+        "({}){params}",
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut base = format!(
+        "\"@method\": {method}\n\"@path\": {}\n\"@query\": ?{}",
+        uri.path(),
+        uri.query().unwrap_or("")
+    );
+    for name in &names[3..] {
+        base.push_str(&format!(
+            "\n\"{name}\": {}",
+            headers[*name].to_str().unwrap()
+        ));
+    }
+    base.push_str(&format!("\n\"@signature-params\": {parameters}"));
+    headers.insert(
+        "signature-input",
+        format!("tasks={parameters}").parse().unwrap(),
+    );
+    headers.insert(
+        "signature",
+        format!(
+            "tasks=:{}:",
+            STANDARD.encode(identity.key.sign(base.as_bytes()).to_bytes())
+        )
+        .parse()
+        .unwrap(),
+    );
 }
 impl Drop for TlsFixture {
     fn drop(&mut self) {

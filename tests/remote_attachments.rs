@@ -529,7 +529,9 @@ impl Server {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let mut command = support::process::command(env!("CARGO_BIN_EXE_tasks-server"));
+        let binary = std::env::var_os("TASKS_TEST_SERVER_EXE")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_tasks-server").into());
+        let mut command = support::process::command(binary);
         command
             .args([
                 "--data-root",
@@ -670,6 +672,411 @@ fn raw_frame(items: Value, envelopes: &[Vec<u8>]) -> Vec<u8> {
         bytes.extend(envelope);
     }
     bytes
+}
+
+#[test]
+fn protocol_rejects_versionless_client_before_mutation() {
+    protocol_upgrade_refusal(None, "client_upgrade_required");
+}
+#[test]
+fn protocol_rejects_old_client_before_mutation() {
+    protocol_upgrade_refusal(Some(1), "client_upgrade_required");
+}
+#[test]
+fn protocol_rejects_newer_client_before_mutation() {
+    protocol_upgrade_refusal(Some(3), "server_upgrade_required");
+}
+
+fn protocol_upgrade_refusal(version: Option<u32>, code: &str) {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use std::io::Write;
+    use tasks_cli::remote::{
+        config::{self, Profile},
+        pending::PendingStore,
+    };
+    let s = Server::new(false);
+    let source = s.root.path().join("protocol-source.zip");
+    fs::write(&source, b"synthetic upload").unwrap();
+    {
+        let identity = tasks_cli::remote::signing::SigningIdentity {
+            server_id: s.signer.server_id,
+            credential_id: s.signer.credential_id,
+            key: s.signer.key.clone(),
+        };
+        let tls = support::https::TlsFixture::new(
+            "localhost",
+            false,
+            support::https::Reply::ProxyProtocol {
+                address: s.address,
+                version,
+                identity: Box::new(identity),
+            },
+        );
+        let root = s.root.path().join(format!("protocol-{version:?}"));
+        tasks_cli::private_fs::create_dir(&root).unwrap();
+        let key = root.join("key.pem");
+        tasks_cli::private_fs::create_file(&key)
+            .unwrap()
+            .write_all(
+                s.signer
+                    .key
+                    .to_pkcs8_pem(Default::default())
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+        config::save(
+            &root,
+            &Profile::Remote {
+                server_url: tls.url(),
+                server_id: s.signer.server_id,
+                credential_id: s.signer.credential_id,
+                credential_file: key,
+                private_ca: tls.options().private_ca,
+                connect_timeout_seconds: 3,
+                request_timeout_seconds: 15,
+            },
+        )
+        .unwrap();
+        for args in [
+            vec!["show", "1"],
+            vec![
+                "update",
+                "1",
+                "--expect-version",
+                "1",
+                "--title",
+                "must not apply",
+            ],
+            vec![
+                "attachment",
+                "add",
+                "1",
+                "--expect-version",
+                "1",
+                "--file",
+                source.to_str().unwrap(),
+            ],
+        ] {
+            let project = s.project.to_string();
+            let args = [vec!["--project", &project], args].concat();
+            let before = tls.requests();
+            let result = run(&root, &args);
+            assert_eq!(
+                result.status.code(),
+                Some(5),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+            assert_eq!(error["error"]["code"], code, "{error}");
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("update required"));
+            assert_eq!(tls.requests() - before, 1);
+            // Versionless legacy writes have no signed version receipt. The
+            // production version-2 client cannot produce that request.
+            assert!(PendingStore::new(&root).unwrap().list().unwrap().is_empty());
+            s.unchanged();
+            assert_eq!(s.receipts(), 0);
+            assert_eq!(s.decodes(), 0);
+            let db = rusqlite::Connection::open(s.root.path().join("server.sqlite")).unwrap();
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM replay_nonces", [], |r| r
+                    .get::<_, u64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn wrong_server_uuid_refuses_real_cli_reads_and_writes_before_project_access() {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use std::io::Write;
+    use tasks_cli::remote::config::{self, Profile};
+    let s = Server::new(false);
+    let tls = support::https::TlsFixture::new(
+        "localhost",
+        false,
+        support::https::Reply::Proxy(s.address),
+    );
+    let root = s.root.path().join("wrong-server-client");
+    tasks_cli::private_fs::create_dir(&root).unwrap();
+    let key = root.join("key.pem");
+    tasks_cli::private_fs::create_file(&key)
+        .unwrap()
+        .write_all(
+            s.signer
+                .key
+                .to_pkcs8_pem(Default::default())
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    config::save(
+        &root,
+        &Profile::Remote {
+            server_url: tls.url(),
+            server_id: Uuid::new_v4(),
+            credential_id: s.signer.credential_id,
+            credential_file: key,
+            private_ca: tls.options().private_ca,
+            connect_timeout_seconds: 3,
+            request_timeout_seconds: 15,
+        },
+    )
+    .unwrap();
+    for args in [
+        vec!["show", "1"],
+        vec![
+            "update",
+            "1",
+            "--expect-version",
+            "1",
+            "--title",
+            "must not apply",
+        ],
+    ] {
+        let project = s.project.to_string();
+        let before = tls.requests();
+        let result = run(&root, &[vec!["--project", &project], args].concat());
+        assert_eq!(result.status.code(), Some(5));
+        assert!(result.stdout.is_empty(), "no project data may be returned");
+        assert_eq!(tls.requests() - before, 1);
+        s.unchanged();
+        assert_eq!(s.receipts(), 0);
+    }
+    let log = fs::read_to_string(s.root.path().join("requests.log")).unwrap();
+    assert!(log
+        .lines()
+        .all(|line| serde_json::from_str::<Value>(line).unwrap()["actor_id"].is_null()));
+}
+
+#[test]
+fn incompatible_reconcile_preserves_evidence_of_a_previously_committed_write() {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use std::io::Write;
+    use tasks_cli::remote::{
+        config::{self, Profile},
+        protocol::UpdateTask,
+    };
+    let s = Server::new(false);
+    let root = s.root.path().join("reconcile-client");
+    tasks_cli::private_fs::create_dir(&root).unwrap();
+    let key = root.join("key.pem");
+    tasks_cli::private_fs::create_file(&key)
+        .unwrap()
+        .write_all(
+            s.signer
+                .key
+                .to_pkcs8_pem(Default::default())
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    let target = format!("/v1/projects/{}/tasks/1", s.project);
+    let payload = serde_json::to_value(UpdateTask {
+        task_ref: "1".into(),
+        expect_version: 1,
+        changes: tasks_cli::model::TaskUpdate {
+            title: Some("committed before upgrade".into()),
+            ..Default::default()
+        },
+        dependency_refs: None,
+        attribution: tasks_cli::model::Attribution::default(),
+    })
+    .unwrap();
+    let pending = PendingWrite::new(
+        s.signer.server_id,
+        s.signer.credential_id,
+        "PATCH",
+        &target,
+        payload,
+    )
+    .unwrap();
+    let store = PendingStore::new(&root).unwrap();
+    store.save(&pending).unwrap();
+    assert_eq!(
+        s.request(
+            http::Method::PATCH,
+            &target,
+            &pending.bytes().unwrap(),
+            "application/json",
+            Some(pending.request_id)
+        )
+        .0,
+        200
+    );
+    let tls = support::https::TlsFixture::new(
+        "localhost",
+        false,
+        support::https::Reply::ProxyProtocol {
+            address: s.address,
+            version: Some(3),
+            identity: Box::new(tasks_cli::remote::signing::SigningIdentity {
+                server_id: s.signer.server_id,
+                credential_id: s.signer.credential_id,
+                key: s.signer.key.clone(),
+            }),
+        },
+    );
+    config::save(
+        &root,
+        &Profile::Remote {
+            server_url: tls.url(),
+            server_id: s.signer.server_id,
+            credential_id: s.signer.credential_id,
+            credential_file: key,
+            private_ca: tls.options().private_ca,
+            connect_timeout_seconds: 3,
+            request_timeout_seconds: 15,
+        },
+    )
+    .unwrap();
+    let result = run(
+        &root,
+        &["remote", "reconcile", &pending.request_id.to_string()],
+    );
+    assert_eq!(result.status.code(), Some(5));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stderr).unwrap()["error"]["code"],
+        "server_upgrade_required"
+    );
+    assert_eq!(store.list().unwrap(), vec![pending.request_id]);
+    assert!(store.confirmation(&pending).unwrap().is_none());
+    assert_eq!(tls.requests(), 1);
+    assert_eq!(s.receipts(), 1);
+}
+
+/// Run explicitly against retained protocol-1 binaries, never an installed CLI
+/// or a deployed service. Normal gates exercise signed versions 1 and 3 above.
+#[test]
+#[ignore = "requires TASKS_TEST_CLIENT_EXE or TASKS_TEST_SERVER_EXE from protocol 1"]
+fn historical_protocol_1_binary_refuses_without_mutation() {
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use std::io::Write;
+    use tasks_cli::remote::config::{self, Profile};
+    let old_client = std::env::var_os("TASKS_TEST_CLIENT_EXE");
+    let warm_legacy = std::env::var_os("TASKS_TEST_LEGACY_WARM_CACHE").is_some();
+    assert!(
+        old_client.is_some() || std::env::var_os("TASKS_TEST_SERVER_EXE").is_some(),
+        "supply a historical binary"
+    );
+    let s = Server::new(false);
+    let tls = support::https::TlsFixture::new(
+        "localhost",
+        false,
+        support::https::Reply::Proxy(s.address),
+    );
+    let root = s.root.path().join("legacy-compat-client");
+    tasks_cli::private_fs::create_dir(&root).unwrap();
+    let key = root.join("key.pem");
+    tasks_cli::private_fs::create_file(&key)
+        .unwrap()
+        .write_all(
+            s.signer
+                .key
+                .to_pkcs8_pem(Default::default())
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    config::save(
+        &root,
+        &Profile::Remote {
+            server_url: tls.url(),
+            server_id: s.signer.server_id,
+            credential_id: s.signer.credential_id,
+            credential_file: key,
+            private_ca: tls.options().private_ca,
+            connect_timeout_seconds: 3,
+            request_timeout_seconds: 15,
+        },
+    )
+    .unwrap();
+    for args in [
+        vec!["show", "1"],
+        vec![
+            "update",
+            "1",
+            "--expect-version",
+            "1",
+            "--title",
+            "must not apply",
+        ],
+    ] {
+        let cached_write = old_client.is_some() && warm_legacy && args[0] == "update";
+        if cached_write {
+            // Historical TSK-061 record, built independently from the saved
+            // profile and exact fixture CA bytes. Production has no cache API.
+            let profile = config::load(&root).unwrap();
+            let ca_hash =
+                tasks_cli::markdown::sha256(&fs::read(tls.options().private_ca.unwrap()).unwrap());
+            let binding =
+                tasks_cli::markdown::sha256(&serde_json::to_vec(&(profile, ca_hash)).unwrap());
+            let checked_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            tasks_cli::private_fs::create_dir(&root.join("client")).unwrap();
+            tasks_cli::private_fs::create_file(&root.join("client/capabilities.json")).unwrap().write_all(&serde_json::to_vec(&json!({
+                "format_version":2,"profile_sha256":binding,"checked_at":checked_at,
+                "info":{"protocol_version":1,"server_id":s.signer.server_id,"ready":true,"capabilities":["request-bound-receipts","attachments-v1"]}
+            })).unwrap()).unwrap();
+        }
+        let before = tls.requests();
+        let result = support::process::command(
+            old_client
+                .clone()
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_tasks").into()),
+        )
+        .args([
+            "--data-root",
+            root.to_str().unwrap(),
+            "--format",
+            "json",
+            "--project",
+            &s.project.to_string(),
+        ])
+        .args(args)
+        .env_remove("TASKS_WINDOWS_EXE")
+        .env_remove("TASKS_PROJECT")
+        .env("TASKS_CLIENT_DIR", root.join("client"))
+        .output()
+        .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(5),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+        assert_eq!(
+            error["error"]["code"],
+            if cached_write {
+                "unknown_write_outcome"
+            } else if old_client.is_some() {
+                "client_upgrade_required"
+            } else {
+                "server_upgrade_required"
+            },
+            "{error}"
+        );
+        if !cached_write {
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("update required"));
+        } else {
+            assert_eq!(PendingStore::new(&root).unwrap().list().unwrap().len(), 1);
+        }
+        assert!(result.stdout.is_empty());
+        assert_eq!(tls.requests() - before, 1);
+        s.unchanged();
+        assert_eq!(s.receipts(), 0);
+    }
 }
 fn item(name: &str, original: u64, hash: &str, stored: usize) -> Value {
     json!({"name":name,"original_size":original,"original_sha256":hash,"stored_size":stored})
@@ -1267,50 +1674,7 @@ fn stalled_upload_and_slowloris_expire_without_clients_closing() {
 }
 
 #[test]
-fn old_server_refuses_before_reading_source_and_binary_viewer_acknowledge_cleans_sidecars() {
-    use ed25519_dalek::pkcs8::EncodePrivateKey;
-    let s = Server::new(true);
-    let tls = support::https::TlsFixture::new(
-        "localhost",
-        false,
-        support::https::Reply::Proxy(s.address),
-    );
-    let client_root = s.root.path().join("client-old");
-    tasks_cli::private_fs::create_dir(&client_root).unwrap();
-    let key_path = client_root.join("key.pem");
-    let pem = s.signer.key.to_pkcs8_pem(Default::default()).unwrap();
-    use std::io::Write;
-    tasks_cli::private_fs::create_file(&key_path)
-        .unwrap()
-        .write_all(pem.as_bytes())
-        .unwrap();
-    let profile = tasks_cli::remote::config::Profile::Remote {
-        server_url: tls.url(),
-        server_id: s.signer.server_id,
-        credential_id: s.signer.credential_id,
-        credential_file: key_path,
-        private_ca: tls.options().private_ca,
-        connect_timeout_seconds: 3,
-        request_timeout_seconds: 15,
-    };
-    tasks_cli::remote::config::save(&client_root, &profile).unwrap();
-    let response = run(
-        &client_root,
-        &[
-            "--project",
-            &s.project.to_string(),
-            "attachment",
-            "add",
-            "1",
-            "--expect-version",
-            "1",
-            "--file",
-            "deliberately-absent.zip",
-        ],
-    );
-    assert_eq!(response.status.code(), Some(5));
-    assert!(String::from_utf8_lossy(&response.stderr).contains("remote_capability"));
-    s.unchanged();
+fn binary_viewer_acknowledge_cleans_sidecars() {
     let f = Fixture::new();
     let project = f.project();
     task(&f, project);

@@ -213,6 +213,7 @@ fn error(status: StatusCode, code: &str, message: &str) -> Response {
 impl ServiceError {
     fn http_error(&self) -> (StatusCode, &'static str) {
         match self {
+            Self::UpgradeRequired { code, .. } => (StatusCode::UPGRADE_REQUIRED, code),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication"),
             Self::Clock => (StatusCode::UNAUTHORIZED, "clock_window"),
             Self::Capacity => (StatusCode::SERVICE_UNAVAILABLE, "capacity"),
@@ -226,6 +227,19 @@ impl ServiceError {
 }
 impl IntoResponse for ServiceError {
     fn into_response(self) -> Response {
+        if let Self::UpgradeRequired {
+            code,
+            message,
+            receipt,
+        } = self
+        {
+            let mut body =
+                serde_json::json!({"schema_version":1,"error":{"code":code,"message":message}});
+            if let Some(receipt) = receipt {
+                body["receipt"] = serde_json::json!(receipt);
+            }
+            return (StatusCode::UPGRADE_REQUIRED, Json(body)).into_response();
+        }
         let (status, code) = self.http_error();
         // Storage details stay server-local; never return filesystem/SQL diagnostics.
         let message = if matches!(self, Self::Storage(_)) {

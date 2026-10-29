@@ -82,10 +82,6 @@ fn query(
     )?)
 }
 pub fn setup(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppError> {
-    let result = setup_inner(cli, root, command);
-    super::capabilities::invalidate_on_error(root, result)
-}
-fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), AppError> {
     match command {
         RemoteCommand::Keygen { directory } => {
             if !directory.is_absolute() {
@@ -113,7 +109,6 @@ fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), Ap
             connect_timeout_seconds,
             request_timeout_seconds,
         } => {
-            super::capabilities::invalidate(root);
             let profile = Profile::Remote {
                 server_url: server_url.clone(),
                 server_id: *server_id,
@@ -124,7 +119,7 @@ fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), Ap
                 request_timeout_seconds: *request_timeout_seconds,
             };
             let client = RemoteClient::new(&profile)?;
-            let info = client.info()?;
+            client.info()?;
             std::fs::create_dir_all(root)?;
             let pending = PendingStore::new(root)?;
             let _lock = pending.lock()?;
@@ -147,14 +142,12 @@ fn setup_inner(cli: &Cli, root: &Path, command: &RemoteCommand) -> Result<(), Ap
                 }
             }
             config::save(root, &profile)?;
-            client.remember_capabilities(root, &profile, &info);
             println!(
                 "{}",
                 json!({"backend":"remote","server_id":server_id,"credential_id":credential_id})
             );
         }
         RemoteCommand::Local => {
-            super::capabilities::invalidate(root);
             std::fs::create_dir_all(root)?;
             let pending = PendingStore::new(root)?;
             let _lock = pending.lock()?;
@@ -196,14 +189,12 @@ pub fn execute(cli: &Cli, root: &Path, profile: &Profile) -> Result<(), AppError
             | Command::Migrate
             | Command::Doctor
     ) {
-        return super::capabilities::invalidate_on_error(root, Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None }));
+        return Err(AppError::Remote { code:"unsupported_remote_operation", message:"this maintenance operation requires server-local administration; no local database or input file was opened".into(),request_id:None });
     }
-    let result = (|| {
-        let client = RemoteClient::with_state(profile, root)?;
-        execute_inner(cli, root, &client)
-    })();
-    super::capabilities::invalidate_on_error(root, result)
+    let client = RemoteClient::new(profile)?;
+    execute_inner(cli, root, &client)
 }
+
 fn execute_inner(cli: &Cli, root: &Path, client: &RemoteClient) -> Result<(), AppError> {
     if let Command::Attachment(command @ crate::cli::AttachmentCommand::Clipboard) = &cli.command {
         print(
@@ -518,20 +509,7 @@ fn execute_viewer(
     command: &ViewerCommand,
 ) -> Result<(), AppError> {
     let output = match command {
-        ViewerCommand::Info => {
-            // Server capability is authoritative, even if an older server's
-            // viewer payload incorrectly advertises newer operations.
-            let attachments = client.has_attachment_capability()?;
-            let mut output = api_output(client.read(Method::GET, "/v1/viewer/info", b"")?)?;
-            if !attachments {
-                if let Some(operations) = output.output["data"]["operations"].as_array_mut() {
-                    operations
-                        .retain(|op| !op.as_str().is_some_and(|s| s.starts_with("attachment-")));
-                }
-                output.text = serde_json::to_string(&output.output)?;
-            }
-            output
-        }
+        ViewerCommand::Info => api_output(client.read(Method::GET, "/v1/viewer/info", b"")?)?,
         ViewerCommand::Recovery => {
             let store = PendingStore::new(root)?;
             let _lock = store.lock()?;

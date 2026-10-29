@@ -39,7 +39,6 @@ fn download_envelope(
     task: u64,
     attachment: u64,
 ) -> Result<(AttachmentSummary, Vec<u8>), AppError> {
-    client.require_attachments()?;
     let reply = client
         .http
         .send_binary(
@@ -330,7 +329,6 @@ pub fn execute(
     project: &str,
     command: &AttachmentCommand,
 ) -> Result<ApiOutput, AppError> {
-    client.require_attachments()?;
     match command {
         AttachmentCommand::Add {
             id,

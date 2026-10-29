@@ -161,14 +161,6 @@ pub(crate) fn open_credential_file(path: &Path) -> Result<File, AppError> {
     open_file_with_sharing(path, 1)
 }
 
-/// Discovery is disposable. Readers may coexist and the file may be deleted
-/// while read; replacement is refused while a reader is open, so publication
-/// stays best-effort. Readers never share in-place writes. Apply the same reparse and owner/ACL checks as other files.
-#[cfg(feature = "remote")]
-pub(crate) fn open_cache_file(path: &Path) -> Result<File, AppError> {
-    open_file_with_sharing(path, 1 | 4) // FILE_SHARE_READ | FILE_SHARE_DELETE
-}
-
 fn open_file_with_sharing(path: &Path, _sharing: u32) -> Result<File, AppError> {
     validate_dir(path.parent().ok_or_else(insecure)?)?;
     let mut options = OpenOptions::new();
@@ -304,32 +296,6 @@ mod windows {
 mod tests {
     use super::*;
     use std::os::windows::fs::OpenOptionsExt;
-
-    #[test]
-    fn cache_readers_share_reads_and_deletion_but_not_in_place_writes() {
-        use std::io::{Read, Write};
-        let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("cache");
-        create_dir(&directory).unwrap();
-        let path = directory.join("capabilities.json");
-        create_file(&path).unwrap().write_all(b"old").unwrap();
-        let mut first = open_cache_file(&path).unwrap();
-        let second = open_cache_file(&path).unwrap();
-        let error = OpenOptions::new()
-            .write(true)
-            .share_mode(7)
-            .open(&path)
-            .unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(32));
-        // MoveFileExW replacement can still be refused by Windows while a
-        // destination reader exists. Publication is best-effort independently;
-        // FILE_SHARE_DELETE must at least permit invalidation here.
-        std::fs::remove_file(&path).unwrap();
-        let mut old = String::new();
-        first.read_to_string(&mut old).unwrap();
-        assert_eq!(old, "old");
-        drop((first, second));
-    }
 
     #[test]
     fn credential_reader_shares_only_reads_and_mutable_files_stay_exclusive() {

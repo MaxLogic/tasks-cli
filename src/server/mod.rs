@@ -19,6 +19,12 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("{message}")]
+    UpgradeRequired {
+        code: &'static str,
+        message: String,
+        receipt: Option<crate::remote::protocol::RequestReceipt>,
+    },
     #[error("authentication failed: {0}")]
     Unauthorized(&'static str),
     #[error("request clock is outside the allowed window; synchronize client and server UTC")]
