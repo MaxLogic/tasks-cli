@@ -465,26 +465,100 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
         0
     ))
     .starts_with("HTTP/1.1 401"));
+    tasks_cli::store::create_project_db(fixture.root.path(), &project).unwrap();
+    let mut store =
+        tasks_cli::store::Store::open_rw(fixture.root.path(), &project.to_string()).unwrap();
+    store
+        .create_task(
+            "fixture",
+            "PRIVATE_STORED_BODY",
+            tasks_cli::model::TaskStatus::Ready,
+            vec![],
+        )
+        .unwrap();
+    drop(store);
+    let catalog = rusqlite::Connection::open(fixture.root.path().join("server.sqlite")).unwrap();
+    catalog
+        .execute(
+            "INSERT INTO projects(project_id,name) VALUES (?1,'fixture')",
+            [project.to_string()],
+        )
+        .unwrap();
+    drop(catalog);
+    let target = format!("/v1/projects/{project}/query");
+    let body = br#"{"operation":"attachments","id":"1","all":false,"limit":100}"#;
+    let headers = fixture.headers(&Method::POST, &target, body, 126);
+    let mut stream = fixture.connect(&Method::POST, &target, &headers, body.len());
+    stream.write_all(body).unwrap();
+    assert!(HttpFixture::response(stream).starts_with("HTTP/1.1 200"));
     drop(fixture);
     let text = std::fs::read_to_string(path).unwrap();
     assert!(!text.contains("PRIVATE_"));
-    assert!(!text.contains("signature") && !text.contains("content-digest"));
+    assert!(
+        !text.contains("\"signature\":")
+            && !text.contains("signature-input")
+            && !text.contains("content-digest")
+    );
     let lines = text
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 3);
     for line in &lines {
-        assert_eq!(line.as_object().unwrap().len(), 6);
         assert!(Uuid::parse_str(line["request_id"].as_str().unwrap()).is_ok());
         assert!(line["duration_ms"].is_u64());
+        for field in [
+            "auth_ms",
+            "credential_ms",
+            "signature_ms",
+            "nonce_ms",
+            "nonce_open_ms",
+            "nonce_sql_ms",
+            "nonce_commit_ms",
+            "nonce_close_ms",
+            "open_ms",
+            "schema_ms",
+            "handler_ms",
+            "query_ms",
+            "encode_ms",
+            "queue_ms",
+        ] {
+            assert!(
+                line[field].as_f64().is_some_and(|ms| ms >= 0.0),
+                "{field}: {line}"
+            );
+        }
     }
     assert_eq!(lines[0]["actor_id"], "owner");
     assert_eq!(lines[0]["project_id"], project.to_string());
     assert_eq!(lines[0]["operation"], "task_create");
     assert_eq!(lines[0]["outcome"], "http_400");
+    assert!(lines[0]["auth_ms"].as_f64().unwrap() > 0.0);
+    assert!(lines[0]["nonce_commit_ms"].as_f64().unwrap() > 0.0);
+    assert!(lines[0]["encode_ms"].as_f64().unwrap() > 0.0);
     assert!(lines[1]["actor_id"].is_null());
     assert_eq!(lines[1]["outcome"], "http_401");
+    assert!(lines[1]["auth_ms"].as_f64().unwrap() > 0.0);
+    assert_eq!(lines[1]["nonce_ms"], 0.0);
+    assert_eq!(lines[1]["handler_ms"], 0.0);
+    assert_eq!(lines[2]["operation"], "attachment_list");
+    assert_eq!(lines[2]["item_count"], 0);
+    for field in [
+        "auth_ms",
+        "credential_ms",
+        "signature_ms",
+        "nonce_ms",
+        "open_ms",
+        "schema_ms",
+        "handler_ms",
+        "query_ms",
+        "encode_ms",
+        "queue_ms",
+    ] {
+        assert!(lines[2][field].as_f64().unwrap() > 0.0, "{field}");
+    }
+    assert!(lines[2]["handler_ms"].as_f64().unwrap() >= lines[2]["open_ms"].as_f64().unwrap());
+    assert!(lines[2]["open_ms"].as_f64().unwrap() >= lines[2]["schema_ms"].as_f64().unwrap());
 }
 impl Drop for HttpFixture {
     fn drop(&mut self) {

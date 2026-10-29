@@ -37,6 +37,8 @@ struct Record {
     project_id: Option<Uuid>,
     operation: &'static str,
     duration_ms: u64,
+    #[serde(flatten)]
+    timings: super::timing::Timings,
     outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     item_count: Option<u64>,
@@ -64,6 +66,7 @@ impl RequestLog {
                 project_id,
                 operation,
                 duration_ms: 0,
+                timings: Default::default(),
                 outcome: "cancelled".into(),
                 item_count: None,
                 stored_bytes: None,
@@ -82,6 +85,12 @@ impl RequestLog {
     }
     pub(super) fn completed(&mut self, status: u16) {
         self.record.outcome = format!("http_{status}");
+    }
+    pub(super) fn timings(&mut self, timings: super::timing::Timings) {
+        self.record.timings.add(timings);
+    }
+    pub(super) fn encoded_since(&mut self, started: Instant) {
+        self.record.timings.encode_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
     pub(super) fn attachment_sizes(&mut self, count: u64, stored: u64, original: u64) {
         self.record.item_count = Some(count);

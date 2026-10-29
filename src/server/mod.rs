@@ -6,6 +6,7 @@ pub mod maintenance;
 pub mod receipts;
 mod request_log;
 pub mod signatures;
+pub(crate) mod timing;
 pub mod transport;
 use crate::storage::{acquire_exclusive_lock_for, validate_storage_root, ExclusiveLock};
 use crate::AppError;
@@ -71,6 +72,12 @@ pub struct Registration {
 pub struct OwnedServer {
     root: PathBuf,
     id: Uuid,
+    // Keep the auth WAL open between operations without retaining a transaction
+    // or read snapshot. Otherwise every nonce commit is immediately followed by
+    // a last-connection checkpoint, unlink and later WAL recreation. Mutex only
+    // makes the idle Connection Sync; request workers never lock or use it.
+    // Drop it before releasing root ownership (fields drop in declaration order).
+    _wal_anchor: std::sync::Mutex<Connection>,
     _ownership: ExclusiveLock,
 }
 
@@ -106,10 +113,11 @@ impl OwnedServer {
         Self::audit(&transaction, "initialize", None, None)?;
         transaction.pragma_update(None, "user_version", 2)?;
         transaction.commit()?;
-        drop(connection);
+        connection.pragma_update(None, "query_only", true)?;
         Ok(Self {
             root,
             id,
+            _wal_anchor: std::sync::Mutex::new(connection),
             _ownership: ownership,
         })
     }
@@ -144,9 +152,11 @@ impl OwnedServer {
         if id.is_nil() {
             return Err(ServiceError::Validation("invalid stored server identity"));
         }
+        connection.pragma_update(None, "query_only", true)?;
         Ok(Self {
             root,
             id,
+            _wal_anchor: std::sync::Mutex::new(connection),
             _ownership: ownership,
         })
     }
@@ -377,7 +387,12 @@ impl OwnedServer {
         expires: i64,
         now: i64,
     ) -> Result<(), ServiceError> {
-        let mut connection = self.connect()?;
+        let _nonce = timing::Phase::Nonce.start();
+        let mut connection = {
+            let _open = timing::Phase::NonceOpen.start();
+            self.connect()?
+        };
+        let sql = timing::Phase::NonceSql.start();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Self::lookup(&transaction, credential, true)?;
         transaction.execute(
@@ -408,7 +423,15 @@ impl OwnedServer {
             "INSERT INTO replay_nonces(credential_id,nonce,expires) VALUES (?1,?2,?3)",
             params![credential.to_string(), nonce, expires],
         )?;
-        transaction.commit()?;
+        drop(sql);
+        {
+            let _commit = timing::Phase::NonceCommit.start();
+            transaction.commit()?;
+        }
+        {
+            let _close = timing::Phase::NonceClose.start();
+            drop(connection);
+        }
         Ok(())
     }
 }

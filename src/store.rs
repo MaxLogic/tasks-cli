@@ -615,6 +615,8 @@ fn validate_current_schema(
     expected: &Uuid,
     db_path: &Path,
 ) -> Result<(), AppError> {
+    #[cfg(feature = "server")]
+    let _schema = crate::server::timing::Phase::Schema.start();
     let missing = |what: &str| {
         AppError::Database(format!(
             "{} is missing {what}; expected the tasks-cli schema version {CURRENT_SCHEMA_VERSION}. Restore the database from a backup, or run tasks init --root <dir> to create a new one",
@@ -1855,6 +1857,8 @@ impl Store {
     }
 
     pub fn open_readonly(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        #[cfg(feature = "server")]
+        let _open = crate::server::timing::Phase::Open.start();
         let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn = open_for_reading(&db_path, rusqlite::OpenFlags::empty())?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -1903,6 +1907,8 @@ impl Store {
     }
 
     pub fn open_rw(data_root: &Path, project: &str) -> Result<Self, AppError> {
+        #[cfg(feature = "server")]
+        let _open = crate::server::timing::Phase::Open.start();
         let (db_path, project_id, data_root) = project_db_path(data_root, project)?;
         let conn =
             Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;

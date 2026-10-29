@@ -11,7 +11,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
     io,
     pin::Pin,
@@ -397,15 +397,23 @@ async fn dispatch(
     let server = state.server.clone();
     // The blocking worker owns the permit. Cancellation cannot release capacity
     // while synchronous SQLite work is still running.
+    let queued = Instant::now();
     let authenticated = tokio::task::spawn_blocking(move || {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| ServiceError::Clock)?;
-        let now = i64::try_from(now.as_secs()).map_err(|_| ServiceError::Clock)?;
-        let authentication = server.authenticate(&parts.method, &parts.uri, &parts.headers, now)?;
-        Ok::<_, ServiceError>((authentication, permit, parts, server.server_id()))
+        super::timing::capture(queued, super::timing::Phase::Auth, || {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| ServiceError::Clock)?;
+            let now = i64::try_from(now.as_secs()).map_err(|_| ServiceError::Clock)?;
+            let authentication =
+                server.authenticate(&parts.method, &parts.uri, &parts.headers, now)?;
+            Ok::<_, ServiceError>((authentication, permit, parts, server.server_id()))
+        })
     })
-    .await;
+    .await
+    .map(|(result, timings)| {
+        log.timings(timings);
+        result
+    });
     let (authenticated, permit, parts, _server_id) = match authenticated {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => return error.into_response(),
@@ -714,15 +722,25 @@ async fn dispatch(
         )
             .into_response();
     }
+    let queued = Instant::now();
     match tokio::task::spawn_blocking(move || {
-        let reply = super::api::handle(&server, &authenticated, &parts.method, &parts.uri, &bytes);
-        (reply, permit)
+        super::timing::capture(queued, super::timing::Phase::Handler, || {
+            let reply =
+                super::api::handle(&server, &authenticated, &parts.method, &parts.uri, &bytes);
+            (reply, permit)
+        })
     })
     .await
-    {
+    .map(|(result, timings)| {
+        log.timings(timings);
+        result
+    }) {
         Ok((Ok(reply), permit)) => {
             log.attachment_output(&reply.body);
-            json_response(reply, permit)
+            let started = Instant::now();
+            let response = json_response(reply, permit);
+            log.encoded_since(started);
+            response
         }
         Ok((Err(error), _permit)) => error.into_response(),
         Err(_) => error(

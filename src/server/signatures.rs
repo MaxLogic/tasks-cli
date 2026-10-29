@@ -243,7 +243,10 @@ impl OwnedServer {
         let signature =
             Signature::from_slice(&bytes_member(header(headers, "signature")?, "tasks")?)
                 .map_err(|_| ServiceError::Unauthorized("invalid signature length"))?;
-        let registration = self.credential(credential_id)?;
+        let registration = {
+            let _credential = super::timing::Phase::Credential.start();
+            self.credential(credential_id)?
+        };
         let key = VerifyingKey::from_bytes(&registration.public_key)
             .map_err(|_| ServiceError::Unauthorized("invalid registered public key"))?;
         // Serialize the parsed inner list, preserving parameter order per RFC 9421.
@@ -254,8 +257,11 @@ impl OwnedServer {
             .strip_prefix("tasks=")
             .ok_or(ServiceError::Unauthorized("unexpected signature label"))?;
         let base = signature_base(method, uri, headers, parameters, mutation)?;
-        key.verify_strict(base.as_bytes(), &signature)
-            .map_err(|_| ServiceError::Unauthorized("signature verification failed"))?;
+        {
+            let _signature = super::timing::Phase::Signature.start();
+            key.verify_strict(base.as_bytes(), &signature)
+                .map_err(|_| ServiceError::Unauthorized("signature verification failed"))?;
+        }
         if version.is_none_or(|v| v < MIN_PROTOCOL_VERSION)
             || version.is_some_and(|v| v > MAX_PROTOCOL_VERSION)
         {

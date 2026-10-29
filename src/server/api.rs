@@ -54,6 +54,7 @@ pub(crate) fn output(store: &Store, data: CommandPayload) -> Result<Value, AppEr
 }
 
 fn output_with_project(store: Option<&Store>, data: CommandPayload) -> Result<Value, AppError> {
+    let _encode = super::timing::Phase::Encode.start();
     let envelope = Envelope {
         schema_version: 1,
         project_id: store.map(|store| store.project_id.to_string()),
@@ -143,6 +144,7 @@ fn unique_key(server: &OwnedServer, project: Uuid, key: &str) -> Result<(), AppE
 }
 
 fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Result<Value, AppError> {
+    let query = super::timing::Phase::Query.start();
     let data = match request {
         ReadRequest::Attachments {
             id,
@@ -371,6 +373,7 @@ fn query(server: &OwnedServer, store: &mut Store, request: ReadRequest) -> Resul
             CommandPayload::ViewerShow(crate::viewer::show_in_store(store, &id)?)
         }
     };
+    drop(query);
     output(store, data)
 }
 
