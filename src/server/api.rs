@@ -406,6 +406,15 @@ impl Mutation {
     fn apply(self, store: &mut Store, server: &OwnedServer) -> Result<Value, AppError> {
         let data = match self {
             Self::Detach(id, v) => {
+                // receipts::execute refreshed the key while holding the write
+                // transaction. A mismatch is a terminal receipt, never a write.
+                if let Some(reference) = &v.task_ref {
+                    if store.resolve_ref(reference)? != id {
+                        return Err(AppError::validation(
+                            "task reference does not match the route ID",
+                        ));
+                    }
+                }
                 let result = store.detach(id, v.expect_version, &v.attachments)?;
                 CommandPayload::AttachmentDetach {
                     id: result.id,

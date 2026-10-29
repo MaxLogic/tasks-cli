@@ -164,7 +164,10 @@ fn tls_gateway_forwards_signatures_to_the_actual_private_rust_listener() {
             installation_name: "fixture".into(),
         })
         .unwrap();
-    let backend = HttpBackend::new(ServiceState::new(server));
+    let log_path = root.path().join("requests.jsonl");
+    let backend = HttpBackend::new(
+        ServiceState::new(server).with_log_file(std::fs::File::create(&log_path).unwrap()),
+    );
     let gateway = TlsFixture::new("localhost", false, Reply::Proxy(backend.address));
     let client = HttpsClient::new(&gateway.url(), gateway.options(), signer).unwrap();
     let info = client.send(Method::GET, "/v1/info", b"", None).unwrap();
@@ -187,21 +190,69 @@ fn tls_gateway_forwards_signatures_to_the_actual_private_rust_listener() {
     // A legitimate SQLite wait may exceed the gateway fixture's old three-second
     // read timeout. It must reach the client under the production five-second
     // busy bound rather than being converted into a lost transport response.
+    let previous_log = std::fs::read_to_string(&log_path).unwrap();
     let path = root.path().join("server.sqlite");
-    let (ready, locked) = std::sync::mpsc::channel();
-    let lock = std::thread::spawn(move || {
-        let connection = rusqlite::Connection::open(path).unwrap();
-        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        ready.send(()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(3300));
-        connection.execute_batch("ROLLBACK").unwrap();
+    let connection = rusqlite::Connection::open(path).expect("open fixture lock connection");
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .expect("set production busy bound on fixture lock connection");
+    // Acquire on this thread: a legitimate SQLite wait may itself exceed one
+    // second. No separate readiness deadline can race successful acquisition,
+    // and setup failures retain their actual SQLite error in the test output.
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("acquire fixture write lock within the five-second busy bound");
+    let previous_requests = gateway.requests();
+    let (observed, released, waited) = std::thread::scope(|scope| {
+        let request = scope.spawn(|| {
+            // A delayed client must not consume the lock-hold interval before
+            // transmission, as it did when client elapsed time was the oracle.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            client.send(Method::GET, "/v1/info", b"", None)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gateway.requests() == previous_requests && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let observed = gateway.requests() == previous_requests + 1;
+        if observed {
+            // Arrival only coordinates release; the server log below proves the
+            // actual SQLite wait, excluding client signing and transmission.
+            std::thread::sleep(std::time::Duration::from_millis(3500));
+        }
+        let released = connection.execute_batch("ROLLBACK");
+        // Release and join even on an observation/SQLite error, before asserting.
+        (observed, released, request.join())
     });
-    locked
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .unwrap();
-    let waited = client.send(Method::GET, "/v1/info", b"", None);
-    lock.join().unwrap();
+    released.expect("release fixture write lock");
+    let waited = waited.expect("fixture HTTP request thread panicked");
+    assert!(
+        observed,
+        "gateway must observe the request within five seconds"
+    );
     assert_eq!(waited.unwrap().status, 200);
+    drop(connection);
+    drop(gateway);
+    drop(backend);
+    let log = std::fs::read_to_string(log_path).unwrap();
+    let records = log
+        .strip_prefix(previous_log.as_str())
+        .expect("request log must append to the completed setup requests")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1, "only the waited request follows setup");
+    let record = &records[0];
+    eprintln!("{record}");
+    assert_eq!(record["operation"], "info");
+    assert_eq!(record["actor_id"], "owner");
+    assert_eq!(record["outcome"], "http_200");
+    assert_eq!(record["nonce_path"], "retained");
+    assert!(
+        record["nonce_sql_ms"].as_f64().unwrap() > 3000.0,
+        "{record}"
+    );
+    assert!(record["duration_ms"].as_u64().unwrap() < 5000, "{record}");
 }
 
 #[test]

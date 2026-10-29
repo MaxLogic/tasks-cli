@@ -31,86 +31,149 @@ fn upgrade_refusal_advertises_the_supported_protocol() {
     assert_eq!(reply.headers()["upgrade"], "tasks-protocol/2");
 }
 
-#[test]
-fn download_authentication_preserves_optional_signed_length_with_protocol_version() {
+fn download_headers(signer: &SigningIdentity, signed_length: bool) -> http::HeaderMap {
+    let uri: Uri = download_uri();
     use axum::http::HeaderMap;
     use base64::{engine::general_purpose::STANDARD, Engine};
     use ed25519_dalek::Signer;
 
-    let (_root, server, signer) = signed_fixture();
-    let uri: Uri = "/v1/projects/11111111-1111-4111-8111-111111111111/tasks/1/attachments/1"
-        .parse()
-        .unwrap();
     // Construct the protocol-2 wire profile independently of the client signer and
     // shared signature-base builder so future client changes cannot rewrite it.
-    let headers = |signed_length: bool| {
-        let component = if signed_length {
-            " \"content-length\""
-        } else {
-            ""
-        };
-        let parameters = format!(
+
+    let component = if signed_length {
+        " \"content-length\""
+    } else {
+        ""
+    };
+    let parameters = format!(
             "(\"@method\" \"@path\" \"@query\" \"content-type\" \"content-digest\" \"x-tasks-server-id\" \"x-tasks-protocol-version\"{component});created=1000;expires=1120;nonce=\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\";alg=\"ed25519\";keyid=\"{}\"",
             signer.credential_id
         );
-        let length_line = if signed_length {
-            "\"content-length\": 0\n"
-        } else {
-            ""
-        };
-        let base = format!(
+    let length_line = if signed_length {
+        "\"content-length\": 0\n"
+    } else {
+        ""
+    };
+    let base = format!(
             "\"@method\": GET\n\"@path\": {uri}\n\"@query\": ?\n\"content-type\": application/json\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"x-tasks-server-id\": {}\n\"x-tasks-protocol-version\": 2\n{length_line}\"@signature-params\": {parameters}",
             signer.server_id
         );
-        let mut headers = HeaderMap::new();
-        headers.insert("content-type", HeaderValue::from_static("application/json"));
-        headers.insert(
-            "content-digest",
-            HeaderValue::from_static("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"),
-        );
-        headers.insert(
-            "x-tasks-server-id",
-            signer.server_id.to_string().parse().unwrap(),
-        );
-        headers.insert("x-tasks-protocol-version", HeaderValue::from_static("2"));
-        headers.insert("content-length", HeaderValue::from_static("0"));
-        headers.insert(
-            "signature-input",
-            format!("tasks={parameters}").parse().unwrap(),
-        );
-        headers.insert(
-            "signature",
-            format!(
-                "tasks=:{}:",
-                STANDARD.encode(signer.key.sign(base.as_bytes()).to_bytes())
-            )
-            .parse()
-            .unwrap(),
-        );
-        headers
-    };
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert(
+        "content-digest",
+        HeaderValue::from_static("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"),
+    );
+    headers.insert(
+        "x-tasks-server-id",
+        signer.server_id.to_string().parse().unwrap(),
+    );
+    headers.insert("x-tasks-protocol-version", HeaderValue::from_static("2"));
+    headers.insert("content-length", HeaderValue::from_static("0"));
+    headers.insert(
+        "signature-input",
+        format!("tasks={parameters}").parse().unwrap(),
+    );
+    headers.insert(
+        "signature",
+        format!(
+            "tasks=:{}:",
+            STANDARD.encode(signer.key.sign(base.as_bytes()).to_bytes())
+        )
+        .parse()
+        .unwrap(),
+    );
+    headers
+}
+fn download_uri() -> Uri {
+    "/v1/projects/11111111-1111-4111-8111-111111111111/tasks/1/attachments/1"
+        .parse()
+        .unwrap()
+}
 
-    let legacy = headers(true);
-    let mut stripped = legacy.clone();
-    stripped.remove("content-length");
-    for (case, headers) in [
-        ("stripped signed length", stripped),
-        ("unsigned length", headers(false)),
-    ] {
-        let error = server
-            .authenticate(&Method::GET, &uri, &headers, 1000)
-            .err()
-            .expect("mismatched download components must be rejected");
+#[test]
+fn download_unsigned_zero_length_survives_proxy_header_changes() {
+    check_download_header_changes(false);
+}
+#[test]
+fn legacy_download_signed_zero_length_survives_proxy_header_changes() {
+    check_download_header_changes(true);
+}
+fn check_download_header_changes(signed: bool) {
+    for arrived in [false, true] {
+        let (_root, server, signer) = signed_fixture();
+        let mut headers = download_headers(&signer, signed);
+        if !arrived {
+            headers.remove("content-length");
+        }
+        server
+            .authenticate(&Method::GET, &download_uri(), &headers, 1000)
+            .unwrap_or_else(|e| panic!("signed={signed} arrived={arrived}: {e}"))
+            .check_body(b"")
+            .unwrap();
         assert!(
-            matches!(error, ServiceError::Unauthorized(_)),
-            "{case}: {error}"
+            server
+                .authenticate(&Method::GET, &download_uri(), &headers, 1000)
+                .is_err(),
+            "nonce must be consumed"
         );
     }
-    // Refused variants must not consume the nonce of the valid legacy request.
+}
+#[test]
+fn download_nonzero_length_is_refused_even_with_a_valid_signature() {
+    let (_root, server, signer) = signed_fixture();
+    let headers = signer
+        .sign_with_content_type(
+            &Method::GET,
+            &download_uri(),
+            b"x",
+            None,
+            1000,
+            &[0; 32],
+            "application/json",
+        )
+        .unwrap();
+    assert!(matches!(
+        server.authenticate(&Method::GET, &download_uri(), &headers, 1000),
+        Err(ServiceError::Unauthorized(_))
+    ));
+}
+#[test]
+fn download_invalid_lengths_and_tampering_do_not_consume_nonce() {
+    for length in ["1", "00", "-1", "invalid"] {
+        let (_root, server, signer) = signed_fixture();
+        let mut headers = download_headers(&signer, false);
+        headers.insert("content-length", length.parse().unwrap());
+        assert!(matches!(
+            server.authenticate(&Method::GET, &download_uri(), &headers, 1000),
+            Err(ServiceError::Unauthorized(_))
+        ));
+        headers.remove("content-length");
+        server
+            .authenticate(&Method::GET, &download_uri(), &headers, 1000)
+            .unwrap();
+    }
+    let (_root, server, signer) = signed_fixture();
+    let mut headers = download_headers(&signer, false);
+    headers.append("content-length", HeaderValue::from_static("0"));
+    assert!(server
+        .authenticate(&Method::GET, &download_uri(), &headers, 1000)
+        .is_err());
+    let mut headers = download_headers(&signer, false);
+    headers.insert(
+        "content-digest",
+        HeaderValue::from_static("sha-256=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:"),
+    );
+    assert!(server
+        .authenticate(&Method::GET, &download_uri(), &headers, 1000)
+        .is_err());
     server
-        .authenticate(&Method::GET, &uri, &legacy, 1000)
-        .unwrap()
-        .check_body(b"")
+        .authenticate(
+            &Method::GET,
+            &download_uri(),
+            &download_headers(&signer, false),
+            1000,
+        )
         .unwrap();
 }
 

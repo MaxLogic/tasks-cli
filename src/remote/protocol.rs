@@ -95,6 +95,8 @@ fn attachment_page_size() -> usize {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetachAttachments {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_ref: Option<String>,
     pub expect_version: u64,
     pub attachments: Vec<u64>,
     #[serde(default)]

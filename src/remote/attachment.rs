@@ -39,11 +39,32 @@ fn download_envelope(
     task: u64,
     attachment: u64,
 ) -> Result<(AttachmentSummary, Vec<u8>), AppError> {
+    let (metadata, bytes) = download(client, project, &task.to_string(), attachment, false)?;
+    Ok((metadata.attachment, bytes))
+}
+fn download(
+    client: &RemoteClient,
+    project: Uuid,
+    task_ref: &str,
+    attachment: u64,
+    context: bool,
+) -> Result<(frame::DownloadMetadata, Vec<u8>), AppError> {
+    let reference = crate::model::parse_task_ref(task_ref).map_err(AppError::validation)?;
+    let task = reference.id;
+    let canonical_ref = reference.key.as_deref().map_or_else(
+        || task.to_string(),
+        |key| crate::model::render_keyed_task_id(Some(key), task),
+    );
+    let query = if context {
+        format!("?context=1&task_ref={canonical_ref}")
+    } else {
+        String::new()
+    };
     let reply = client
         .http
         .send_binary(
             Method::GET,
-            &format!("/v1/projects/{project}/tasks/{task}/attachments/{attachment}"),
+            &format!("/v1/projects/{project}/tasks/{task}/attachments/{attachment}{query}"),
             b"",
             "application/json",
             None,
@@ -61,7 +82,69 @@ fn download_envelope(
             .and_then(|_| Err(AppError::validation("unexpected download response")));
     }
     let (metadata, bytes) = frame::parse_download(&reply.body, project, task, attachment)?;
-    Ok((metadata.attachment, bytes.to_vec()))
+    Ok((metadata, bytes.to_vec()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_one(
+    client: &RemoteClient,
+    root: &Path,
+    project: &str,
+    task_ref: &str,
+    id: u64,
+    out: Option<&Path>,
+    overwrite: bool,
+) -> Result<ApiOutput, AppError> {
+    let project_id =
+        Uuid::parse_str(project).map_err(|_| AppError::validation("invalid project UUID"))?;
+    let (metadata, bytes) = download(client, project_id, task_ref, id, true)?;
+    let context = metadata
+        .context
+        .ok_or(AttachmentError::Integrity("missing download task context"))?;
+    if context
+        .id_key
+        .as_deref()
+        .is_some_and(|key| crate::model::parse_project_key(key).ok().as_deref() != Some(key))
+        || crate::model::parse_task_ref(task_ref)
+            .map_err(AppError::validation)?
+            .resolve(context.id_key.as_deref())
+            .ok()
+            != Some(metadata.task_id)
+    {
+        return Err(AttachmentError::Integrity("download task context mismatch").into());
+    }
+    let record = AttachmentRecord {
+        attachment: metadata.attachment,
+        detached_ms: context.detached_ms,
+    };
+    // The bounded reply stays private until the shared plan checks destinations,
+    // verifies decoded bytes, syncs its staged file and publishes without replace.
+    let plan = materialize::Plan::new(vec![record], root, project, out, overwrite)?;
+    let mut bytes = Some(bytes);
+    let items = plan.execute(|_| {
+        bytes
+            .take()
+            .ok_or_else(|| AppError::validation("download already consumed"))
+    })?;
+    let envelope = Envelope {
+        schema_version: 1,
+        project_id: Some(project.into()),
+        id_key: context.id_key.clone(),
+        data: CommandPayload::AttachmentGet {
+            id: metadata.task_id,
+            display_id: crate::model::render_keyed_task_id(
+                context.id_key.as_deref(),
+                metadata.task_id,
+            ),
+            items,
+        },
+    };
+    let text = envelope.text();
+    Ok(ApiOutput {
+        output: serde_json::to_value(envelope)?,
+        text,
+        catalog_name: None,
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -98,6 +181,14 @@ fn publish(
         .collect::<Result<Vec<_>, _>>()?;
     ids.sort_unstable();
     ids.dedup();
+    // Preserve the query route's typed refusals for missing/out-of-range IDs.
+    // Only valid numeric route IDs can use the direct download optimization.
+    if ids.len() == 1
+        && crate::model::parse_task_ref(task_ref)
+            .is_ok_and(|reference| reference.id > 0 && reference.id <= i64::MAX as u64)
+    {
+        return publish_one(client, root, project, task_ref, ids[0], out, overwrite);
+    }
     let mut after = None;
     let mut records = Vec::new();
     let metadata = loop {
@@ -389,10 +480,8 @@ pub fn execute(
         } => {
             let reference = crate::model::parse_task_ref(id).map_err(AppError::validation)?;
             let task = reference.id;
-            // Numeric IDs already select this project's route. Keyed input
-            // still needs authoritative resolution before a numeric mutation.
             // Preserve typed read refusals for IDs outside the route range.
-            if reference.key.is_some() || task == 0 || task > i64::MAX as u64 {
+            if task == 0 || task > i64::MAX as u64 {
                 query(
                     client,
                     project,
@@ -406,6 +495,9 @@ pub fn execute(
             }
             let target = format!("/v1/projects/{project}/tasks/{task}/attachments/detach");
             let payload = serde_json::to_value(DetachAttachments {
+                task_ref: reference
+                    .key
+                    .map(|key| crate::model::render_keyed_task_id(Some(&key), task)),
                 expect_version: *expect_version,
                 attachments: attachment
                     .iter()

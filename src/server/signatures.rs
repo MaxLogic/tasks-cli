@@ -109,14 +109,24 @@ impl OwnedServer {
                 "content type does not match the signed route profile",
             ));
         }
-        let binary = crate::remote::signing::is_upload(method, uri)
-            || crate::remote::signing::is_download(method, uri);
+        let download = crate::remote::signing::is_download(method, uri);
+        let binary = crate::remote::signing::is_upload(method, uri) || download;
         if binary && headers.contains_key("transfer-encoding") {
             return Err(ServiceError::Unauthorized(
                 "binary requests require a fixed signed length",
             ));
         }
-        let signed_length = crate::remote::signing::covers_length(method, uri, headers);
+        // Downloads are always bodiless. A gateway may add or remove a zero
+        // framing header, but must never control the signed component profile.
+        if download
+            && headers.contains_key("content-length")
+            && header(headers, "content-length")? != "0"
+        {
+            return Err(ServiceError::Unauthorized(
+                "download content length must be zero",
+            ));
+        }
+        let signed_length = crate::remote::signing::is_upload(method, uri);
         if signed_length {
             let text = header(headers, "content-length")?;
             if text
@@ -169,6 +179,17 @@ impl OwnedServer {
             expected.push("idempotency-key");
         }
         if signed_length {
+            expected.push("content-length");
+        }
+        // Compatibility with clients before TSK-056: their fixed zero length
+        // is authenticated even if an intermediary removed the framing header.
+        // All other components and signature parameters remain exact.
+        let legacy_download_length = download
+            && list.items.len() == expected.len() + 1
+            && list.items.last().is_some_and(|item| {
+                item.bare_item.as_string().map(|v| v.as_str()) == Some("content-length")
+            });
+        if legacy_download_length {
             expected.push("content-length");
         }
         if list.items.len() != expected.len()
@@ -256,7 +277,18 @@ impl OwnedServer {
         let parameters = serialized
             .strip_prefix("tasks=")
             .ok_or(ServiceError::Unauthorized("unexpected signature label"))?;
-        let base = signature_base(method, uri, headers, parameters, mutation)?;
+        let mut normalized;
+        let signed_headers = if download {
+            normalized = headers.clone();
+            normalized.remove("content-length");
+            if legacy_download_length {
+                normalized.insert("content-length", http::HeaderValue::from_static("0"));
+            }
+            &normalized
+        } else {
+            headers
+        };
+        let base = signature_base(method, uri, signed_headers, parameters, mutation)?;
         {
             let _signature = super::timing::Phase::Signature.start();
             key.verify_strict(base.as_bytes(), &signature)

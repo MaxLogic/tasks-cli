@@ -164,7 +164,22 @@ pub(crate) struct Download {
 }
 
 pub(crate) fn download(server: &OwnedServer, uri: &Uri) -> Result<Download, AppError> {
-    let (project, task) = route(uri)?;
+    // Context is opt-in because existing protocol-2 clients reject unknown
+    // frame fields. The signed query carries the complete task reference.
+    let task_ref = match uri.query() {
+        None => None,
+        Some(query) => Some(
+            query
+                .strip_prefix("context=1&task_ref=")
+                .filter(|reference| !reference.contains(['&', '=', '%']))
+                .ok_or_else(|| AppError::validation("invalid download context query"))?,
+        ),
+    };
+    let numeric: Uri = uri
+        .path()
+        .parse()
+        .map_err(|_| AppError::validation("invalid attachment route"))?;
+    let (project, task) = route(&numeric)?;
     if !api::catalogued(server, project)
         .map_err(|_| AppError::Database("server catalog unavailable".into()))?
     {
@@ -182,12 +197,27 @@ pub(crate) fn download(server: &OwnedServer, uri: &Uri) -> Result<Download, AppE
         return Err(AppError::validation("invalid attachment ID"));
     }
     let mut store = Store::open_readonly(server.data_root(), &project.to_string())?;
-    let (record, bytes) = store.read_envelope(task, id)?;
+    let snapshot = store.conn.unchecked_transaction()?;
+    store.project_key = crate::keys::read_key(&snapshot)?;
+    if let Some(reference) = task_ref {
+        if store.resolve_ref(reference)? != task {
+            return Err(AppError::validation(
+                "task reference does not match the route ID",
+            ));
+        }
+    }
+    let (record, bytes) = db::read_envelope(&snapshot, task, id)?;
+    let context = task_ref.map(|_| frame::DownloadContext {
+        id_key: store.project_key.clone(),
+        detached_ms: record.detached_ms,
+    });
+    snapshot.commit()?;
     let metadata = frame::DownloadMetadata {
         format: 1,
         project_id: project,
         task_id: task,
         attachment: record.attachment,
+        context,
     };
     // Keep the existing bounded SQLite read, but do not copy its full BLOB into
     // another frame Vec. The transport sends this prefix and envelope in order.

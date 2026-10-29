@@ -42,10 +42,20 @@ fn leftover_capability_cache_is_ignored_and_never_replaced() {
         Some(3)
     );
     assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+    assert_eq!(
+        run(
+            &f.clients[0],
+            &["--project", &project, "attachment", "get", "0", "A1"]
+        )
+        .status
+        .code(),
+        Some(3),
+        "single-selected get must preserve the missing-task exit for zero"
+    );
 }
 
 #[test]
-fn keyed_detach_still_validates_the_key_before_sending_a_numeric_mutation() {
+fn keyed_detach_validates_the_key_in_its_only_request() {
     let f = Fixture::new();
     let project = f.project().to_string();
     let body = f.body("keyed detach");
@@ -96,7 +106,13 @@ fn keyed_detach_still_validates_the_key_before_sending_a_numeric_mutation() {
         .list()
         .unwrap()
         .is_empty());
-    // Key validation remains a safety request before the mutation.
+    let state = ok(run(
+        &f.clients[0],
+        &["--project", &project, "attachment", "list", "1"],
+    ));
+    assert_eq!(state["data"]["version"], 2);
+    assert_eq!(state["data"]["items"].as_array().unwrap().len(), 1);
+    // The server validates the key within the mutation transaction.
     let before = f.gateway.requests();
     let detached = ok(run(
         &f.clients[0],
@@ -112,7 +128,7 @@ fn keyed_detach_still_validates_the_key_before_sending_a_numeric_mutation() {
         ],
     ));
     assert_eq!(detached["data"]["version"], 3);
-    assert_eq!(f.gateway.requests() - before, 2);
+    assert_eq!(f.gateway.requests() - before, 1);
 }
 
 // Run with --release -- --nocapture for subprocess wall times, including startup.
@@ -174,6 +190,7 @@ fn remote_commands_send_only_operation_requests() {
         let task = (sample + 1).to_string();
         let attachment = format!("A{}", sample + 1);
         let output = f.root.path().join(format!("download-{sample}.txt"));
+        let saved = f.root.path().join(format!("saved-{sample}.txt"));
         let cases = [
             (
                 "create",
@@ -232,6 +249,17 @@ fn remote_commands_send_only_operation_requests() {
                 vec!["attachment", "get", &task, &attachment],
             ),
             (
+                "attachment-save-as",
+                vec![
+                    "attachment",
+                    "get",
+                    &task,
+                    &attachment,
+                    "--out",
+                    saved.to_str().unwrap(),
+                ],
+            ),
+            (
                 "attachment-detach",
                 vec![
                     "attachment",
@@ -280,11 +308,7 @@ fn remote_commands_send_only_operation_requests() {
             counts.push(count);
         }
         assert_eq!(std::fs::read(&output).unwrap(), b"attachment fixture");
+        assert_eq!(std::fs::read(&saved).unwrap(), b"attachment fixture");
     }
-    assert_eq!(
-        counts,
-        // Single-file get/view retain metadata-before-download. Numeric
-        // detach is one request; keyed detach's two are asserted separately.
-        [1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1].repeat(samples)
-    );
+    assert_eq!(counts, [1; 15].repeat(samples));
 }

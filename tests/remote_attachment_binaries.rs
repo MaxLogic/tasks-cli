@@ -6,12 +6,12 @@ use std::{
     fs,
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::{Child, Output, Stdio},
     time::{Duration, Instant},
 };
 use support::{
     https::{Reply, TlsFixture, FIXTURE_IO_TIMEOUT},
-    remote_fixture::{ok, run},
+    remote_fixture::ok,
 };
 
 struct Server(Child);
@@ -30,28 +30,48 @@ fn server_binary() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_tasks-server")))
 }
 
-fn admin(root: &Path, args: &[&str]) -> Value {
-    ok(support::process::command(server_binary())
+fn admin(binary: &Path, root: &Path, args: &[&str]) -> Value {
+    ok(support::process::command(binary)
         .args(["--data-root", root.to_str().unwrap(), "admin"])
         .args(args)
         .output()
         .unwrap())
 }
 
-fn round_trip(omit_empty_get_length: bool) {
+fn run(binary: &Path, root: &Path, args: &[&str]) -> Output {
+    support::process::command(binary)
+        .args(["--data-root", root.to_str().unwrap(), "--format", "json"])
+        .args(args)
+        .env_remove("TASKS_WINDOWS_EXE")
+        .env_remove("TASKS_PROJECT")
+        .env_remove("TASKS_DELEGATED")
+        .env_remove("TASKS_ORIGIN_CONTEXT")
+        .env("TASKS_CLIENT_DIR", root.join("client"))
+        .output()
+        .unwrap()
+}
+
+fn round_trip(
+    server_exe: &Path,
+    client_exe: &Path,
+    omit_empty_get_length: bool,
+    refuse_new_operations: bool,
+) {
     let root = tempfile::tempdir().unwrap();
     let server_root = root.path().join("server");
     let client = root.path().join("client");
     let keys = client.join("client");
     fs::create_dir(&client).unwrap();
-    let init = admin(&server_root, &["init"]);
+    let init = admin(server_exe, &server_root, &["init"]);
     let enrollment = ok(run(
+        client_exe,
         &client,
         &["remote", "keygen", "--directory", keys.to_str().unwrap()],
     ));
     let registration = root.path().join("registration.json");
     fs::write(&registration, serde_json::to_vec(&enrollment).unwrap()).unwrap();
     let registered = admin(
+        server_exe,
         &server_root,
         &[
             "register",
@@ -63,7 +83,7 @@ fn round_trip(omit_empty_get_length: bool) {
     let address: SocketAddr = listener.local_addr().unwrap();
     drop(listener);
     let mut server = Server(
-        support::process::command(server_binary())
+        support::process::command(server_exe)
             .args([
                 "--data-root",
                 server_root.to_str().unwrap(),
@@ -100,6 +120,7 @@ fn round_trip(omit_empty_get_length: bool) {
         },
     );
     ok(run(
+        client_exe,
         &client,
         &[
             "remote",
@@ -119,6 +140,7 @@ fn round_trip(omit_empty_get_length: bool) {
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     let project = ok(run(
+        client_exe,
         &client,
         &[
             "init",
@@ -134,11 +156,12 @@ fn round_trip(omit_empty_get_length: bool) {
     fs::write(&source, bytes).unwrap();
     let body = root.path().join("body.txt");
     fs::write(&body, "synthetic task").unwrap();
-    let call = |args: &[&str]| {
+    let raw = |args: &[&str]| {
         let mut selected = vec!["--project", project];
         selected.extend_from_slice(args);
-        ok(run(&client, &selected))
+        run(client_exe, &client, &selected)
     };
+    let call = |args: &[&str]| ok(raw(args));
     call(&[
         "create",
         "--title",
@@ -160,6 +183,57 @@ fn round_trip(omit_empty_get_length: bool) {
     );
     let list = call(&["attachment", "list", "FIX-001"]);
     assert_eq!(list["data"]["items"].as_array().unwrap().len(), 1);
+    if refuse_new_operations {
+        let history = call(&["history", "FIX-001"]);
+        let task = call(&["show", "FIX-001"]);
+        let refusal = |args: &[&str]| {
+            let output = raw(args);
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(output.status.code(), Some(2), "{error}");
+            assert_eq!(error["error"]["code"], "validation", "{error}");
+            eprintln!("old server refused {args:?}: {error}");
+        };
+        for out in [None, Some(root.path().join("saved.zip"))] {
+            let destination = out.clone().unwrap_or_else(|| {
+                client.join(format!("cache/attachments/{project}/A1/source.zip"))
+            });
+            for overwrite in [false, true] {
+                if overwrite {
+                    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                    fs::write(&destination, b"preserve original file").unwrap();
+                }
+                let mut args = vec!["attachment", "get", "FIX-001", "A1"];
+                if let Some(out) = &out {
+                    args.extend(["--out", out.to_str().unwrap()]);
+                }
+                if overwrite {
+                    args.push("--overwrite");
+                }
+                refusal(&args);
+                if overwrite {
+                    assert_eq!(fs::read(&destination).unwrap(), b"preserve original file");
+                    fs::remove_file(&destination).unwrap();
+                } else {
+                    assert!(!destination.exists());
+                }
+            }
+        }
+        for reference in ["FIX-001", "OTHER-001"] {
+            refusal(&[
+                "attachment",
+                "detach",
+                reference,
+                "A1",
+                "--expect-version",
+                "2",
+            ]);
+            assert_eq!(call(&["attachment", "list", "FIX-001"]), list);
+            assert_eq!(call(&["history", "FIX-001"]), history);
+            assert_eq!(call(&["show", "FIX-001"]), task);
+        }
+        eprintln!("new client / old server: get refuses without publication or replacement; keyed detach refuses without task, history or attachment mutation");
+        return;
+    }
     // Viewer View uses the cached path; Save as supplies --out. Exercise both
     // CLI contracts, including exact bytes and the structured path response.
     for out in [None, Some(root.path().join("saved.zip"))] {
@@ -190,14 +264,52 @@ fn round_trip(omit_empty_get_length: bool) {
         .as_array()
         .unwrap()
         .is_empty());
+    eprintln!(
+        "client={} server={}: list, cached get, Save as and keyed detach passed",
+        client_exe.display(),
+        server_exe.display()
+    );
 }
 
 #[test]
 fn real_binaries_attach_list_get_detach() {
-    round_trip(false);
+    round_trip(
+        &server_binary(),
+        Path::new(env!("CARGO_BIN_EXE_tasks")),
+        false,
+        false,
+    );
 }
 
 #[test]
 fn real_binaries_get_survives_gateway_omitting_empty_content_length() {
-    round_trip(true);
+    round_trip(
+        &server_binary(),
+        Path::new(env!("CARGO_BIN_EXE_tasks")),
+        true,
+        false,
+    );
+}
+
+// The retained rollout script exports/builds 393d8f3 outside the worktree and
+// supplies these paths. Ordinary suites do not depend on historical builds.
+#[test]
+#[ignore = "requires TASKS_PROTOCOL2_BASE_CLIENT built from 393d8f3"]
+fn protocol2_rollout_old_client_new_server() {
+    let old =
+        PathBuf::from(std::env::var_os("TASKS_PROTOCOL2_BASE_CLIENT").expect("base client path"));
+    round_trip(
+        Path::new(env!("CARGO_BIN_EXE_tasks-server")),
+        &old,
+        false,
+        false,
+    );
+}
+
+#[test]
+#[ignore = "requires TASKS_PROTOCOL2_BASE_SERVER built from 393d8f3"]
+fn protocol2_rollout_new_client_old_server_refuses_without_side_effects() {
+    let old =
+        PathBuf::from(std::env::var_os("TASKS_PROTOCOL2_BASE_SERVER").expect("base server path"));
+    round_trip(&old, Path::new(env!("CARGO_BIN_EXE_tasks")), false, true);
 }

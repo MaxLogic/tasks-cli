@@ -294,6 +294,97 @@ fn remote(f: &Fixture, index: usize) -> tasks_cli::remote::client::RemoteClient 
 }
 
 #[test]
+fn single_get_returns_task_context_and_refuses_a_foreign_key_without_publication() {
+    let f = Fixture::new();
+    let project = f.project();
+    task(&f, project);
+    let project = project.to_string();
+    let source = f.body("context fixture");
+    ok(run(
+        &f.clients[0],
+        &[
+            "--project",
+            &project,
+            "attachment",
+            "add",
+            "1",
+            "--expect-version",
+            "1",
+            "--file",
+            source.to_str().unwrap(),
+        ],
+    ));
+    let output = f.root.path().join("context.txt");
+    let before = f.gateway.requests();
+    let reply = ok(run(
+        &f.clients[1],
+        &[
+            "--project",
+            &project,
+            "attachment",
+            "get",
+            "FIX-001",
+            "A1",
+            "--out",
+            output.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(f.gateway.requests() - before, 1);
+    assert!(
+        reply.get("id_key").is_none(),
+        "the existing JSON schema omits id_key"
+    );
+    assert_eq!(reply["data"]["display_id"], "FIX-001");
+    assert!(reply["data"]["items"][0]["attachment"]["detached_ms"].is_null());
+    assert_eq!(fs::read(&output).unwrap(), b"context fixture");
+    fs::remove_file(&output).unwrap();
+    let before = f.gateway.requests();
+    let wrong = run(
+        &f.clients[1],
+        &[
+            "--project",
+            &project,
+            "attachment",
+            "get",
+            "OTHER-001",
+            "A1",
+            "--out",
+            output.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(wrong.status.code(), Some(3));
+    assert_eq!(f.gateway.requests() - before, 1);
+    assert!(!output.exists());
+    ok(run(
+        &f.clients[0],
+        &[
+            "--project",
+            &project,
+            "attachment",
+            "detach",
+            "FIX-001",
+            "A1",
+            "--expect-version",
+            "2",
+        ],
+    ));
+    let reply = ok(run(
+        &f.clients[1],
+        &[
+            "--project",
+            &project,
+            "attachment",
+            "get",
+            "1",
+            "A1",
+            "--out",
+            output.to_str().unwrap(),
+        ],
+    ));
+    assert!(reply["data"]["items"][0]["attachment"]["detached_ms"].is_i64());
+}
+
+#[test]
 fn twenty_mib_upload_downloads_verified_bytes_on_second_client() {
     let f = Fixture::new();
     let project = f.project();
@@ -672,6 +763,103 @@ fn raw_frame(items: Value, envelopes: &[Vec<u8>]) -> Vec<u8> {
         bytes.extend(envelope);
     }
     bytes
+}
+
+#[test]
+fn signed_detach_reference_mismatches_are_replayable_without_mutation() {
+    let s = Server::new(false);
+    let hash = tasks_cli::markdown::sha256(b"x");
+    let bytes = envelope(b"x", 1, &hash, 0);
+    let body = raw_frame(json!([item("x.txt", 1, &hash, bytes.len())]), &[bytes]);
+    assert_eq!(
+        s.request(
+            http::Method::POST,
+            &s.target(),
+            &body,
+            "application/octet-stream",
+            Some(Uuid::new_v4())
+        )
+        .0,
+        200
+    );
+    let state = || {
+        let conn = rusqlite::Connection::open(tasks_cli::store::data_root_project_path(
+            s.root.path(),
+            &s.project.to_string(),
+        ))
+        .unwrap();
+        conn.query_row("SELECT version,(SELECT count(*) FROM events WHERE task_id=1),(SELECT detached_ms FROM task_attachments WHERE task_id=1 AND attachment_id=1) FROM tasks WHERE id=1", [], |r| Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?,r.get::<_,Option<i64>>(2)?))).unwrap()
+    };
+    let before = state();
+    for (reference, status, exit) in [("OTHER-001", 404, 3), ("BIN-002", 400, 2)] {
+        let body =
+            serde_json::to_vec(&json!({"task_ref":reference,"expect_version":2,"attachments":[1]}))
+                .unwrap();
+        let request_id = Uuid::new_v4();
+        let target = format!("{}/detach", s.target());
+        let first = s.request(
+            http::Method::POST,
+            &target,
+            &body,
+            "application/json",
+            Some(request_id),
+        );
+        assert_eq!(
+            first.0,
+            status,
+            "reference={reference}: {}",
+            String::from_utf8_lossy(&first.1)
+        );
+        let reply: Value = serde_json::from_slice(&first.1).unwrap();
+        assert_eq!(reply["error"]["exit_code"], exit);
+        assert_eq!(reply["receipt"]["request_id"], request_id.to_string());
+        assert_eq!(
+            s.request(
+                http::Method::POST,
+                &target,
+                &body,
+                "application/json",
+                Some(request_id)
+            ),
+            first
+        );
+        assert_eq!(
+            state(),
+            before,
+            "a refusal must preserve version, history and attachment state"
+        );
+    }
+    // Older protocol-2 requests still receive the exact strict frame fields.
+    let legacy = s.request(
+        http::Method::GET,
+        &format!("{}/1", s.target()),
+        b"",
+        "application/json",
+        None,
+    );
+    assert_eq!(legacy.0, 200);
+    let length = u32::from_le_bytes(legacy.1[8..12].try_into().unwrap()) as usize;
+    let metadata: Value = serde_json::from_slice(&legacy.1[12..12 + length]).unwrap();
+    assert_eq!(
+        metadata
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["attachment", "format", "project_id", "task_id"]
+    );
+    for (reference, status) in [("OTHER-001", 404), ("BIN-002", 400)] {
+        let reply = s.request(
+            http::Method::GET,
+            &format!("{}/1?context=1&task_ref={reference}", s.target()),
+            b"",
+            "application/json",
+            None,
+        );
+        assert_eq!(reply.0, status);
+        assert_eq!(state(), before);
+    }
 }
 
 #[test]

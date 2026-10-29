@@ -41,6 +41,16 @@ pub struct DownloadMetadata {
     pub project_id: Uuid,
     pub task_id: u64,
     pub attachment: AttachmentSummary,
+    /// Returned only with `?context=1&task_ref=<reference>`. Older protocol-2
+    /// clients retain the original strict format-1 metadata without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<DownloadContext>,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadContext {
+    pub id_key: Option<String>,
+    pub detached_ms: Option<i64>,
 }
 fn invalid() -> AppError {
     AppError::Coded {
