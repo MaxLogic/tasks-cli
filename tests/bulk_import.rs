@@ -968,6 +968,11 @@ fn bom_file_is_preserved_in_provenance() {
 
 #[test]
 fn verification_failure_leaves_the_sources_in_place() {
+    let cli_hash = || {
+        use sha2::Digest;
+        sha2::Sha256::digest(fs::read(env!("CARGO_BIN_EXE_tasks")).expect("outer tasks binary"))
+    };
+    let original_cli_hash = cli_hash();
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path();
     let corpus = root.join("corpus");
@@ -980,19 +985,8 @@ fn verification_failure_leaves_the_sources_in_place() {
     let quarantine = root.join("quarantine");
     let seed_project = seed_data_root(&data_root);
     let before = snapshot(&data_root, &report_dir);
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = support::process::command("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--locked",
-            "--features",
-            "test-hooks",
-            "--bin",
-            "tasks",
-            "--",
-            "--data-root",
-        ])
+    let output = support::process::test_hooks_command("tasks")
+        .arg("--data-root")
         .arg(string_arg(&data_root))
         .args(["bulk-import", "--scan-root"])
         .arg(string_arg(&corpus))
@@ -1008,12 +1002,14 @@ fn verification_failure_leaves_the_sources_in_place() {
             write_generated_key_map(&corpus, &key_map);
             string_arg(&key_map)
         })
-        .current_dir(&manifest_dir)
         .env("TASKS_TEST_BULK_FAIL_VERIFY", "1")
-        .env_remove("TASKS_WINDOWS_EXE")
-        .env_remove("TASKS_PROJECT")
         .output()
         .expect("nested cargo run");
+    assert_eq!(
+        cli_hash(),
+        original_cli_hash,
+        "nested test-hooks build must not replace the outer tasks binary"
+    );
     assert_eq!(
         output.status.code(),
         Some(2),

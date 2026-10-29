@@ -75,17 +75,8 @@ fn newer_schema_fails_safely_and_killed_precommit_writer_rolls_back() {
     .expect("restore schema");
     drop(conn);
     let marker = temp.path().join("precommit.ready");
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut child = support::process::command("cargo")
+    let mut child = support::process::test_hooks_command("tasks-test-writer")
         .args([
-            "run",
-            "--quiet",
-            "--locked",
-            "--features",
-            "test-hooks",
-            "--bin",
-            "tasks-test-writer",
-            "--",
             "--data-root",
             temp.path().to_str().unwrap(),
             "--project",
@@ -97,7 +88,6 @@ fn newer_schema_fails_safely_and_killed_precommit_writer_rolls_back() {
             "--title",
             "killed",
         ])
-        .current_dir(manifest)
         .env("TASKS_PRECOMMIT_READY_FILE", &marker)
         .env("TASKS_HOLD_PRECOMMIT_MS", "30000")
         .spawn()
