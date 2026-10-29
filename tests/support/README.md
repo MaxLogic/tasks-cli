@@ -4,6 +4,13 @@ Use `process::command` for synthetic subprocesses. It prevents console windows
 from taking foreground focus on Windows. Give CLI commands an explicit temporary
 `--data-root` and remove inherited routing variables when running locally.
 
+Use `temp::TempDir` for server fixture roots. It reports deletion failures as
+test failures instead of silently leaving databases behind. Declare the root
+after every field owning a file, SQLite connection or server state: Rust drops
+fields in declaration order. Stop and join server/proxy workers in `Drop`, and
+release retained `ServiceState`/`Arc` owners before removing the root. Killing a
+child process also requires waiting for it to exit before fixture cleanup.
+
 Use `process::test_hooks_command(binary)` when a test needs a nested Cargo build
 with `test-hooks`. Append only the binary's arguments. This helper selects the
 package manifest, removes inherited task routing, and passes an explicit

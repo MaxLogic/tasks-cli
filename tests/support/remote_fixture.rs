@@ -39,13 +39,15 @@ pub fn ok(output: Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 pub struct Fixture {
-    pub root: tempfile::TempDir,
     pub clients: [PathBuf; 2],
-    _backend: HttpBackend,
     pub gateway: TlsFixture,
+    _backend: HttpBackend,
     pub drop_write: Arc<AtomicBool>,
     pub truncate_export: Arc<AtomicBool>,
     pub substitute_write: Arc<AtomicBool>,
+    // Fields drop in declaration order: stop proxies and join the server before
+    // removing files held by its persistent catalog and nonce connections.
+    pub root: super::temp::TempDir,
 }
 impl Fixture {
     pub fn backend_address(&self) -> std::net::SocketAddr {
@@ -53,7 +55,7 @@ impl Fixture {
     }
 
     pub fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = super::temp::TempDir::new();
         let clients = [root.path().join("client-a"), root.path().join("client-b")];
         let server = OwnedServer::initialize(&root.path().join("server")).unwrap();
         let server_id = server.server_id();

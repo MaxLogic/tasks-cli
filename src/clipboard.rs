@@ -127,6 +127,7 @@ impl ClipboardCaptureError {
         self.details().exit_code
     }
 
+    #[cfg(unix)]
     fn with_elapsed(mut self, elapsed: std::time::Duration) -> Self {
         let details = match &mut self {
             Self::Empty(details) | Self::Changed(details) | Self::TooLarge(details) => details,
@@ -137,6 +138,7 @@ impl ClipboardCaptureError {
     }
 }
 
+#[cfg(unix)]
 fn duration_ms(duration: std::time::Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
@@ -400,6 +402,7 @@ fn read_fixture_with_png(
     }
 }
 
+#[cfg(any(unix, test))]
 fn parse_file_uris(input: &str) -> (Vec<PathBuf>, Vec<SkippedClipboardEntry>) {
     let mut paths = Vec::new();
     let mut skipped = Vec::new();
@@ -519,47 +522,61 @@ fn read_attachments_backend(
             }
         }
         Backend::Wayland | Backend::X11 => {
-            let name = if selected == Backend::Wayland {
-                "wl-paste"
-            } else {
-                "xclip"
-            };
-            let types = linux_clipboard_command(&selected, None);
-            let types = attachment_run(types, &[], name, MAX_CLIPBOARD_LIST)?;
-            let types = String::from_utf8(types).map_err(|_| {
-                AppError::Interop(format!("{name} returned invalid clipboard types"))
-            })?;
-            let types: Vec<_> = types.split_whitespace().collect();
-            if types.contains(&"text/uri-list") {
-                let bytes = attachment_run(
-                    linux_clipboard_command(&selected, Some("text/uri-list")),
-                    &[],
-                    name,
-                    MAX_CLIPBOARD_LIST,
-                )?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    AppError::Interop(format!("{name} returned a non-UTF-8 URI list"))
-                })?;
-                let (files, skipped) = parse_file_uris(&text);
-                require_content(inspect_files(files, skipped)?)
-            } else if types.contains(&"image/png") {
-                let png = attachment_run(
-                    linux_clipboard_command(&selected, Some("image/png")),
-                    &[],
-                    name,
-                    MAX_CLIPBOARD_IMAGE,
-                )?;
-                require_content(ClipboardCapture {
-                    image: Some(png),
-                    ..Default::default()
-                })
-            } else {
-                Err(ClipboardCaptureError::empty())
+            #[cfg(unix)]
+            {
+                read_linux_attachments(selected)
+            }
+            #[cfg(not(unix))]
+            {
+                Err(AppError::Interop(
+                    "Linux attachment helpers require a native Linux desktop".into(),
+                )
+                .into())
             }
         }
     }
 }
 
+#[cfg(unix)]
+fn read_linux_attachments(selected: Backend) -> Result<ClipboardCapture, ClipboardCaptureError> {
+    let name = if selected == Backend::Wayland {
+        "wl-paste"
+    } else {
+        "xclip"
+    };
+    let types = linux_clipboard_command(&selected, None);
+    let types = attachment_run(types, &[], name, MAX_CLIPBOARD_LIST)?;
+    let types = String::from_utf8(types)
+        .map_err(|_| AppError::Interop(format!("{name} returned invalid clipboard types")))?;
+    let types: Vec<_> = types.split_whitespace().collect();
+    if types.contains(&"text/uri-list") {
+        let bytes = attachment_run(
+            linux_clipboard_command(&selected, Some("text/uri-list")),
+            &[],
+            name,
+            MAX_CLIPBOARD_LIST,
+        )?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| AppError::Interop(format!("{name} returned a non-UTF-8 URI list")))?;
+        let (files, skipped) = parse_file_uris(&text);
+        require_content(inspect_files(files, skipped)?)
+    } else if types.contains(&"image/png") {
+        let png = attachment_run(
+            linux_clipboard_command(&selected, Some("image/png")),
+            &[],
+            name,
+            MAX_CLIPBOARD_IMAGE,
+        )?;
+        require_content(ClipboardCapture {
+            image: Some(png),
+            ..Default::default()
+        })
+    } else {
+        Err(ClipboardCaptureError::empty())
+    }
+}
+
+#[cfg(unix)]
 fn linux_clipboard_command(selected: &Backend, target: Option<&str>) -> Command {
     let mut command = Command::new(if *selected == Backend::Wayland {
         "wl-paste"
@@ -587,6 +604,7 @@ fn linux_clipboard_command(selected: &Backend, target: Option<&str>) -> Command 
     command
 }
 
+#[cfg(unix)]
 fn attachment_run(
     command: Command,
     input: &[u8],
@@ -600,22 +618,19 @@ fn attachment_run(
         name,
         limit,
         std::time::Duration::from_secs(10),
-        |_| {},
     )
 }
 
-// Synthetic Windows transport tests use std::process; production attachment
-// subprocess capture uses this supervisor for Linux wl-paste/xclip only.
-// Deliberately no Job Object dependency/unsafe code. A descendant inheriting
-// pipes could outlive the CLI; the independent 500 ms pipe grace still bounds
-// return latency. Linux retains process-group termination through safe rustix.
+// Native Windows capture has no helper process. This supervisor belongs only
+// to Linux wl-paste/xclip; terminate their process group through safe rustix.
+#[cfg(unix)]
 struct HelperProcess {
     child: std::process::Child,
-    #[cfg(unix)]
     group: rustix::process::Pid,
     terminated: bool,
 }
 
+#[cfg(unix)]
 impl HelperProcess {
     fn spawn(
         mut command: Command,
@@ -623,11 +638,6 @@ impl HelperProcess {
         stdout: std::io::PipeWriter,
         stderr: std::io::PipeWriter,
     ) -> std::io::Result<Self> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -636,48 +646,26 @@ impl HelperProcess {
         command.stdin(stdin).stdout(stdout).stderr(stderr);
         let child = command.spawn()?;
         Ok(Self {
-            #[cfg(unix)]
             group: rustix::process::Pid::from_child(&child),
             child,
             terminated: false,
         })
     }
 
-    fn id(&self) -> u32 {
-        self.child.id()
-    }
-
     fn exit_success(&mut self) -> std::io::Result<Option<bool>> {
-        #[cfg(windows)]
-        {
-            Ok(self.child.try_wait()?.map(|status| status.success()))
-        }
-        #[cfg(unix)]
-        {
-            // Keep the root PID reserved until its group has been killed, even
-            // when the root exits before its descendants.
-            use rustix::process::{waitid, WaitId, WaitIdOptions};
-            Ok(waitid(
-                WaitId::Pid(self.group),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            )?
-            .map(|status| status.exit_status() == Some(0)))
-        }
+        // Keep the root PID reserved until its group has been killed, even
+        // when the root exits before its descendants.
+        use rustix::process::{waitid, WaitId, WaitIdOptions};
+        Ok(waitid(
+            WaitId::Pid(self.group),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )?
+        .map(|status| status.exit_status() == Some(0)))
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
         if self.terminated {
             return Ok(());
-        }
-        #[cfg(windows)]
-        {
-            if self.child.try_wait()?.is_none() {
-                if let Err(error) = self.child.kill() {
-                    if self.child.try_wait()?.is_none() {
-                        return Err(error);
-                    }
-                }
-            }
         }
         #[cfg(unix)]
         {
@@ -696,193 +684,21 @@ impl HelperProcess {
     }
 }
 
+#[cfg(unix)]
 impl Drop for HelperProcess {
     fn drop(&mut self) {
         let _ = self.terminate();
     }
 }
 
+#[cfg(unix)]
 enum HelperIo {
     Input(std::io::Result<()>),
     Output(std::io::Result<Vec<u8>>),
     Diagnostics(std::io::Result<u64>),
 }
 
-#[derive(Default)]
-struct ClipboardProgress {
-    phase: std::sync::atomic::AtomicU8,
-}
-
-// Only fixed literals cross the diagnostic boundary. Never retain or display
-// arbitrary helper stderr, which may contain clipboard data or private paths.
-#[derive(Clone, Copy)]
-#[repr(u8)]
-enum ClipboardPhase {
-    Started = 1,
-    StaReady,
-    ReadingRequest,
-    LoadingAssemblies,
-    ReadingFormats,
-    FormatsReady,
-    ReadingFiles,
-    ReadingPng,
-    ReadingImage,
-    ImageRetrieved,
-    PreparingImage,
-    CopyingPng,
-    EncodingPng,
-    Encoded,
-    OutputReady,
-    Busy,
-}
-
-impl ClipboardPhase {
-    const ALL: &'static [Self] = &[
-        Self::Started,
-        Self::StaReady,
-        Self::ReadingRequest,
-        Self::LoadingAssemblies,
-        Self::ReadingFormats,
-        Self::FormatsReady,
-        Self::ReadingFiles,
-        Self::ReadingPng,
-        Self::ReadingImage,
-        Self::ImageRetrieved,
-        Self::PreparingImage,
-        Self::CopyingPng,
-        Self::EncodingPng,
-        Self::Encoded,
-        Self::OutputReady,
-        Self::Busy,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::StaReady => "sta_ready",
-            Self::ReadingRequest => "reading_request",
-            Self::LoadingAssemblies => "loading_assemblies",
-            Self::ReadingFormats => "reading_formats",
-            Self::FormatsReady => "formats_ready",
-            Self::ReadingFiles => "reading_files",
-            Self::ReadingPng => "reading_png",
-            Self::ReadingImage => "reading_image",
-            Self::ImageRetrieved => "image_retrieved",
-            Self::PreparingImage => "preparing_image",
-            Self::CopyingPng => "copying_png",
-            Self::EncodingPng => "encoding_png",
-            Self::Encoded => "encoded",
-            Self::OutputReady => "output_ready",
-            Self::Busy => "busy",
-        }
-    }
-
-    fn from_marker(line: &[u8]) -> Option<Self> {
-        let label = line.strip_prefix(b"TASKS_CLIPBOARD_PHASE_V1:")?;
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|phase| phase.label().as_bytes() == label)
-    }
-
-    fn from_code(code: u8) -> Option<Self> {
-        Self::ALL.iter().copied().find(|phase| *phase as u8 == code)
-    }
-
-    fn failure_message(self, timed_out: bool, elapsed: std::time::Duration) -> String {
-        let operation = match self {
-            Self::Started | Self::StaReady => "starting clipboard support",
-            Self::ReadingRequest => "reading the clipboard request",
-            Self::LoadingAssemblies => "loading clipboard support",
-            Self::ReadingFormats | Self::FormatsReady => "listing available formats",
-            Self::ReadingFiles => "reading the copied files",
-            Self::ReadingPng | Self::ReadingImage => "reading the image",
-            Self::ImageRetrieved | Self::PreparingImage => "preparing the image",
-            Self::CopyingPng => "copying the PNG image",
-            Self::EncodingPng => "encoding the image",
-            Self::Encoded | Self::OutputReady => "sending the clipboard result",
-            Self::Busy => "opening the clipboard",
-        };
-        let message = if matches!(self, Self::Busy) {
-            "Clipboard is in use.".to_owned()
-        } else {
-            format!(
-                "Clipboard capture {} while {operation}.",
-                if timed_out { "timed out" } else { "failed" }
-            )
-        };
-        let hint = if matches!(
-            self,
-            Self::ReadingFormats
-                | Self::FormatsReady
-                | Self::ReadingFiles
-                | Self::ReadingPng
-                | Self::ReadingImage
-                | Self::Busy
-        ) {
-            "The app that copied it may still be busy (for example, Snipping Tool). Try again in a moment."
-        } else {
-            "Try again in a moment."
-        };
-        format!(
-            "{message} {hint} (phase: {}; elapsed: {} ms)",
-            self.label(),
-            duration_ms(elapsed)
-        )
-    }
-}
-
-fn drain_clipboard_diagnostics(
-    reader: impl Read,
-    progress: &ClipboardProgress,
-) -> std::io::Result<u64> {
-    use std::sync::atomic::Ordering;
-    let mut reader = reader.take(MAX_CLIPBOARD_LIST + 1);
-    let mut buffer = [0u8; 4096];
-    let mut line = Vec::with_capacity(96);
-    let mut discard_line = false;
-    let mut total = 0;
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            return Ok(total);
-        }
-        total += count as u64;
-        for &byte in &buffer[..count] {
-            if byte == b'\n' {
-                if !discard_line {
-                    let line = line.strip_suffix(b"\r").unwrap_or(&line);
-                    if let Some(parsed) = ClipboardPhase::from_marker(line) {
-                        progress.phase.store(parsed as u8, Ordering::Relaxed);
-                    }
-                }
-                line.clear();
-                discard_line = false;
-            } else if line.len() < 96 {
-                line.push(byte);
-            } else {
-                discard_line = true;
-            }
-        }
-    }
-}
-
-fn with_clipboard_phase(
-    mut error: ClipboardCaptureError,
-    phase: Option<ClipboardPhase>,
-    timed_out: bool,
-    elapsed: std::time::Duration,
-) -> ClipboardCaptureError {
-    if let (Some(phase), ClipboardCaptureError::Unavailable { details, source }) =
-        (phase, &mut error)
-    {
-        details.message = phase.failure_message(timed_out, elapsed);
-        details.elapsed_ms = Some(duration_ms(elapsed));
-        *source = AppError::Interop(details.message.clone());
-    }
-    error
-}
-
+#[cfg(unix)]
 fn helper_unavailable(
     name: &str,
     reason: &str,
@@ -908,6 +724,7 @@ fn helper_unavailable(
 
 // Completion messages are sent only after the worker has dropped its pipe.
 // A missing completion or a child that cannot be reaped cannot extend grace.
+#[cfg(unix)]
 fn await_helper_shutdown(
     receiver: &std::sync::mpsc::Receiver<HelperIo>,
     mut reaped: impl FnMut() -> std::io::Result<bool>,
@@ -934,23 +751,26 @@ fn await_helper_shutdown(
     Ok(false)
 }
 
+#[cfg(unix)]
 fn attachment_run_with_deadline(
     command: Command,
     input: &[u8],
     name: &str,
     limit: u64,
     deadline: std::time::Duration,
-    observe_child: impl FnOnce(u32),
 ) -> Result<Vec<u8>, ClipboardCaptureError> {
     use std::time::{Duration, Instant};
     let started = Instant::now();
     let (child_stdin, mut stdin) = std::io::pipe()?;
     let (stdout, child_stdout) = std::io::pipe()?;
     let (stderr, child_stderr) = std::io::pipe()?;
-    let mut tree = HelperProcess::spawn(command, child_stdin, child_stdout, child_stderr)
-        .map_err(|e| AppError::Interop(format!("cannot start {name}: {e}; install PowerShell, wl-clipboard or xclip for this desktop")))?;
+    let mut tree =
+        HelperProcess::spawn(command, child_stdin, child_stdout, child_stderr).map_err(|e| {
+            AppError::Interop(format!(
+                "cannot start {name}: {e}; install wl-clipboard or xclip for this desktop"
+            ))
+        })?;
     // spawn consumes and closes the parent's copies of all child pipe ends.
-    observe_child(tree.id());
     let input = input.to_vec();
     let (sender, receiver) = std::sync::mpsc::channel();
     let writer_sender = sender.clone();
@@ -972,13 +792,14 @@ fn attachment_run_with_deadline(
                 .map(|_| bytes);
             let _ = reader_sender.send(HelperIo::Output(result));
         })?;
-    let progress = std::sync::Arc::new(ClipboardProgress::default());
-    let diagnostic_progress = progress.clone();
     std::thread::Builder::new()
         .name("clipboard-errors".into())
         .spawn(move || {
-            let result = drain_clipboard_diagnostics(&stderr, &diagnostic_progress);
-            drop(stderr);
+            // Discard private diagnostics while still enforcing the byte cap.
+            let result = std::io::copy(
+                &mut stderr.take(MAX_CLIPBOARD_LIST + 1),
+                &mut std::io::sink(),
+            );
             let _ = sender.send(HelperIo::Diagnostics(result));
         })?;
 
@@ -1036,8 +857,8 @@ fn attachment_run_with_deadline(
             Duration::from_millis(5).min(expires.saturating_duration_since(Instant::now())),
         );
     }
-    // Terminate the direct Windows helper / Linux group at every boundary.
-    // Windows descendants may still hold pipes, so shutdown must not join them.
+    // Terminate the Linux process group at every boundary. An escaped
+    // descendant may still hold pipes, so shutdown must not join pipe workers.
     let termination = tree.terminate();
     // Independent bound: no scoped threads, blocking waits or unconditional
     // joins, even if containment fails or an escaped handle keeps a pipe open.
@@ -1065,20 +886,13 @@ fn attachment_run_with_deadline(
         return Err(AppError::Interop(format!("cannot monitor {name}: {error}")).into());
     }
     if timed_out {
-        let phase =
-            ClipboardPhase::from_code(progress.phase.load(std::sync::atomic::Ordering::Relaxed));
-        return Err(with_clipboard_phase(
-            helper_unavailable(
-                name,
-                &format!("timed out after {} ms", duration_ms(elapsed)),
-                elapsed,
-                duration_ms(started.elapsed()),
-                duration_ms(deadline),
-                "milliseconds",
-            ),
-            phase,
-            true,
+        return Err(helper_unavailable(
+            name,
+            &format!("timed out after {} ms", duration_ms(elapsed)),
             elapsed,
+            duration_ms(started.elapsed()),
+            duration_ms(deadline),
+            "milliseconds",
         ));
     }
     // Completion may arrive during shutdown after the root already exited.
@@ -1124,17 +938,10 @@ fn attachment_run_with_deadline(
     let output =
         bytes.ok_or_else(|| AppError::Interop(format!("{name} output worker unavailable")))??;
     if status != Some(true) {
-        let phase =
-            ClipboardPhase::from_code(progress.phase.load(std::sync::atomic::Ordering::Relaxed));
-        return Err(with_clipboard_phase(
-            AppError::Interop(format!(
-                "{name} failed; clipboard unavailable or locked; retry"
-            ))
-            .into(),
-            phase,
-            false,
-            elapsed,
-        ));
+        return Err(AppError::Interop(format!(
+            "{name} failed; clipboard unavailable or locked; retry"
+        ))
+        .into());
     }
     // A successful root need not consume stdin. BrokenPipe is expected if its
     // descendants inherited stdin and were stopped at root exit.
@@ -1359,195 +1166,6 @@ mod tests {
             .prefix("clipboard-unit-")
             .tempdir_in(std::env::temp_dir())
             .unwrap()
-    }
-
-    #[test]
-    fn clipboard_diagnostics_parse_fragmented_markers_and_discard_private_output() {
-        use std::sync::atomic::Ordering;
-        struct Fragmented(std::io::Cursor<Vec<u8>>);
-        impl Read for Fragmented {
-            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-                let len = bytes.len().min(3);
-                self.0.read(&mut bytes[..len])
-            }
-        }
-        let mut input = b"PRIVATE\nTASKS_CLIPBOARD_PHASE_V1:reading_image\r\n".to_vec();
-        input.extend_from_slice(&[b'x'; 200]);
-        input.extend_from_slice(
-            b"TASKS_CLIPBOARD_PHASE_V1:encoded\nTASKS_CLIPBOARD_PHASE_V1:private_name\n",
-        );
-        let phase = ClipboardProgress::default();
-        let count =
-            drain_clipboard_diagnostics(Fragmented(std::io::Cursor::new(input.clone())), &phase)
-                .unwrap();
-        assert_eq!(count, input.len() as u64);
-        assert!(matches!(
-            ClipboardPhase::from_code(phase.phase.load(Ordering::Relaxed)),
-            Some(ClipboardPhase::ReadingImage)
-        ));
-        let noisy = std::io::repeat(b'x').take(MAX_CLIPBOARD_LIST + 100);
-        assert_eq!(
-            drain_clipboard_diagnostics(noisy, &phase).unwrap(),
-            MAX_CLIPBOARD_LIST + 1
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_completed_helper_wins_over_elapsed_deadline() {
-        let reply = attachment_run_with_deadline(
-            phase_fixture("success"),
-            &[],
-            "PowerShell clipboard helper",
-            MAX_CLIPBOARD_LIST,
-            std::time::Duration::ZERO,
-            |id| {
-                // Wait for actual process completion before the monitor starts.
-                // No sleep or race against a narrow timing window is needed.
-                let status = Command::new("powershell.exe")
-                    .args([
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        &format!(
-                            "$p = Get-Process -Id {id} -ErrorAction SilentlyContinue; if ($null -ne $p -and -not $p.WaitForExit(5000)) {{ exit 1 }}; exit 0"
-                        ),
-                    ])
-                    .status()
-                    .unwrap();
-                assert!(status.success(), "synthetic helper did not exit");
-            },
-        )
-        .unwrap();
-        assert!(reply.ends_with(b"fixture complete"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_combined_stdout_stderr_flood_has_bounded_return() {
-        let dir = scratch();
-        let ready = dir.path().join("both-pipes-drained");
-        let mut command = phase_fixture("flood");
-        command.env("TASKS_CLIPBOARD_FLOOD_READY", &ready);
-        let started = std::time::Instant::now();
-        let error = attachment_run_with_deadline(
-            command,
-            &[],
-            "combined pipe flood",
-            MAX_CLIPBOARD_LIST,
-            std::time::Duration::from_secs(5),
-            |_| {},
-        )
-        .unwrap_err();
-        assert!(
-            ready.exists(),
-            "fixture could not write beyond both pipe buffers"
-        );
-        assert_eq!(error.code(), "interop");
-        assert_eq!(error.details().measured, Some(MAX_CLIPBOARD_LIST + 1));
-        assert!(error.to_string().contains("exceeds 1048576 bytes"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(7));
-    }
-
-    #[cfg(windows)]
-    fn phase_fixture(phase: &str) -> Command {
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "clipboard::tests::synthetic_clipboard_phase_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("TASKS_CLIPBOARD_PHASE_FIXTURE", phase);
-        command
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn clipboard_phase_deadline_names_stalled_operation() {
-        use std::time::Duration;
-        for (phase, expected) in [
-            ("reading_formats", "listing available formats"),
-            ("reading_image", "reading the image"),
-            ("encoding_png", "encoding the image"),
-            ("busy", "Clipboard is in use"),
-        ] {
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "clipboard::tests::synthetic_clipboard_phase_helper",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env("TASKS_CLIPBOARD_PHASE_FIXTURE", phase);
-            let start = std::time::Instant::now();
-            let error = attachment_run_with_deadline(
-                command,
-                &[],
-                "PowerShell clipboard helper",
-                MAX_CLIPBOARD_LIST,
-                // Permit Windows process startup under concurrent fixture compilation.
-                // The helper deliberately never exits once it publishes its phase.
-                Duration::from_secs(3),
-                |_| {},
-            )
-            .unwrap_err();
-            assert_eq!(error.code(), "interop");
-            assert_eq!(error.exit_code(), 6);
-            assert!(error.to_string().contains(expected), "{phase}: {error}");
-            assert!(
-                error.to_string().contains(phase),
-                "missing phase tag: {error}"
-            );
-            assert!(start.elapsed() < Duration::from_secs(5));
-            assert!(!error.to_string().contains("PRIVATE_DIAGNOSTIC"));
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "synthetic subprocess entry point; never accesses the desktop clipboard"]
-    fn synthetic_clipboard_phase_helper() {
-        let phase = std::env::var("TASKS_CLIPBOARD_PHASE_FIXTURE").unwrap();
-        eprintln!("TASKS_CLIPBOARD_PHASE_V1:started");
-        if phase == "success" {
-            std::io::stdout().write_all(b"fixture complete").unwrap();
-            std::io::stdout().flush().unwrap();
-            std::process::exit(0);
-        }
-        if phase == "flood" {
-            // Each pipe must drain more than its kernel buffer before the flood.
-            let chunk = [b'x'; 65536];
-            std::io::stdout().write_all(&chunk).unwrap();
-            std::io::stderr().write_all(&chunk).unwrap();
-            std::fs::write(
-                std::env::var_os("TASKS_CLIPBOARD_FLOOD_READY").unwrap(),
-                b"ready",
-            )
-            .unwrap();
-            std::thread::spawn(|| loop {
-                if std::io::stdout().write_all(&[b'x'; 4096]).is_err() {
-                    break;
-                }
-            });
-            loop {
-                if std::io::stderr().write_all(&[b'x'; 4096]).is_err() {
-                    break;
-                }
-            }
-        }
-        eprintln!("PRIVATE_DIAGNOSTIC");
-        eprintln!("TASKS_CLIPBOARD_PHASE_V1:{phase}");
-        std::io::stderr().flush().unwrap();
-        if phase == "busy" {
-            std::process::exit(1);
-        }
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        }
     }
 
     #[test]
@@ -1788,23 +1406,11 @@ mod tests {
         assert_eq!(error.details().limit, Some(20 * 1024 * 1024));
     }
 
+    #[cfg(unix)]
     #[test]
     fn helper_protocol_output_over_one_mib_is_interop() {
-        let mut command = Command::new(if cfg!(windows) {
-            "powershell.exe"
-        } else {
-            "sh"
-        });
-        if cfg!(windows) {
-            command.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Write(('x' * 1048577))",
-            ]);
-        } else {
-            command.args(["-c", "head -c 1048577 /dev/zero"]);
-        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 1048577 /dev/zero"]);
         let error = attachment_run(command, &[], "synthetic helper", 1024 * 1024).unwrap_err();
         assert_eq!(error.code(), "interop");
         assert_eq!(error.exit_code(), 6);
@@ -1813,6 +1419,7 @@ mod tests {
         assert!(error.to_string().contains("exceeds 1048576 bytes"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn shutdown_grace_is_bounded_without_worker_completion_or_reaping() {
         use std::time::{Duration, Instant};
@@ -1853,314 +1460,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
-    // This test-only supervisor retains .NET Process handles before releasing
-    // each helper handshake. It owns descendant cleanup independently of capture
-    // and imposes its own watchdog, including for the no-grace mutation.
-    #[cfg(windows)]
-    const TREE_TEST_SUPERVISOR: &str = r#"
-$ErrorActionPreference = 'Stop'
-$root = $env:TASKS_CLIPBOARD_TREE_ROOT
-$info = New-Object Diagnostics.ProcessStartInfo
-$info.FileName = $env:TASKS_CLIPBOARD_TEST_EXE
-$info.Arguments = '--exact clipboard::tests::helper_tree_invariant_worker --ignored --nocapture'
-$info.UseShellExecute = $false
-$info.CreateNoWindow = $true
-$worker = [Diagnostics.Process]::Start($info)
-$null = $worker.Handle
-$held = New-Object 'Collections.Generic.List[Diagnostics.Process]'
-$states = @{}
-$timer = [Diagnostics.Stopwatch]::StartNew()
-try {
-    while (-not $worker.WaitForExit(5)) {
-        foreach ($mode in @('timeout', 'overflow', 'exit')) {
-            $parentPath = Join-Path $root "$mode.parent"
-            $descendantPath = Join-Path $root "$mode.pid"
-            if (-not $states.ContainsKey($mode) -and (Test-Path -LiteralPath $parentPath) -and (Test-Path -LiteralPath $descendantPath)) {
-                $parentProcess = [Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($parentPath))
-                $null = $parentProcess.Handle
-                $held.Add($parentProcess)
-                $descendant = [Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($descendantPath))
-                $null = $descendant.Handle
-                $held.Add($descendant)
-                $states[$mode] = @{ Parent = $parentProcess; Descendant = $descendant; Cleaned = $false }
-                [IO.File]::WriteAllText((Join-Path $root "$mode.ack"), 'go')
-            }
-            if ($states.ContainsKey($mode) -and -not $states[$mode].Cleaned -and (Test-Path -LiteralPath (Join-Path $root "$mode.done"))) {
-                $state = $states[$mode]
-                if (-not $state.Parent.WaitForExit(500)) { throw "$mode direct helper still alive" }
-                if ($state.Descendant.HasExited) { throw "$mode descendant did not keep inherited pipes open" }
-                $state.Descendant.Kill()
-                if (-not $state.Descendant.WaitForExit(5000)) { throw "$mode descendant cleanup failed" }
-                $state.Cleaned = $true
-                Write-Output "$mode bounded return in $([double]::Parse([IO.File]::ReadAllText((Join-Path $root "$mode.done"))) / 1000) ms; direct helper gone; descendant cleaned by test handle"
-                [IO.File]::WriteAllText((Join-Path $root "$mode.cleaned"), 'done')
-            }
-        }
-        if ($timer.ElapsedMilliseconds -gt 30000) { throw 'bounded-return supervisor timed out' }
-    }
-    if ($worker.ExitCode -ne 0) { throw "invariant worker failed: $($worker.ExitCode)" }
-    if ($states.Count -ne 3) { throw 'invariant did not run all three cases' }
-} finally {
-    foreach ($process in $held) {
-        try {
-            if (-not $process.HasExited) { $process.Kill() }
-            if (-not $process.WaitForExit(5000)) { throw 'retained process cleanup failed' }
-        } finally { $process.Dispose() }
-    }
-    try {
-        if (-not $worker.HasExited) { $worker.Kill() }
-        if (-not $worker.WaitForExit(5000)) { throw 'worker cleanup failed' }
-    } finally { $worker.Dispose() }
-}
-"#;
-
-    #[cfg(windows)]
-    fn publish_tree_signal(
-        path: impl AsRef<Path>,
-        content: impl AsRef<[u8]>,
-    ) -> std::io::Result<()> {
-        // The supervisor must never observe an empty/partially written PID or
-        // duration. Rename publishes the complete file in the same directory.
-        let path = path.as_ref();
-        let mut pending = path.as_os_str().to_os_string();
-        pending.push(".pending");
-        std::fs::write(&pending, content)?;
-        std::fs::rename(pending, path)
-    }
-
-    #[cfg(windows)]
-    fn wait_test_child(
-        child: &mut std::process::Child,
-        timeout: std::time::Duration,
-    ) -> Option<std::process::ExitStatus> {
-        let started = std::time::Instant::now();
-        while started.elapsed() < timeout {
-            if let Some(status) = child.try_wait().unwrap() {
-                return Some(status);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        None
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn helper_tree_shutdown_invariant_supervised() {
-        use std::os::windows::process::CommandExt;
-        use std::time::Duration;
-        let dir = tempfile::tempdir().unwrap();
-        let script_path = dir.path().join("supervisor.ps1");
-        std::fs::write(&script_path, TREE_TEST_SUPERVISOR).unwrap();
-        let log_path = dir.path().join("worker.log");
-        let log = std::fs::File::create(&log_path).unwrap();
-        let mut supervisor = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-File"])
-            .arg(&script_path)
-            .env("TASKS_CLIPBOARD_TREE_WORKER", "1")
-            .env("TASKS_CLIPBOARD_TREE_ROOT", dir.path())
-            .env("TASKS_CLIPBOARD_TEST_EXE", std::env::current_exe().unwrap())
-            .creation_flags(0x08000000)
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let status = wait_test_child(&mut supervisor, Duration::from_secs(45));
-        if status.is_none() {
-            // Last-resort test watchdog only, never the production capture path.
-            // The retained Child handle reserves this owned supervisor's identity.
-            let mut cleanup = Command::new("taskkill.exe")
-                .args(["/PID", &supervisor.id().to_string(), "/T", "/F"])
-                .creation_flags(0x08000000)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
-            if wait_test_child(&mut cleanup, Duration::from_secs(2)).is_none() {
-                let _ = cleanup.kill();
-            }
-            assert!(wait_test_child(&mut cleanup, Duration::from_millis(500)).is_some());
-            let _ = supervisor.kill();
-            assert!(wait_test_child(&mut supervisor, Duration::from_millis(500)).is_some());
-        }
-        eprintln!("{}", std::fs::read_to_string(&log_path).unwrap());
-        assert!(
-            status.is_some_and(|status| status.success()),
-            "bounded-return supervisor failed or timed out"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "synthetic subprocess entry point; invoked by the supervised invariant"]
-    fn helper_tree_invariant_worker() {
-        use std::time::{Duration, Instant};
-        assert_eq!(std::env::var("TASKS_CLIPBOARD_TREE_WORKER").unwrap(), "1");
-        let root = PathBuf::from(std::env::var_os("TASKS_CLIPBOARD_TREE_ROOT").unwrap());
-        for mode in ["timeout", "overflow", "exit"] {
-            let ack_path = root.join(format!("{mode}.ack"));
-            let mut command = Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "clipboard::tests::synthetic_tree_helper",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env("TASKS_CLIPBOARD_HELPER_MODE", mode)
-                .env(
-                    "TASKS_CLIPBOARD_DESCENDANT_PID",
-                    root.join(format!("{mode}.pid")),
-                )
-                .env("TASKS_CLIPBOARD_DESCENDANT_ACK", &ack_path);
-            let started = Instant::now();
-            let result = attachment_run_with_deadline(
-                command,
-                &vec![b'x'; 2 * 1024 * 1024],
-                "bounded-return invariant helper",
-                MAX_CLIPBOARD_LIST,
-                Duration::from_secs(2),
-                |pid| {
-                    publish_tree_signal(root.join(format!("{mode}.parent")), pid.to_string())
-                        .unwrap();
-                    let until = Instant::now() + Duration::from_secs(4);
-                    while !ack_path.exists() && Instant::now() < until {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    assert!(
-                        ack_path.exists(),
-                        "supervisor did not retain process handles"
-                    );
-                },
-            );
-            let elapsed = started.elapsed();
-            // Signal even on a bad capture result so the supervisor cleans by
-            // retained handles before any result/bound assertion can panic.
-            publish_tree_signal(
-                root.join(format!("{mode}.done")),
-                elapsed.as_micros().to_string(),
-            )
-            .unwrap();
-            let cleaned = root.join(format!("{mode}.cleaned"));
-            let until = Instant::now() + Duration::from_secs(7);
-            while !cleaned.exists() && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            assert!(
-                cleaned.exists(),
-                "supervisor did not confirm helper exit and descendant cleanup"
-            );
-            assert!(
-                elapsed < Duration::from_secs(3),
-                "{mode}: exceeded deadline + 500 ms grace + scheduling margin: {elapsed:?}"
-            );
-            let error = result.expect_err("an inherited pipe stayed open past grace");
-            assert_eq!(error.code(), "interop");
-            assert_eq!(error.exit_code(), 6);
-            match mode {
-                "timeout" => {
-                    assert_eq!(error.details().unit, Some("milliseconds"));
-                    assert_eq!(error.details().limit, Some(2000));
-                    assert!(error.details().elapsed_ms.unwrap() >= 2000);
-                }
-                "overflow" => {
-                    assert_eq!(error.details().unit, Some("bytes"));
-                    assert_eq!(error.details().measured, Some(MAX_CLIPBOARD_LIST + 1));
-                    assert!(error.details().elapsed_ms.unwrap() < 2000);
-                }
-                "exit" => {
-                    assert_eq!(error.details().unit, Some("milliseconds"));
-                    assert_eq!(error.details().limit, Some(500));
-                    assert!(error.to_string().contains("shutdown did not complete"));
-                }
-                _ => unreachable!(),
-            }
-            eprintln!("{mode}: bounded return in {elapsed:?}; direct helper gone; descendant cleaned by test handle");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "synthetic subprocess entry point; invoked by the supervised invariant"]
-    #[allow(clippy::zombie_processes)] // Normal parent exit is the deliberate fixture.
-    fn synthetic_tree_helper() {
-        use std::time::{Duration, Instant};
-        let mode = std::env::var("TASKS_CLIPBOARD_HELPER_MODE").unwrap();
-        if mode == "descendant" {
-            // Publish readiness after libtest has emitted its startup output,
-            // before the parent can fill and close the bounded stdout reader.
-            publish_tree_signal(
-                std::env::var_os("TASKS_CLIPBOARD_DESCENDANT_READY").unwrap(),
-                b"ready",
-            )
-            .unwrap();
-            loop {
-                std::thread::sleep(Duration::from_secs(60));
-            }
-        }
-        let ready = PathBuf::from(std::env::var_os("TASKS_CLIPBOARD_DESCENDANT_PID").unwrap())
-            .with_extension("ready");
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command.env("TASKS_CLIPBOARD_DESCENDANT_READY", &ready);
-        command
-            .args([
-                "--exact",
-                "clipboard::tests::synthetic_tree_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("TASKS_CLIPBOARD_HELPER_MODE", "descendant")
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-        let mut descendant = command.spawn().unwrap();
-        let ack = PathBuf::from(std::env::var_os("TASKS_CLIPBOARD_DESCENDANT_ACK").unwrap());
-        // Until the supervisor has retained the descendant's handle, its own
-        // parent keeps the Child handle and cleans it on a handshake failure.
-        let ready_until = Instant::now() + Duration::from_secs(2);
-        while !ready.exists() && Instant::now() < ready_until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        if !ready.exists() {
-            let _ = descendant.kill();
-            assert!(wait_test_child(&mut descendant, Duration::from_millis(500)).is_some());
-            panic!("descendant did not become ready");
-        }
-        let publish = publish_tree_signal(
-            std::env::var_os("TASKS_CLIPBOARD_DESCENDANT_PID").unwrap(),
-            descendant.id().to_string(),
-        );
-        let until = Instant::now() + Duration::from_secs(5);
-        while publish.is_ok() && !ack.exists() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        if publish.is_err() || !ack.exists() {
-            let _ = descendant.kill();
-            assert!(wait_test_child(&mut descendant, Duration::from_millis(500)).is_some());
-            panic!("supervisor handshake failed");
-        }
-        match mode.as_str() {
-            "overflow" => {
-                std::io::stdout()
-                    .write_all(&vec![b'x'; 1024 * 1024 + 1])
-                    .unwrap();
-                std::io::stdout().flush().unwrap();
-            }
-            "exit" => {
-                println!("parent completed");
-                return;
-            }
-            "timeout" => {}
-            _ => panic!("unknown mode"),
-        }
-        // The direct helper and its descendant both stall indefinitely. Only
-        // the capture owner stops the helper; the supervisor stops descendants.
-        loop {
-            std::thread::sleep(Duration::from_secs(60));
-        }
-    }
-
     #[test]
     fn token_verification_and_empty_errors_expose_stable_mapping_data() {
         let capture = ClipboardCapture {
@@ -2179,6 +1478,7 @@ try {
         assert!(json["limit"].is_null());
     }
 
+    #[cfg(unix)]
     #[test]
     fn attachment_commands_select_exact_targets() {
         for (backend, target, program, args) in [
@@ -2208,40 +1508,15 @@ try {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn attachment_transport_caps_output_and_does_not_echo_diagnostics() {
-        let mut command = Command::new(if cfg!(windows) {
-            "powershell.exe"
-        } else {
-            "sh"
-        });
-        if cfg!(windows) {
-            command.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Write('0123456789')",
-            ]);
-        } else {
-            command.args(["-c", "printf 0123456789"]);
-        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 0123456789"]);
         let error = attachment_run(command, &[], "synthetic helper", 4).unwrap_err();
         assert!(error.to_string().contains("exceeds 4 bytes"));
-        let mut command = Command::new(if cfg!(windows) {
-            "powershell.exe"
-        } else {
-            "sh"
-        });
-        if cfg!(windows) {
-            command.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Error.Write('SECRET'); exit 7",
-            ]);
-        } else {
-            command.args(["-c", "printf SECRET >&2; exit 7"]);
-        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf SECRET >&2; exit 7"]);
         let error = attachment_run(command, &[], "synthetic helper", 100).unwrap_err();
         assert!(error.to_string().contains("failed"));
         assert!(!error.to_string().contains("SECRET"));

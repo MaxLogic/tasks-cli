@@ -4,3 +4,4 @@ pub mod https;
 pub mod process;
 #[cfg(feature = "server")]
 pub mod remote_fixture;
+pub mod temp;

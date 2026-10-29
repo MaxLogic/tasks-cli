@@ -350,12 +350,13 @@ fn clock_window_revocation_and_fresh_signatures_preserve_reconciliation_identity
 }
 
 struct HttpFixture {
-    root: tempfile::TempDir,
     address: std::net::SocketAddr,
     signer: SigningIdentity,
     state: tasks_cli::server::transport::ServiceState,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    // Joining the worker is insufficient while state still retains the server.
+    root: support::temp::TempDir,
 }
 impl HttpFixture {
     fn new() -> Self {
@@ -389,7 +390,7 @@ impl HttpFixture {
                 });
         });
         Self {
-            root,
+            root: root.into(),
             address: receive
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap(),

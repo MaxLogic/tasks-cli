@@ -1,4 +1,5 @@
 #![cfg(feature = "server")]
+mod support;
 use serde_json::json;
 use tasks_cli::{
     model::{TaskStatus, TaskUpdate},
@@ -389,13 +390,14 @@ mod api_routes {
     use tasks_cli::server::{api, signatures::SigningIdentity, OwnedServer, Registration};
 
     struct ApiFixture {
-        root: tempfile::TempDir,
         server: OwnedServer,
         signer: SigningIdentity,
+        // SQLite handles must close before fixture cleanup.
+        root: support::temp::TempDir,
     }
     impl ApiFixture {
         fn new() -> Self {
-            let root = tempfile::tempdir().unwrap();
+            let root = support::temp::TempDir::new();
             let server = OwnedServer::initialize(root.path()).unwrap();
             let key = SigningKey::from_bytes(&[14; 32]);
             let id = server
@@ -884,12 +886,13 @@ mod api_routes {
     }
 
     struct HttpFixture {
-        root: tempfile::TempDir,
         signer: SigningIdentity,
         state: tasks_cli::server::transport::ServiceState,
         address: std::net::SocketAddr,
         stop: Option<tokio::sync::oneshot::Sender<()>>,
         worker: Option<std::thread::JoinHandle<()>>,
+        // Drop joins the worker; the retained state must also release its Arc.
+        root: support::temp::TempDir,
     }
     impl HttpFixture {
         fn start(fixture: ApiFixture) -> Self {
@@ -1034,7 +1037,7 @@ mod api_routes {
         // Discard the successful acknowledgement. A read cannot prove the
         // original request outcome; reconciliation must use its receipt.
         drop(acknowledged);
-        let root = std::mem::replace(&mut http.root, tempfile::tempdir().unwrap());
+        let root = std::mem::replace(&mut http.root, support::temp::TempDir::new());
         let signer = SigningIdentity {
             server_id: http.signer.server_id,
             credential_id: http.signer.credential_id,
@@ -1104,7 +1107,7 @@ mod api_routes {
         drop(socket);
         db.conn.execute_batch("COMMIT").unwrap();
         drop(db);
-        let root = std::mem::replace(&mut http.root, tempfile::tempdir().unwrap());
+        let root = std::mem::replace(&mut http.root, support::temp::TempDir::new());
         let signer = SigningIdentity {
             server_id: http.signer.server_id,
             credential_id: http.signer.credential_id,
