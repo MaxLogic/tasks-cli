@@ -21,11 +21,13 @@ class AttachmentController extends ChangeNotifier {
     required this.announce,
     this.dialogs = const SystemAttachmentFileDialogs(),
     this.isCurrent,
+    this.applyWrite,
   });
   final ViewerCliClient client;
   final String projectId;
   TaskDetail task;
   final Future<void> Function() refresh;
+  final void Function(TaskDetail, int attachmentCount)? applyWrite;
   final void Function(String) announce;
   final AttachmentFileDialogs dialogs;
   final bool Function()? isCurrent;
@@ -126,8 +128,20 @@ class AttachmentController extends ChangeNotifier {
       () => _say(command.first == 'detach' ? 'Detaching...' : 'Attaching...'),
     );
     try {
-      await client.attachmentCommand(projectId, command, mutation: true);
-      await refresh();
+      final base = task;
+      final reply = await client.attachmentCommand(
+        projectId,
+        command,
+        mutation: true,
+      );
+      var applied = false;
+      try {
+        applied = _applyWriteReply(reply.data, command.first, base);
+      } on ViewerMalformedResponseFailure {
+        // The mutation envelope is already confirmed (and remote receipts may
+        // be acknowledged). An unusable optional page needs a read, not replay.
+      }
+      if (!applied) await refresh();
       onSuccess?.call();
       _outcome(success);
     } on ViewerPendingReceiptFailure catch (failure) {
@@ -151,6 +165,51 @@ class AttachmentController extends ChangeNotifier {
       _confirmationSkipped = false;
       _notify();
     }
+    return true;
+  }
+
+  bool _applyWriteReply(
+    Map<String, Object?> data,
+    String operation,
+    TaskDetail base,
+  ) {
+    final state = data['attachment_state'];
+    // Old CLIs and incomplete pages retain the existing authoritative reload.
+    if (state == null) return false;
+    if (state is! Map<String, Object?> ||
+        data['command'] != 'attachment_$operation' ||
+        data['id'] != base.id ||
+        data['status'] != base.status ||
+        data['version'] is! int ||
+        state['has_more'] is! bool) {
+      throw const ViewerMalformedResponseFailure(
+        'Invalid attachment write state',
+      );
+    }
+    if (state['has_more'] == true) return false;
+    final version = data['version']! as int;
+    final count = state['attachment_count'];
+    final updatedMs = state['updated_ms'];
+    final items = attachmentItems(state['items']);
+    if (state['next_after'] != null ||
+        count is! int ||
+        updatedMs is! int ||
+        count != items.length ||
+        items.map((a) => a.id).toSet().length != count ||
+        (version != base.version + 1 &&
+            !(operation == 'detach' && version == base.version))) {
+      throw const ViewerMalformedResponseFailure(
+        'Inconsistent attachment write state',
+      );
+    }
+    // A late reply must not replace another selection or a newer confirmed read.
+    if (!current || task.version > version) return true;
+    task = task.withAttachmentWrite(
+      version: version,
+      updatedMs: updatedMs,
+      attachments: items,
+    );
+    applyWrite?.call(task, count);
     return true;
   }
 

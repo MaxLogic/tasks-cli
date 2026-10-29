@@ -158,6 +158,71 @@ void main() {
       print('DEFERRED_FIXTURE_CLEANUP ${root.path}');
     }
   });
+  for (final malformed in [false, true]) {
+    test(
+      'unusable attachment state falls back to refresh malformed=$malformed',
+      () async {
+        await rig.probe();
+        rig.launcher.replyWith(
+          envelope('attachment_add', {
+            'id': 42,
+            'status': 'todo',
+            'version': 8,
+            'attachment_state': {
+              'items': [metadata],
+              'has_more': !malformed,
+              'next_after': 'A12',
+              'attachment_count': 101,
+              'updated_ms': 1234,
+            },
+          }),
+        );
+        await rig.controller.addFiles();
+        expect(rig.refreshes, 1);
+        expect(rig.controller.task.version, 7);
+      },
+    );
+  }
+  test('complete attachment write replies update without refresh', () async {
+    await rig.probe();
+    for (final detach in [false, true]) {
+      final items = detach ? <Map<String, Object?>>[] : [metadata];
+      rig.launcher.replyWith(
+        envelope(detach ? 'attachment_detach' : 'attachment_add', {
+          'id': 42,
+          'display_id': 'TSK-042',
+          'status': 'todo',
+          'version': detach ? 9 : 8,
+          'event_id': 10,
+          'attachment_state': {
+            'items': items,
+            'has_more': false,
+            'next_after': null,
+            'attachment_count': items.length,
+            'updated_ms': 1234,
+          },
+        }),
+      );
+      final before = rig.launcher.launches.length;
+      if (detach) {
+        expect(
+          await rig.controller.detachMany(
+            rig.controller.task.attachments,
+            () async => true,
+          ),
+          isTrue,
+        );
+      } else {
+        await rig.controller.addFiles();
+      }
+      expect(rig.refreshes, 0);
+      expect(rig.launcher.launches.length - before, 1);
+      expect(rig.controller.task.version, detach ? 9 : 8);
+      expect(rig.controller.task.updatedMs, 1234);
+      expect(rig.controller.task.attachments.length, items.length);
+    }
+  });
+
   testWidgets(
     'short preview owns focus arrows save and preserves caret on rebuild',
     (tester) async {
@@ -1079,6 +1144,96 @@ void main() {
       expect(rig.launcher.launches.length, 3);
     },
   );
+  for (final remote in [false, true]) {
+    testWidgets(
+      'attachment success patches the real pane and task row without reads remote=$remote',
+      (tester) async {
+        tester.view.physicalSize = const Size(1600, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final launcher = DetailLauncher(true, remote: remote);
+        final client = ViewerCliClient(
+          environment: rig.client.environment,
+          launcher: launcher,
+          executableExists: (_) => true,
+        );
+        final backend = support.fakeWorkspaceReads(
+          tasks: {
+            '00000000-0000-4000-8000-000000000001': [support.testTaskItem(42)],
+          },
+        );
+        final announcements = AnnouncementController(
+          clipPlayer: support.RecordingClipPlayer(),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ViewerWorkspaceHost(
+              environment: rig.client.environment,
+              readers: ViewerDataReader(
+                projects: backend,
+                tasks: backend,
+                detail: client,
+                update: client,
+                probe: client.probe,
+              ),
+              announcements: announcements,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final model = tester
+            .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
+            .model;
+        model.selectProjectIndex(0);
+        await tester.pumpAndSettle();
+        await model.openTaskIndex(0);
+        await tester.pumpAndSettle();
+        await support.pressKey(tester, LogicalKeyboardKey.f3);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit3);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit5);
+        final controller = tester
+            .widget<AttachmentPanel>(find.byType(AttachmentPanel))
+            .controller;
+        final reads = backend.taskRequests.length;
+        var calls = launcher.calls.length;
+        expect(
+          await controller.detachMany(
+            controller.task.attachments,
+            () async => true,
+          ),
+          isTrue,
+        );
+        await tester.pumpAndSettle();
+        expect(launcher.calls.length, calls + (remote ? 2 : 1));
+        expect(backend.taskRequests.length, reads);
+        expect(find.text('Attachments (0)'), findsOneWidget);
+        expect(model.detail!.detail!.attachments, isEmpty);
+        expect(model.tasks!.itemAt(0)!.attachmentCount, 0);
+        expect(model.tasks!.itemAt(0)!.version, 8);
+        expect(model.tasks!.itemAt(0)!.updatedMs, 1234);
+        expect(model.editor.base!.version, 8);
+        calls = launcher.calls.length;
+        await controller.paste((_) async => true);
+        await tester.pumpAndSettle();
+        // Clipboard inspect is local; the write itself is the only server request.
+        expect(launcher.calls.length, calls + (remote ? 3 : 2));
+        expect(launcher.calls[calls].last, 'clipboard');
+        expect(backend.taskRequests.length, reads);
+        expect(find.text('Attachments (1)'), findsOneWidget);
+        expect(find.textContaining('run.log, text'), findsOneWidget);
+        expect(model.detail!.detail!.version, 9);
+        expect(model.tasks!.itemAt(0)!.attachmentCount, 1);
+        expect(model.tasks!.itemAt(0)!.version, 9);
+        expect(model.tasks!.selectedTaskId, 42);
+        calls = launcher.calls.length;
+        await support.pressAlt(tester, LogicalKeyboardKey.digit3);
+        expect(launcher.calls.length, calls + 1);
+        expect(launcher.calls.last, contains('history'));
+        await tester.pumpWidget(const SizedBox());
+        announcements.dispose();
+      },
+    );
+  }
   for (final capable in [false, true]) {
     testWidgets(
       'real Details pane gates attachment tab capable=$capable and Alt+5 opens rows',
@@ -1412,10 +1567,12 @@ Future<void> settleFileIo(WidgetTester tester) async {
 }
 
 class DetailLauncher implements ProcessLauncher {
-  DetailLauncher(this.capable);
+  DetailLauncher(this.capable, {this.remote = false});
+  final bool remote;
   bool failDetails = false;
   bool rejectUpdate = false;
   int version = 7;
+  List<Map<String, Object?>> attachments = [metadata];
   final calls = <List<String>>[];
   final bool capable;
   @override
@@ -1440,7 +1597,33 @@ class DetailLauncher implements ProcessLauncher {
     }
     String response;
     if (args.contains('info')) {
-      response = jsonEncode(info(attachments: capable));
+      response = jsonEncode(info(attachments: capable, remote: remote));
+    } else if (args.contains('recovery')) {
+      response = envelope('viewer_recovery', {'items': []}, project: false);
+    } else if (args.contains('acknowledge')) {
+      response = envelope('viewer_acknowledge', {
+        'request_id': args.last,
+        'acknowledged': true,
+      }, project: false);
+    } else if (args.contains('attachment') &&
+        (args.contains('detach') || args.contains('add'))) {
+      final detach = args.contains('detach');
+      version++;
+      attachments = detach ? [] : [metadata];
+      response = envelope(detach ? 'attachment_detach' : 'attachment_add', {
+        'id': 42,
+        'display_id': 'TSK-042',
+        'status': 'todo',
+        'version': version,
+        'event_id': 10,
+        'attachment_state': {
+          'items': attachments,
+          'has_more': false,
+          'next_after': null,
+          'attachment_count': attachments.length,
+          'updated_ms': 1234,
+        },
+      });
     } else if (args.contains('show')) {
       final doc =
           jsonDecode(
@@ -1450,7 +1633,7 @@ class DetailLauncher implements ProcessLauncher {
               )
               as Map<String, dynamic>;
       (doc['data'] as Map<String, dynamic>)['version'] = version;
-      (doc['data'] as Map<String, dynamic>)['attachments'] = [metadata];
+      (doc['data'] as Map<String, dynamic>)['attachments'] = attachments;
       response = jsonEncode(doc);
     } else if (args.contains('history')) {
       response = transport.historyDocument(
@@ -1458,12 +1641,20 @@ class DetailLauncher implements ProcessLauncher {
       );
     } else if (args.contains('clipboard')) {
       response = envelope('attachment_clipboard', {
-        'items': [],
+        'items': [
+          {'name': 'run.log', 'kind': 'text', 'original_size': 5},
+        ],
         'skipped': [],
         'token': 'c' * 64,
       }, project: false);
     } else {
       throw StateError('Unexpected details args $args');
+    }
+    if (args.contains('--project')) {
+      response = response.replaceAll(
+        transport.projectUuid,
+        args[args.indexOf('--project') + 1],
+      );
     }
     return transport.FakeProcessHandle(stdoutBytes: [utf8.encode(response)]);
   }

@@ -756,6 +756,16 @@ pub struct AddedAttachment {
     pub deduplicated: bool,
 }
 
+/// Post-write metadata captured in the same transaction as the mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentWriteState {
+    pub items: Vec<AttachmentRecord>,
+    pub has_more: bool,
+    pub next_after: Option<String>,
+    pub attachment_count: u64,
+    pub updated_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachResult {
     pub id: u64,
@@ -763,6 +773,7 @@ pub struct AttachResult {
     pub version: u64,
     pub event_id: Option<u64>,
     pub attachments: Vec<AddedAttachment>,
+    pub attachment_state: AttachmentWriteState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,6 +783,7 @@ pub struct DetachResult {
     pub version: u64,
     pub event_id: Option<u64>,
     pub detached: Vec<u64>,
+    pub attachment_state: AttachmentWriteState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

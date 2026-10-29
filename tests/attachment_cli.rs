@@ -151,7 +151,16 @@ fn add_file_batch_stdin_metadata_and_detach() {
         Some(b"hello"),
     ));
     assert_eq!(add["attachments"][0]["deduplicated"], true);
+    let page = ok(f.run(&["attachment", "list", "1"], None));
+    assert_eq!(add["attachment_state"]["items"], page["items"]);
+    assert_eq!(add["attachment_state"]["has_more"], false);
+    assert!(add["attachment_state"]["next_after"].is_null());
+    assert_eq!(add["attachment_state"]["attachment_count"], 3);
     let shown = ok(f.run(&["show", "1"], None));
+    assert_eq!(
+        add["attachment_state"]["updated_ms"],
+        ok(f.run(&["viewer", "show", "1"], None))["updated_ms"]
+    );
     assert_eq!(shown["attachments"].as_array().unwrap().len(), 3);
     for (args, needle) in [
         (
@@ -185,11 +194,16 @@ fn add_file_batch_stdin_metadata_and_detach() {
     ));
     assert_eq!(detached["detached"], json!([1, 2]));
     assert_eq!(detached["version"], 4);
+    let page = ok(f.run(&["attachment", "list", "1"], None));
+    assert_eq!(detached["attachment_state"]["items"], page["items"]);
+    assert_eq!(detached["attachment_state"]["attachment_count"], 1);
+    assert_eq!(detached["attachment_state"]["has_more"], false);
     let noop = ok(f.run(
         &["attachment", "detach", "1", "A1", "--expect-version", "4"],
         None,
     ));
     assert!(noop["event_id"].is_null());
+    assert_eq!(noop["attachment_state"], detached["attachment_state"]);
     let all = ok(f.run(&["attachment", "list", "1", "--all"], None));
     assert!(all["items"][0]["detached_ms"].is_number());
     assert_eq!(

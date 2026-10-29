@@ -1420,6 +1420,22 @@ final class TaskItem {
 
   String get canonicalId => displayId ?? viewerCanonicalTaskId(id);
 
+  TaskItem withAttachmentWrite(TaskDetail detail, int count) => TaskItem(
+    id: id,
+    displayId: detail.displayId,
+    title: title,
+    status: status,
+    priority: priority,
+    version: detail.version,
+    labels: labels,
+    dependencyCount: dependencyCount,
+    waitingDependencyCount: waitingDependencyCount,
+    verifyingDependencyCount: verifyingDependencyCount,
+    attachmentCount: count,
+    createdMs: createdMs,
+    updatedMs: detail.updatedMs,
+  );
+
   factory TaskItem.fromJson(Map<String, Object?> json, {required String path}) {
     return TaskItem(
       attachmentCount: json['attachment_count'] == null
@@ -1602,6 +1618,30 @@ final class TaskDetail {
   final String? displayId;
 
   String get canonicalId => displayId ?? viewerCanonicalTaskId(id, projectKey);
+
+  /// A confirmed attachment write changes only these task fields.
+  TaskDetail withAttachmentWrite({
+    required int version,
+    required int updatedMs,
+    required List<AttachmentSummary> attachments,
+  }) => TaskDetail(
+    id: id,
+    projectKey: projectKey,
+    displayId: displayId,
+    title: title,
+    body: body,
+    status: status,
+    priority: priority,
+    version: version,
+    labels: labels,
+    deps: deps,
+    dependencySummaries: dependencySummaries,
+    ruleVersion: ruleVersion,
+    rules: rules,
+    createdMs: createdMs,
+    updatedMs: updatedMs,
+    attachments: attachments,
+  );
 
   factory TaskDetail.fromJson(
     Map<String, Object?> json, {

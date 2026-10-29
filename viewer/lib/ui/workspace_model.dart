@@ -440,6 +440,12 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     return true;
   }
 
+  void applyAttachmentWrite(String projectId, TaskDetail updated, int count) {
+    if (selectedProjectId != projectId) return;
+    _detail?.applyAttachmentWrite(updated);
+    _tasks?.applyAttachmentWrite(updated, count);
+  }
+
   /// Re-reads what a confirmed write changed: the task and its list row.
   Future<void> noteConfirmedRead() async {
     final detail = _detail;

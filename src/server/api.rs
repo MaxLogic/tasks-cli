@@ -406,6 +406,7 @@ impl Mutation {
                     version: result.version,
                     event_id: result.event_id,
                     detached: result.detached,
+                    attachment_state: result.attachment_state,
                 }
             }
             Self::Create(v) => {

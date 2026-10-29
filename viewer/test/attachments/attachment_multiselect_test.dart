@@ -415,9 +415,31 @@ void main() {
         for (final i in [1, 2, 3]) {
           expect(find.textContaining('file-$i.log'), findsWidgets);
         }
-        rig.mutation('attachment_detach');
-        // The refresh removes the detached rows before the panel regains focus.
-        rig.controller.task.attachments.removeRange(1, 4);
+        final remaining = [
+          for (final i in [0, 4])
+            {
+              ...att.metadata,
+              'id': 12 + i,
+              'display_id': 'A${12 + i}',
+              'name': 'file-$i.log',
+            },
+        ];
+        rig.launcher.replyWith(
+          att.envelope('attachment_detach', {
+            'id': 42,
+            'status': 'todo',
+            'version': 8,
+            'detached': [13, 14, 15],
+            'event_id': 10,
+            'attachment_state': {
+              'items': remaining,
+              'has_more': false,
+              'next_after': null,
+              'attachment_count': 2,
+              'updated_ms': 1234,
+            },
+          }),
+        );
         await tester.tap(find.text('Detach (Alt+D)'));
         await tester.pumpAndSettle();
         final writes = rig.launcher.launches
@@ -435,7 +457,8 @@ void main() {
           '--expect-version',
           '7',
         ]);
-        expect(rig.refreshes, 1);
+        expect(rig.refreshes, 0);
+        expect(panel.list.selectedIndices, {1});
         expect(panel.list.focusedRowIndex, 1);
         expect(panel.item?.name, 'file-4.log');
         expect(panel.list.hasListFocus, isTrue);

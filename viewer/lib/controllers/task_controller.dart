@@ -425,6 +425,25 @@ class TaskController extends ChangeNotifier {
     unawaited(reload());
   }
 
+  /// Patch cached rows in place. Keep the old snapshot token so later paging
+  /// detects the write and uses the existing stale-snapshot recovery.
+  void applyAttachmentWrite(TaskDetail detail, int count) {
+    if (_disposed) return;
+    _generation++;
+    _cancelInFlight();
+    _pagesInFlight.clear();
+    _loading = false;
+    TaskItem patch(TaskItem row) =>
+        row.id == detail.id && row.version <= detail.version
+        ? row.withAttachmentWrite(detail, count)
+        : row;
+    _rows = [for (final row in _rows) row == null ? null : patch(row)];
+    for (final index in _pages.keys.toList()) {
+      _pages[index] = _pages[index]!.map(patch).toList();
+    }
+    _notify();
+  }
+
   /// F5 and the Refresh button: same parameters, fresh rows.
   Future<void> refresh() => reload(retainSelection: true, keepStaleRows: true);
 

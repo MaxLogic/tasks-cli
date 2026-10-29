@@ -285,6 +285,37 @@ pub fn list(
     Ok(rows)
 }
 
+/// Match the default attachment-list page, without opening another transaction.
+fn write_state(
+    conn: &Connection,
+    task: u64,
+) -> Result<crate::model::AttachmentWriteState, AppError> {
+    const PAGE_SIZE: usize = 100;
+    let mut items = list(conn, task, false, 0, PAGE_SIZE + 1)?;
+    let has_more = items.len() > PAGE_SIZE;
+    items.truncate(PAGE_SIZE);
+    let next_after = if has_more {
+        items.last().map(|a| a.attachment.display_id.clone())
+    } else {
+        None
+    };
+    let attachment_count = conn.query_row(
+        "SELECT count(*) FROM task_attachments WHERE task_id=?1 AND detached_event_id IS NULL",
+        [task],
+        |row| row.get(0),
+    )?;
+    let updated_ms = conn.query_row("SELECT updated_ms FROM tasks WHERE id=?1", [task], |row| {
+        row.get(0)
+    })?;
+    Ok(crate::model::AttachmentWriteState {
+        items,
+        has_more,
+        next_after,
+        attachment_count,
+        updated_ms,
+    })
+}
+
 pub fn read_envelope(
     conn: &Connection,
     task: u64,
@@ -501,6 +532,7 @@ pub(crate) fn attach(
         version: expected + 1,
         event_id: Some(event),
         attachments: added,
+        attachment_state: write_state(conn, id)?,
     })
 }
 
@@ -546,6 +578,7 @@ pub(crate) fn detach(
             version: expected,
             event_id: None,
             detached,
+            attachment_state: write_state(conn, id)?,
         });
     }
     let mut retained = retained_attachments(conn, &[id])?
@@ -562,6 +595,7 @@ pub(crate) fn detach(
         version: expected + 1,
         event_id: Some(event),
         detached,
+        attachment_state: write_state(conn, id)?,
     })
 }
 

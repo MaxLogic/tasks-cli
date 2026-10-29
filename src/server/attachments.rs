@@ -152,6 +152,7 @@ fn execute(
                 version: result.version,
                 event_id: result.event_id,
                 attachments: result.attachments,
+                attachment_state: result.attachment_state,
             },
         )
     })?)

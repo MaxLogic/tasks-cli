@@ -665,6 +665,7 @@ class RemoteFixture {
       projectId: project,
       task: h.detail,
       refresh: h.refresh,
+      applyWrite: (updated, _) => h.detail = updated,
       announce: (_) {},
       dialogs: h.dialogs,
     );

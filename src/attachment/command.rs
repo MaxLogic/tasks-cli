@@ -114,6 +114,7 @@ pub fn execute(cli: &Cli, command: &AttachmentCommand) -> Result<(), AppError> {
                     version: added.version,
                     event_id: added.event_id,
                     attachments: added.attachments,
+                    attachment_state: added.attachment_state,
                 },
             )
         }
@@ -136,6 +137,7 @@ pub fn execute(cli: &Cli, command: &AttachmentCommand) -> Result<(), AppError> {
                     version: detached.version,
                     event_id: detached.event_id,
                     detached: detached.detached,
+                    attachment_state: detached.attachment_state,
                 },
             )
         }

@@ -227,6 +227,23 @@ class TaskDetailController extends ChangeNotifier {
     return _load(id);
   }
 
+  /// Apply a confirmed write without re-reading or losing tab/find/focus state.
+  void applyAttachmentWrite(TaskDetail updated) {
+    if (_disposed ||
+        _taskId != updated.id ||
+        (_detail?.version ?? 0) > updated.version) {
+      return;
+    }
+    _generation++;
+    _cancelInFlight();
+    _detail = updated;
+    _loading = false;
+    _loadError = null;
+    // History is now stale; load it on the next explicit History activation.
+    _resetHistory();
+    _notify();
+  }
+
   void clearSelection() {
     _debounceTimer?.cancel();
     _generation++;
@@ -302,6 +319,7 @@ class TaskDetailController extends ChangeNotifier {
   /// Activates one tab. History loads the first page on its first activation.
   void setTab(TaskDetailTab value) {
     if (_tab == value) {
+      if (value == TaskDetailTab.history) unawaited(ensureHistoryLoaded());
       return;
     }
     _tab = value;

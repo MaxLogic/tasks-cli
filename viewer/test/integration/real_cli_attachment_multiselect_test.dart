@@ -12,7 +12,7 @@ import 'real_cli_attachments_test.dart' as real;
 
 void main() {
   testWidgets(
-    'real batch detach uses one write and refresh and retains the skip preference',
+    'real batch detach uses one write without refresh and retains the skip preference',
     (tester) async {
       final h = (await tester.runAsync(real.Harness.start))!;
       h.dialogs.files = [
@@ -75,7 +75,11 @@ void main() {
         '--expect-version',
         '2',
       ]);
-      expect(calls.where((args) => args.contains('show')), hasLength(1));
+      expect(calls, hasLength(1));
+      expect(
+        calls.where((args) => args.contains('show') || args.contains('tasks')),
+        isEmpty,
+      );
       expect(panel.list.focusedRowIndex, 0);
       expect(
         announcements.liveRegionText,

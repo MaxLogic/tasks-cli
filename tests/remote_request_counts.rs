@@ -443,6 +443,20 @@ fn remote_commands_reuse_capabilities_without_redundant_signed_requests() {
                 "TSK061 sample={sample} command={name} requests={count} elapsed_ms={elapsed:.3}"
             );
             assert_eq!(value["schema_version"], 1);
+            if name == "attachment-add" || name == "attachment-detach" {
+                assert_eq!(count, 1, "warm attachment write uses one signed request");
+                let state = &value["data"]["attachment_state"];
+                assert_eq!(state["has_more"], false);
+                assert!(state["next_after"].is_null());
+                assert!(state["updated_ms"].is_i64());
+                let expected_count = usize::from(name == "attachment-add");
+                assert_eq!(state["attachment_count"], expected_count);
+                assert_eq!(state["items"].as_array().unwrap().len(), expected_count);
+                if expected_count == 1 {
+                    assert_eq!(state["items"][0]["name"], "source.txt");
+                    assert!(state["items"][0]["detached_ms"].is_null());
+                }
+            }
             if name == "viewer-info" {
                 assert_eq!(value, expected_viewer);
             }

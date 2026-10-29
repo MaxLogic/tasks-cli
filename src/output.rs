@@ -56,6 +56,7 @@ pub enum CommandPayload {
         version: u64,
         event_id: Option<u64>,
         attachments: Vec<AddedAttachment>,
+        attachment_state: crate::model::AttachmentWriteState,
     },
     AttachmentDetach {
         id: u64,
@@ -64,6 +65,7 @@ pub enum CommandPayload {
         version: u64,
         event_id: Option<u64>,
         detached: Vec<u64>,
+        attachment_state: crate::model::AttachmentWriteState,
     },
     AttachmentList {
         id: u64,
@@ -745,6 +747,10 @@ mod tests {
         );
     }
 
+    fn write_state_json() -> Value {
+        json!({"items":[],"has_more":false,"next_after":null,"attachment_count":0,"updated_ms":100})
+    }
+
     #[test]
     fn attachment_add_renders_text_and_exact_json() {
         let mut added = attachment_json();
@@ -752,7 +758,8 @@ mod tests {
         assert_attachment_render(CommandPayload::AttachmentAdd {
             id:1, display_id:"TSK-001".into(), status:"todo".into(), version:9, event_id:Some(431),
             attachments:vec![serde_json::from_value(added.clone()).unwrap()],
-        }, json!({"command":"attachment_add","id":1,"display_id":"TSK-001","status":"todo","version":9,"event_id":431,"attachments":[added]}),
+            attachment_state: serde_json::from_value(write_state_json()).unwrap(),
+        }, json!({"command":"attachment_add","id":1,"display_id":"TSK-001","status":"todo","version":9,"event_id":431,"attachments":[added],"attachment_state":write_state_json()}),
         "id: TSK-001\nstatus: todo\nversion: 9\nevent_id: 431\nattached: A12\ttext\ttext/plain; charset=utf-8\t5 bytes\trun.log\n");
     }
 
@@ -766,7 +773,7 @@ mod tests {
                 "id: TSK-001\nstatus: todo\nversion: 10\nevent_id: {}\n{tail}",
                 event_id.map_or_else(|| "null".into(), |id| id.to_string())
             );
-            let expected = json!({"command":"attachment_detach","id":1,"display_id":"TSK-001","status":"todo","version":10,"event_id":event_id,"detached":detached});
+            let expected = json!({"command":"attachment_detach","id":1,"display_id":"TSK-001","status":"todo","version":10,"event_id":event_id,"detached":detached,"attachment_state":write_state_json()});
             assert_attachment_render(
                 CommandPayload::AttachmentDetach {
                     id: 1,
@@ -775,6 +782,7 @@ mod tests {
                     version: 10,
                     event_id,
                     detached,
+                    attachment_state: serde_json::from_value(write_state_json()).unwrap(),
                 },
                 expected,
                 &text,
