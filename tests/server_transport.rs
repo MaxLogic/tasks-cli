@@ -534,6 +534,7 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
                 "operation",
                 "duration_ms",
                 "outcome",
+                "nonce_path",
             ])
             .collect::<std::collections::BTreeSet<_>>();
         if index == 2 {
@@ -563,13 +564,16 @@ fn request_logs_include_registered_actor_and_refusals_without_private_request_co
     assert_eq!(lines[0]["outcome"], "http_400");
     assert!(lines[0]["auth_ms"].as_f64().unwrap() > 0.0);
     assert!(lines[0]["nonce_commit_ms"].as_f64().unwrap() > 0.0);
+    assert_eq!(lines[0]["nonce_path"], "retained");
     assert!(lines[0]["encode_ms"].as_f64().unwrap() > 0.0);
     assert!(lines[1]["actor_id"].is_null());
     assert_eq!(lines[1]["outcome"], "http_401");
     assert!(lines[1]["auth_ms"].as_f64().unwrap() > 0.0);
     assert_eq!(lines[1]["nonce_ms"], 0.0);
+    assert!(lines[1]["nonce_path"].is_null());
     assert_eq!(lines[1]["handler_ms"], 0.0);
     assert_eq!(lines[2]["operation"], "attachment_list");
+    assert_eq!(lines[2]["nonce_path"], "retained");
     assert_eq!(lines[2]["item_count"], 0);
     for field in [
         "auth_ms",

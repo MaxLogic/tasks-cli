@@ -5,6 +5,7 @@ use std::{cell::Cell, time::Instant};
 
 #[derive(Clone, Copy, Default, Serialize)]
 pub(super) struct Timings {
+    pub nonce_path: Option<NoncePath>,
     #[serde(serialize_with = "milliseconds")]
     pub auth_ms: f64,
     #[serde(serialize_with = "milliseconds")]
@@ -39,6 +40,13 @@ pub(super) struct Timings {
     pub queue_ms: f64,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NoncePath {
+    Retained,
+    Fallback,
+}
+
 // Round only at serialization, after all captured worker intervals are added.
 fn milliseconds<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_f64((value * 1000.0).round() / 1000.0)
@@ -46,6 +54,15 @@ fn milliseconds<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::O
 
 thread_local! {
     static ACTIVE: Cell<Option<Timings>> = const { Cell::new(None) };
+}
+
+pub(crate) fn nonce_path(path: NoncePath) {
+    ACTIVE.with(|active| {
+        if let Some(mut timings) = active.get() {
+            timings.nonce_path = Some(path);
+            active.set(Some(timings));
+        }
+    });
 }
 
 pub(crate) enum Phase {
@@ -131,6 +148,7 @@ pub(super) fn capture<T>(queued: Instant, phase: Phase, work: impl FnOnce() -> T
 
 impl Timings {
     pub(super) fn add(&mut self, other: Self) {
+        self.nonce_path = other.nonce_path.or(self.nonce_path);
         self.auth_ms += other.auth_ms;
         self.credential_ms += other.credential_ms;
         self.signature_ms += other.signature_ms;

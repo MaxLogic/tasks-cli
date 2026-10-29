@@ -82,7 +82,7 @@ pub struct OwnedServer {
     // Reuse the WAL writer and its directory-sync state between admissions.
     // Keep it independent of catalog reads and never retain a transaction.
     // Contention falls back to connect(), preserving SQLite's busy timeout.
-    nonce_connection: std::sync::Mutex<Connection>,
+    nonce_connection: std::sync::Mutex<Option<Connection>>,
     _ownership: ExclusiveLock,
 }
 
@@ -124,7 +124,7 @@ impl OwnedServer {
             root,
             id,
             catalog_connection: std::sync::Mutex::new(connection),
-            nonce_connection: std::sync::Mutex::new(nonce_connection),
+            nonce_connection: std::sync::Mutex::new(Some(nonce_connection)),
             _ownership: ownership,
         })
     }
@@ -176,7 +176,7 @@ impl OwnedServer {
             root,
             id,
             catalog_connection: std::sync::Mutex::new(connection),
-            nonce_connection: std::sync::Mutex::new(nonce_connection),
+            nonce_connection: std::sync::Mutex::new(Some(nonce_connection)),
             _ownership: ownership,
         })
     }
@@ -416,16 +416,33 @@ impl OwnedServer {
         let mut retained = match self.nonce_connection.try_lock() {
             Ok(connection) => Some(connection),
             Err(std::sync::TryLockError::WouldBlock) => None,
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                return Err(
-                    AppError::Database("server nonce connection lock poisoned".into()).into(),
-                );
-            }
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
         };
         let mut fresh = None;
         let connection = match retained.as_mut() {
-            Some(connection) => &mut **connection,
-            None => fresh.insert(self.connect()?),
+            Some(slot) => {
+                timing::nonce_path(timing::NoncePath::Retained);
+                // A failed COMMIT and failed drop-time ROLLBACK can leave a
+                // transaction open. Close that writer before reconnecting,
+                // including if reconnecting fails, to release its WAL lock.
+                if slot
+                    .as_ref()
+                    .is_some_and(|connection| !connection.is_autocommit())
+                {
+                    drop(slot.take());
+                }
+                // Only reuse a recovered poisoned writer after checking its
+                // transaction state. No authorization result is retained.
+                self.nonce_connection.clear_poison();
+                match &mut **slot {
+                    Some(connection) => connection,
+                    missing => missing.insert(self.connect()?),
+                }
+            }
+            None => {
+                timing::nonce_path(timing::NoncePath::Fallback);
+                fresh.insert(self.connect()?)
+            }
         };
         drop(open);
         let sql = timing::Phase::NonceSql.start();
@@ -477,8 +494,7 @@ impl OwnedServer {
 mod nonce_connection_tests {
     use super::*;
 
-    #[test]
-    fn occupied_retained_nonce_connection_uses_an_independent_writer() {
+    fn fixture() -> (tempfile::TempDir, std::sync::Arc<OwnedServer>, Uuid) {
         let root = tempfile::tempdir().unwrap();
         let server = std::sync::Arc::new(OwnedServer::initialize(root.path()).unwrap());
         let credential = server
@@ -492,21 +508,84 @@ mod nonce_connection_tests {
                 installation_name: "Fixture".into(),
             })
             .unwrap();
+        (root, server, credential)
+    }
+
+    #[test]
+    fn unfinished_retained_nonce_transaction_is_discarded_before_admission() {
+        let (_root, server, credential) = fixture();
+        {
+            let connection = server.nonce_connection.lock().unwrap();
+            let connection = connection.as_ref().unwrap();
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            connection.execute(
+                "INSERT INTO replay_nonces(credential_id,nonce,expires) VALUES (?1,'unfinished',1120)",
+                [credential.to_string()],
+            ).unwrap();
+            assert!(!connection.is_autocommit());
+        }
+        // Closing the abandoned writer must roll back its uncommitted nonce.
+        server
+            .consume_nonce(credential, "unfinished", 1120, 1000)
+            .unwrap();
+        assert!(matches!(
+            server.consume_nonce(credential, "unfinished", 1120, 1000),
+            Err(ServiceError::Unauthorized(_))
+        ));
+        server
+            .consume_nonce(credential, "next", 1120, 1000)
+            .unwrap();
+    }
+
+    #[test]
+    fn poisoned_retained_nonce_connection_recovers_with_or_without_a_transaction() {
+        for leave_transaction in [false, true] {
+            let (_root, server, credential) = fixture();
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let connection = server.nonce_connection.lock().unwrap();
+                let connection = connection.as_ref().unwrap();
+                if leave_transaction {
+                    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                }
+                panic!("fixture: panic while holding the nonce writer");
+            }));
+            assert!(panic.is_err());
+            assert!(server.nonce_connection.is_poisoned());
+            server
+                .consume_nonce(credential, "after-panic", 1120, 1000)
+                .unwrap();
+            assert!(!server.nonce_connection.is_poisoned());
+            assert!(matches!(
+                server.consume_nonce(credential, "after-panic", 1120, 1000),
+                Err(ServiceError::Unauthorized(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn occupied_retained_nonce_connection_uses_an_independent_writer() {
+        let (_root, server, credential) = fixture();
         // Occupy only the Rust mutex, without holding a SQLite transaction.
         let retained = server.nonce_connection.lock().unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         let worker_server = std::sync::Arc::clone(&server);
         let worker = std::thread::spawn(move || {
-            send.send(worker_server.consume_nonce(credential, "fallback", 1120, 1000))
-                .unwrap();
+            let result = timing::capture(std::time::Instant::now(), timing::Phase::Auth, || {
+                worker_server.consume_nonce(credential, "fallback", 1120, 1000)
+            });
+            send.send(result).unwrap();
         });
         let progress = receive.recv_timeout(Duration::from_secs(10));
         // Release and join even if an incorrect blocking lock caused a timeout.
         drop(retained);
         worker.join().unwrap();
-        progress
-            .expect("nonce admission must not wait for the retained connection mutex")
-            .unwrap();
+        let (result, timings) =
+            progress.expect("nonce admission must not wait for the retained connection mutex");
+        result.unwrap();
+        assert_eq!(
+            serde_json::to_value(timings).unwrap()["nonce_path"],
+            "fallback"
+        );
         assert!(matches!(
             server.consume_nonce(credential, "fallback", 1120, 1000),
             Err(ServiceError::Unauthorized(_))
