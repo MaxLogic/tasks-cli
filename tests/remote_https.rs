@@ -151,7 +151,7 @@ fn signed_https_round_trip_preserves_encoded_components_and_registered_destinati
 #[test]
 fn tls_gateway_forwards_signatures_to_the_actual_private_rust_listener() {
     use tasks_cli::server::{transport::ServiceState, OwnedServer, Registration};
-    let root = tempfile::tempdir().unwrap();
+    let root = support::temp::TempDir::new();
     let server = OwnedServer::initialize(root.path()).unwrap();
     let mut signer = identity();
     signer.server_id = server.server_id();

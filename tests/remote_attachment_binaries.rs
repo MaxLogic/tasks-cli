@@ -57,7 +57,7 @@ fn round_trip(
     omit_empty_get_length: bool,
     refuse_new_operations: bool,
 ) {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::temp::TempDir::new();
     let server_root = root.path().join("server");
     let client = root.path().join("client");
     let keys = client.join("client");

@@ -6,8 +6,8 @@ use tasks_cli::server::signatures::SigningIdentity;
 use tasks_cli::server::{OwnedServer, Registration, ServiceError};
 use uuid::Uuid;
 
-fn signed_fixture() -> (tempfile::TempDir, OwnedServer, SigningIdentity) {
-    let root = tempfile::tempdir().unwrap();
+fn signed_fixture() -> (support::temp::TempDir, OwnedServer, SigningIdentity) {
+    let root = support::temp::TempDir::new();
     let server = OwnedServer::initialize(root.path()).unwrap();
     let credential = server.register(&registration()).unwrap();
     let signer = SigningIdentity {
@@ -453,7 +453,7 @@ impl HttpFixture {
                 });
         });
         Self {
-            root: root.into(),
+            root,
             address: receive
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap(),

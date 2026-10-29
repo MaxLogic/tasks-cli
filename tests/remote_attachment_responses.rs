@@ -133,7 +133,7 @@ fn files(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 #[test]
 fn untrusted_download_context_and_identities_never_publish_get_view_or_save() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::temp::TempDir::new();
     let client = root.path().join("client");
     let keys = client.join("client");
     fs::create_dir(&client).unwrap();

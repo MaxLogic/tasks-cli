@@ -572,11 +572,11 @@ fn remote_get_uses_shared_publication_collision_reuse_overwrite_and_detached_rul
 }
 
 struct Server {
-    root: tempfile::TempDir,
     child: std::process::Child,
     signer: tasks_cli::remote::signing::SigningIdentity,
     address: std::net::SocketAddr,
     project: Uuid,
+    root: support::temp::TempDir,
 }
 impl Server {
     fn new(no_capability: bool) -> Self {
@@ -585,7 +585,7 @@ impl Server {
             server::{OwnedServer, Registration},
             store::{create_project_db_with_key, Store},
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = support::temp::TempDir::new();
         let server = OwnedServer::initialize(root.path()).unwrap();
         let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
         let credential = server
