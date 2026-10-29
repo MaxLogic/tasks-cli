@@ -97,9 +97,36 @@ fn replay_wal_is_reused_and_committed_nonce_survives_server_kill() {
         previous_bytes = bytes;
         signed.push(headers);
     }
-    // The idle anchor must not pin a read snapshot or prevent SQLite's normal
-    // checkpointing. Do this before one more admitted nonce, so crash recovery
-    // still has to recover a committed record from an uncheckpointed WAL.
+    // A project route reads the catalog through the retained connection, so
+    // the checkpoint below also proves that those reads release their snapshot.
+    let project_uri: Uri = format!("/v1/projects/{}/tasks/1/attachments/1", Uuid::new_v4())
+        .parse()
+        .unwrap();
+    let headers = signer
+        .sign(&Method::GET, &project_uri, b"", None, now, &[4; 32])
+        .unwrap();
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {project_uri} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    )
+    .unwrap();
+    for (name, value) in &headers {
+        write!(stream, "{name}: {}\r\n", value.to_str().unwrap()).unwrap();
+    }
+    write!(stream, "\r\n").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 404"),
+        "an admitted request for an unknown project must reach the catalog: {response}"
+    );
+    // The retained connection must not pin a read snapshot or prevent SQLite's
+    // normal checkpointing. Do this before one more admitted nonce, so crash
+    // recovery still has to recover a committed record from an uncheckpointed WAL.
     let checkpoint = rusqlite::Connection::open(root.path().join("server.sqlite")).unwrap();
     let busy: i64 = checkpoint
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
@@ -141,5 +168,5 @@ fn replay_wal_is_reused_and_committed_nonce_survives_server_kill() {
     let count: i64 = db
         .query_row("SELECT count(*) FROM replay_nonces", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 4);
 }
