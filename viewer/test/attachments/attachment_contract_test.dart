@@ -1161,7 +1161,9 @@ void main() {
         );
         final backend = support.fakeWorkspaceReads(
           tasks: {
-            '00000000-0000-4000-8000-000000000001': [support.testTaskItem(42)],
+            '00000000-0000-4000-8000-000000000001': [
+              support.testTaskItem(42).withAttachmentWrite(task(), 1),
+            ],
           },
         );
         final announcements = AnnouncementController(
@@ -1191,7 +1193,7 @@ void main() {
         await model.openTaskIndex(0);
         await tester.pumpAndSettle();
         await support.pressKey(tester, LogicalKeyboardKey.f3);
-        await support.pressAlt(tester, LogicalKeyboardKey.digit1);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit3);
         await support.pressAlt(tester, LogicalKeyboardKey.digit5);
         final controller = tester
             .widget<AttachmentPanel>(find.byType(AttachmentPanel))
@@ -1236,10 +1238,12 @@ void main() {
       },
     );
   }
-  for (final switchTask in [false, true]) {
-    testWidgets('paste reply updates after navigation switchTask=$switchTask', (
+  for (final navigation in ['history', 'task', 'project']) {
+    testWidgets('paste reply updates after navigation=$navigation', (
       tester,
     ) async {
+      final switchTask = navigation == 'task';
+      final switchProject = navigation == 'project';
       tester.view.physicalSize = const Size(1600, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1251,10 +1255,10 @@ void main() {
         launcher: launcher,
         executableExists: (_) => true,
       );
-      final backend = support.fakeWorkspaceReads(
+      final backend = GatedWorkspaceReads(
         tasks: {
           '00000000-0000-4000-8000-000000000001': [
-            support.testTaskItem(42),
+            support.testTaskItem(42).withAttachmentWrite(task(), 1),
             support.testTaskItem(43),
           ],
         },
@@ -1287,7 +1291,7 @@ void main() {
       await model.openTaskIndex(0);
       await tester.pumpAndSettle();
       expect(model.detail!.detail, isNotNull);
-      if (!switchTask) {
+      if (navigation == 'history') {
         await support.pressKey(tester, LogicalKeyboardKey.f3);
         await support.pressAlt(tester, LogicalKeyboardKey.digit3);
         expect(model.detail!.historyLoaded, isTrue);
@@ -1297,6 +1301,18 @@ void main() {
       expect(find.textContaining('Attach to '), findsOneWidget);
       await support.pressAlt(tester, LogicalKeyboardKey.keyA);
       expect(launcher.mutationStarted!.isCompleted, isTrue);
+      if (switchProject) {
+        await support.pressKey(tester, LogicalKeyboardKey.f1);
+        await support.pressKey(tester, LogicalKeyboardKey.arrowDown);
+        expect(model.selectedProjectId, '00000000-0000-4000-8000-000000000002');
+        backend.taskReadStarted = Completer<void>();
+        backend.releaseTaskRead = Completer<void>();
+        await support.pressKey(tester, LogicalKeyboardKey.arrowUp);
+        await tester.pump(taskDetailDebounce);
+        expect(model.selectedProjectId, '00000000-0000-4000-8000-000000000001');
+        expect(backend.taskReadStarted!.isCompleted, isTrue);
+        expect(model.tasks!.isLoading, isTrue);
+      }
       final reads = backend.taskRequests.length;
       if (switchTask) {
         model.selectTaskIndex(1);
@@ -1312,12 +1328,30 @@ void main() {
           .length;
       launcher.releaseMutation!.complete();
       await tester.pumpAndSettle();
-      expect(backend.taskRequests.length, reads);
+      if (switchProject) {
+        // The held page captured v7 before commit. Only the follow-up read can
+        // observe the real v8 row, including all non-attachment fields.
+        backend.tasks[model.selectedProjectId!] = [
+          support
+              .testTaskItem(42)
+              .withAttachmentWrite(
+                task().withAttachmentWrite(
+                  version: 8,
+                  updatedMs: 1234,
+                  attachments: [AttachmentSummary.fromJson(metadata)],
+                ),
+                1,
+              ),
+        ];
+        backend.releaseTaskRead!.complete();
+        await tester.pumpAndSettle();
+      }
+      expect(backend.taskRequests.length, reads + (switchProject ? 1 : 0));
       // Local detail reads wait for the writer, including the selected task's
       // legitimate navigation read. The attachment reply must add no reload.
       expect(
         launcher.calls.where((args) => args.contains('show')).length,
-        shows + (switchTask ? 1 : 0),
+        shows + (switchTask || switchProject ? 1 : 0),
       );
       expect(model.tasks!.itemAt(0)!.attachmentCount, 1);
       expect(model.tasks!.itemAt(0)!.version, 8);
@@ -1327,6 +1361,10 @@ void main() {
         expect(model.detail!.detail!.id, 43);
         expect(model.detail!.detail!.version, 7);
         expect(model.tasks!.selectedTaskId, 43);
+      } else if (switchProject) {
+        expect(model.detail!.detail!.id, 42);
+        expect(model.detail!.detail!.version, 8);
+        expect(model.tasks!.selectedTaskId, 42);
       } else {
         expect(
           launcher.calls.where((args) => args.contains('history')).length,
@@ -1670,6 +1708,25 @@ Future<void> settleFileIo(WidgetTester tester) async {
       () => Future<void>.delayed(const Duration(milliseconds: 10)),
     );
     await tester.pump();
+  }
+}
+
+class GatedWorkspaceReads extends support.FakeWorkspaceReads {
+  GatedWorkspaceReads({required super.tasks})
+    : super(projects: [support.testProjectItem(1), support.testProjectItem(2)]);
+
+  Completer<void>? taskReadStarted;
+  Completer<void>? releaseTaskRead;
+
+  @override
+  Future<TaskPage> fetchTasks(String projectId, TaskQuery query) async {
+    final gate = releaseTaskRead;
+    final page = await super.fetchTasks(projectId, query);
+    if (gate != null) {
+      if (!taskReadStarted!.isCompleted) taskReadStarted!.complete();
+      await gate.future;
+    }
+    return page;
   }
 }
 

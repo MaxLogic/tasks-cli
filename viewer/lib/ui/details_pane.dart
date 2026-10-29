@@ -168,8 +168,14 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
         isCurrent: () => _attachmentContextMatches(project, detail.id),
         projectId: project,
         task: detail,
-        applyWrite: (updated, count) =>
-            widget.model.applyAttachmentWrite(project, updated, count),
+        applyWrite: (updated, count, baseVersion) =>
+            widget.model.applyAttachmentWrite(
+              project,
+              updated,
+              count,
+              baseVersion,
+              historyVisible: mounted && !_attachmentsActive,
+            ),
         refresh: () async {
           if (identical(widget.model.detail, boundDetail)) {
             await widget.model.noteConfirmedRead();

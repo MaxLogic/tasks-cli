@@ -710,7 +710,7 @@ class Harness {
       projectId: project,
       task: h.detail,
       refresh: h.refresh,
-      applyWrite: (updated, _) => h.detail = updated,
+      applyWrite: (updated, _, _) => h.detail = updated,
       announce: (_) {},
       dialogs: h.dialogs,
     );

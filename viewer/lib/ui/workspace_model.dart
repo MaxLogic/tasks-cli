@@ -440,10 +440,16 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     return true;
   }
 
-  void applyAttachmentWrite(String projectId, TaskDetail updated, int count) {
+  void applyAttachmentWrite(
+    String projectId,
+    TaskDetail updated,
+    int count,
+    int baseVersion, {
+    required bool historyVisible,
+  }) {
     if (selectedProjectId != projectId) return;
-    _detail?.applyAttachmentWrite(updated);
-    _tasks?.applyAttachmentWrite(updated, count);
+    _detail?.applyAttachmentWrite(updated, historyVisible: historyVisible);
+    _tasks?.applyAttachmentWrite(updated, count, baseVersion: baseVersion);
   }
 
   /// Re-reads what a confirmed write changed: the task and its list row.

@@ -117,6 +117,7 @@ class TaskController extends ChangeNotifier {
   int? _sampledAtMs;
   int? _selectedTaskId;
   bool _loading = false;
+  bool _refreshAfterLoad = false;
   bool _staleRetryUsed = false;
   ViewerFailure? _firstLoadError;
   ViewerFailure? _refreshFailure;
@@ -427,15 +428,30 @@ class TaskController extends ChangeNotifier {
 
   /// Patch cached rows in place. Keep the old snapshot token so later paging
   /// detects the write and uses the existing stale-snapshot recovery.
-  void applyAttachmentWrite(TaskDetail detail, int count) {
-    // A user-requested reload owns its query and complete row fields. Let it
-    // finish instead of cancelling it or mixing old titles with new versions.
-    if (_disposed || _loading) return;
+  void applyAttachmentWrite(
+    TaskDetail detail,
+    int count, {
+    required int baseVersion,
+  }) {
+    if (_disposed) return;
+    // This read may have taken its snapshot before the write committed. Let
+    // it finish, then coalesce confirmed writes into one post-commit refresh.
+    if (_loading) {
+      _refreshAfterLoad = true;
+      return;
+    }
+    if (_rows.any(
+      (row) => row?.id == detail.id && row!.version < baseVersion,
+    )) {
+      // Attachment-only state cannot repair a title/status from an older base.
+      unawaited(refresh());
+      return;
+    }
     _generation++;
     _cancelInFlight();
     _pagesInFlight.clear();
     TaskItem patch(TaskItem row) =>
-        row.id == detail.id && row.version <= detail.version
+        row.id == detail.id && row.version == baseVersion
         ? row.withAttachmentWrite(detail, count)
         : row;
     _rows = [for (final row in _rows) row == null ? null : patch(row)];
@@ -581,7 +597,12 @@ class TaskController extends ChangeNotifier {
     } finally {
       if (generation == _generation) {
         _loading = false;
-        _notify();
+        if (_refreshAfterLoad) {
+          _refreshAfterLoad = false;
+          await refresh();
+        } else {
+          _notify();
+        }
       }
     }
   }

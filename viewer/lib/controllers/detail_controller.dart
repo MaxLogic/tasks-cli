@@ -228,7 +228,10 @@ class TaskDetailController extends ChangeNotifier {
   }
 
   /// Apply a confirmed write without re-reading or losing tab/find/focus state.
-  void applyAttachmentWrite(TaskDetail updated) {
+  void applyAttachmentWrite(
+    TaskDetail updated, {
+    required bool historyVisible,
+  }) {
     if (_disposed ||
         _taskId != updated.id ||
         (_detail?.version ?? 0) > updated.version) {
@@ -242,7 +245,9 @@ class TaskDetailController extends ChangeNotifier {
     // A paste can complete while History is visible from another region.
     _resetHistory();
     _notify();
-    if (_tab == TaskDetailTab.history) unawaited(ensureHistoryLoaded());
+    if (historyVisible && _tab == TaskDetailTab.history) {
+      unawaited(ensureHistoryLoaded());
+    }
   }
 
   void clearSelection() {

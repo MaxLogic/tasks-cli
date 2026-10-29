@@ -27,7 +27,8 @@ class AttachmentController extends ChangeNotifier {
   final String projectId;
   TaskDetail task;
   final Future<void> Function() refresh;
-  final void Function(TaskDetail, int attachmentCount)? applyWrite;
+  final void Function(TaskDetail, int attachmentCount, int baseVersion)?
+  applyWrite;
   final void Function(String) announce;
   final AttachmentFileDialogs dialogs;
   final bool Function()? isCurrent;
@@ -211,7 +212,7 @@ class AttachmentController extends ChangeNotifier {
       attachments: items,
     );
     if (current) task = updated;
-    applyWrite?.call(updated, count);
+    applyWrite?.call(updated, count, base.version);
     return true;
   }
 

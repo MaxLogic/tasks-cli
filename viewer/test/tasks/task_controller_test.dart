@@ -159,6 +159,102 @@ Future<TaskPage> Function(String, TaskQuery) catalogResponder(int total) =>
         syntheticPage(total, offset: query.offset, limit: query.limit);
 
 void main() {
+  test('no-op detach patches its unchanged base without a refresh', () async {
+    final reader = FakeTaskReader(catalogResponder(1));
+    final controller = buildTaskController(reader);
+    addTearDown(controller.dispose);
+    await controller.reload();
+    controller.applyAttachmentWrite(
+      support.testTaskDetail(1, version: 1),
+      2,
+      baseVersion: 1,
+    );
+    expect(reader.requests, hasLength(1));
+    expect(controller.itemAt(0)!.version, 1);
+    expect(controller.itemAt(0)!.attachmentCount, 2);
+  });
+
+  for (final trigger in ['filter', 'F5', 'stale snapshot']) {
+    test(
+      'attachment reply refreshes a pre-commit read after $trigger',
+      () async {
+        final reader = FakeTaskReader(catalogResponder(201));
+        final controller = buildTaskController(reader, prefetchRows: 0);
+        addTearDown(controller.dispose);
+        await controller.reload();
+        reader.manualMode = true;
+        Future<void>? activeRead;
+        if (trigger == 'filter') {
+          controller.togglePriority('P2');
+        } else if (trigger == 'F5') {
+          activeRead = controller.refresh();
+        } else {
+          activeRead = controller.ensureRow(150);
+          reader.manual.single.completeError(
+            const ViewerCliErrorFailure(
+              code: 'stale_snapshot',
+              message: 'changed',
+              exitCode: 4,
+            ),
+          );
+          await pumpEventQueue();
+          expect(reader.manual, hasLength(2));
+        }
+        final before = reader.requests.length;
+        final cancellations = reader.cancelledScopes.length;
+        final updated = support.testTaskDetail(1, version: 2);
+        controller.applyAttachmentWrite(
+          updated,
+          1,
+          baseVersion: updated.version - 1,
+        );
+        expect(controller.isLoading, isTrue);
+        expect(reader.cancelledScopes.length, cancellations);
+        // More than one confirmed write during this read still needs only one
+        // authoritative post-commit read.
+        controller.applyAttachmentWrite(
+          support.testTaskDetail(2, version: 2),
+          1,
+          baseVersion: 1,
+        );
+        final confirmed = taskItem(1).withAttachmentWrite(updated, 1);
+        reader.manualMode = false;
+        reader.responder = (_, query) async =>
+            syntheticPage(201, offset: 0, limit: 100, items: [confirmed]);
+        reader.manual.last.complete(syntheticPage(201, offset: 0, limit: 100));
+        if (activeRead != null) await activeRead;
+        await pumpEventQueue();
+        expect(reader.requests.length, before + 1);
+        expect(controller.itemAt(0)!.version, 2);
+        expect(controller.itemAt(0)!.attachmentCount, 1);
+        expect(controller.isLoading, isFalse);
+      },
+    );
+  }
+
+  test('attachment reply refreshes a row older than the write base', () async {
+    final reader = FakeTaskReader(catalogResponder(1));
+    final controller = buildTaskController(reader);
+    addTearDown(controller.dispose);
+    await controller.reload();
+    final updated = support.testTaskDetail(1, version: 3, title: 'New title');
+    reader.responder = (_, query) async => syntheticPage(
+      1,
+      offset: 0,
+      limit: 100,
+      items: [taskItem(1, title: 'New title').withAttachmentWrite(updated, 1)],
+    );
+    controller.applyAttachmentWrite(
+      updated,
+      1,
+      baseVersion: updated.version - 1,
+    );
+    await pumpEventQueue();
+    expect(reader.requests, hasLength(2));
+    expect(controller.itemAt(0)!.title, 'New title');
+    expect(controller.itemAt(0)!.version, 3);
+  });
+
   for (final filterChange in [true, false]) {
     test(
       'attachment reply preserves an active list read filter=$filterChange',
@@ -169,7 +265,8 @@ void main() {
         await controller.reload();
         final mutation = Completer<TaskDetail>();
         final write = mutation.future.then(
-          (detail) => controller.applyAttachmentWrite(detail, 1),
+          (detail) =>
+              controller.applyAttachmentWrite(detail, 1, baseVersion: 1),
         );
         reader.manualMode = true;
         Future<void>? refresh;
@@ -190,6 +287,9 @@ void main() {
           1,
           title: 'Edited while uploading',
         ).withAttachmentWrite(support.testTaskDetail(1, version: 3), 2);
+        reader.manualMode = false;
+        reader.responder = (_, query) async =>
+            syntheticPage(1, offset: 0, limit: 100, items: [authoritative]);
         reader.manual.single.complete(
           syntheticPage(1, offset: 0, limit: 100, items: [authoritative]),
         );
