@@ -5,7 +5,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
-RUN cargo build --release --locked --features server --bin tasks-server --jobs 2
+# Linux fdatasync persists database/WAL data and retrieval metadata (including
+# size), without requiring unrelated inode timestamps to join the ext4 journal.
+# SQLite otherwise conservatively aliases it to fsync. Keep synchronous=FULL.
+RUN LIBSQLITE3_FLAGS=-DHAVE_FDATASYNC=1 \
+    cargo build --release --locked --features server --bin tasks-server --jobs 2
 
 FROM debian:bookworm-slim AS runtime
 RUN groupadd --gid 10001 tasks && useradd --uid 10001 --gid 10001 --no-create-home tasks \

@@ -79,6 +79,10 @@ pub struct OwnedServer {
     // read snapshot, or hold its mutex while opening/using a project Store.
     // Drop it before releasing root ownership (fields drop in declaration order).
     catalog_connection: std::sync::Mutex<Connection>,
+    // Reuse the WAL writer and its directory-sync state between admissions.
+    // Keep it independent of catalog reads and never retain a transaction.
+    // Contention falls back to connect(), preserving SQLite's busy timeout.
+    nonce_connection: std::sync::Mutex<Connection>,
     _ownership: ExclusiveLock,
 }
 
@@ -115,10 +119,12 @@ impl OwnedServer {
         transaction.pragma_update(None, "user_version", 2)?;
         transaction.commit()?;
         connection.pragma_update(None, "query_only", true)?;
+        let nonce_connection = Self::connect_at(&root)?;
         Ok(Self {
             root,
             id,
             catalog_connection: std::sync::Mutex::new(connection),
+            nonce_connection: std::sync::Mutex::new(nonce_connection),
             _ownership: ownership,
         })
     }
@@ -165,10 +171,12 @@ impl OwnedServer {
         }
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         connection.pragma_update(None, "query_only", true)?;
+        let nonce_connection = Self::connect_at(&root)?;
         Ok(Self {
             root,
             id,
             catalog_connection: std::sync::Mutex::new(connection),
+            nonce_connection: std::sync::Mutex::new(nonce_connection),
             _ownership: ownership,
         })
     }
@@ -287,8 +295,12 @@ impl OwnedServer {
     }
 
     fn connect(&self) -> Result<Connection, ServiceError> {
+        Self::connect_at(&self.root)
+    }
+
+    fn connect_at(root: &Path) -> Result<Connection, ServiceError> {
         let connection = Connection::open_with_flags(
-            self.root.join("server.sqlite"),
+            root.join("server.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -400,10 +412,22 @@ impl OwnedServer {
         now: i64,
     ) -> Result<(), ServiceError> {
         let _nonce = timing::Phase::Nonce.start();
-        let mut connection = {
-            let _open = timing::Phase::NonceOpen.start();
-            self.connect()?
+        let open = timing::Phase::NonceOpen.start();
+        let mut retained = match self.nonce_connection.try_lock() {
+            Ok(connection) => Some(connection),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(
+                    AppError::Database("server nonce connection lock poisoned".into()).into(),
+                );
+            }
         };
+        let mut fresh = None;
+        let connection = match retained.as_mut() {
+            Some(connection) => &mut **connection,
+            None => fresh.insert(self.connect()?),
+        };
+        drop(open);
         let sql = timing::Phase::NonceSql.start();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Self::lookup(&transaction, credential, true)?;
@@ -442,8 +466,50 @@ impl OwnedServer {
         }
         {
             let _close = timing::Phase::NonceClose.start();
-            drop(connection);
+            drop(retained);
+            drop(fresh);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nonce_connection_tests {
+    use super::*;
+
+    #[test]
+    fn occupied_retained_nonce_connection_uses_an_independent_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let server = std::sync::Arc::new(OwnedServer::initialize(root.path()).unwrap());
+        let credential = server
+            .register(&Registration {
+                public_key: ed25519_dalek::SigningKey::from_bytes(&[74; 32])
+                    .verifying_key()
+                    .to_bytes(),
+                actor_id: "fixture".into(),
+                actor_name: "Fixture".into(),
+                installation_id: Uuid::new_v4(),
+                installation_name: "Fixture".into(),
+            })
+            .unwrap();
+        // Occupy only the Rust mutex, without holding a SQLite transaction.
+        let retained = server.nonce_connection.lock().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker_server = std::sync::Arc::clone(&server);
+        let worker = std::thread::spawn(move || {
+            send.send(worker_server.consume_nonce(credential, "fallback", 1120, 1000))
+                .unwrap();
+        });
+        let progress = receive.recv_timeout(Duration::from_secs(10));
+        // Release and join even if an incorrect blocking lock caused a timeout.
+        drop(retained);
+        worker.join().unwrap();
+        progress
+            .expect("nonce admission must not wait for the retained connection mutex")
+            .unwrap();
+        assert!(matches!(
+            server.consume_nonce(credential, "fallback", 1120, 1000),
+            Err(ServiceError::Unauthorized(_))
+        ));
     }
 }
