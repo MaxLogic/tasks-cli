@@ -239,9 +239,10 @@ class TaskDetailController extends ChangeNotifier {
     _detail = updated;
     _loading = false;
     _loadError = null;
-    // History is now stale; load it on the next explicit History activation.
+    // A paste can complete while History is visible from another region.
     _resetHistory();
     _notify();
+    if (_tab == TaskDetailTab.history) unawaited(ensureHistoryLoaded());
   }
 
   void clearSelection() {

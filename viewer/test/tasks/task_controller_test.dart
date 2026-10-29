@@ -12,6 +12,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tasks_viewer/controllers/task_controller.dart';
 import 'package:tasks_viewer/data/models.dart';
+import '../support/viewer_test_support.dart' as support;
 
 const String testProjectId = '11111111-2222-3333-4444-555555555555';
 const Duration _fastDebounce = Duration(milliseconds: 20);
@@ -158,6 +159,51 @@ Future<TaskPage> Function(String, TaskQuery) catalogResponder(int total) =>
         syntheticPage(total, offset: query.offset, limit: query.limit);
 
 void main() {
+  for (final filterChange in [true, false]) {
+    test(
+      'attachment reply preserves an active list read filter=$filterChange',
+      () async {
+        final reader = FakeTaskReader(catalogResponder(1));
+        final controller = buildTaskController(reader);
+        addTearDown(controller.dispose);
+        await controller.reload();
+        final mutation = Completer<TaskDetail>();
+        final write = mutation.future.then(
+          (detail) => controller.applyAttachmentWrite(detail, 1),
+        );
+        reader.manualMode = true;
+        Future<void>? refresh;
+        if (filterChange) {
+          controller.togglePriority('P2');
+          expect(reader.lastRequest.priorities, ['P2']);
+        } else {
+          // F5 and the Refresh button share this entry point.
+          refresh = controller.refresh();
+        }
+        final cancellations = reader.cancelledScopes.length;
+        mutation.complete(support.testTaskDetail(1, version: 2));
+        await write;
+        expect(controller.isLoading, isTrue);
+        expect(reader.cancelledScopes.length, cancellations);
+        if (!filterChange) expect(controller.itemAt(0)!.version, 1);
+        final authoritative = taskItem(
+          1,
+          title: 'Edited while uploading',
+        ).withAttachmentWrite(support.testTaskDetail(1, version: 3), 2);
+        reader.manual.single.complete(
+          syntheticPage(1, offset: 0, limit: 100, items: [authoritative]),
+        );
+        if (refresh != null) await refresh;
+        await pumpEventQueue();
+        expect(controller.isLoading, isFalse);
+        expect(controller.totalCount, 1);
+        expect(controller.itemAt(0)!.title, 'Edited while uploading');
+        expect(controller.itemAt(0)!.version, 3);
+        expect(controller.itemAt(0)!.attachmentCount, 2);
+      },
+    );
+  }
+
   test(
     'date sorts show newest first and priority shows highest first',
     () async {

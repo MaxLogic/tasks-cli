@@ -202,14 +202,16 @@ class AttachmentController extends ChangeNotifier {
         'Inconsistent attachment write state',
       );
     }
-    // A late reply must not replace another selection or a newer confirmed read.
-    if (!current || task.version > version) return true;
-    task = task.withAttachmentWrite(
+    // Navigation does not invalidate the written task's cached row. Publish
+    // its state even after this controller loses the selection or is disposed.
+    if (task.version > version) return true;
+    final updated = base.withAttachmentWrite(
       version: version,
       updatedMs: updatedMs,
       attachments: items,
     );
-    applyWrite?.call(task, count);
+    if (current) task = updated;
+    applyWrite?.call(updated, count);
     return true;
   }
 

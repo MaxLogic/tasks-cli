@@ -112,6 +112,44 @@ fn no_temps(root: &Path) {
 }
 
 #[test]
+fn attachment_write_state_reports_a_bounded_page_with_test_limits() {
+    let f = Fixture::new();
+    let limits = Limits {
+        task_count: 102,
+        batch_count: 102,
+        ..Limits::PRODUCTION
+    };
+    let items = (1..=102)
+        .map(|id| PreparedItem {
+            name: format!("item-{id}.txt"),
+            envelope: envelope::encode(&b"small fixture"[..], "item.txt", &limits).unwrap(),
+        })
+        .collect();
+    let added = f.store().attach(1, 1, items, &limits).unwrap();
+    let page = ok(f.run(&["attachment", "list", "1"], None));
+    let added_state = serde_json::to_value(&added.attachment_state).unwrap();
+    assert_eq!(added_state["items"], page["items"]);
+    assert_eq!(added_state["items"].as_array().unwrap().len(), 100);
+    assert_eq!(added_state["attachment_count"], 102);
+    assert_eq!(added_state["has_more"], true);
+    assert_eq!(added_state["next_after"], "A100");
+
+    let detached = ok(f.run(
+        &["attachment", "detach", "1", "A1", "--expect-version", "2"],
+        None,
+    ));
+    let page = ok(f.run(&["attachment", "list", "1"], None));
+    let state = &detached["attachment_state"];
+    assert_eq!(state["items"], page["items"]);
+    assert_eq!(state["items"].as_array().unwrap().len(), 100);
+    assert_eq!(state["attachment_count"], 101);
+    assert_eq!(state["has_more"], true);
+    assert_eq!(state["next_after"], "A101");
+    let last = ok(f.run(&["attachment", "list", "1", "--after", "A101"], None));
+    assert_eq!(last["items"][0]["id"], 102);
+}
+
+#[test]
 fn add_file_batch_stdin_metadata_and_detach() {
     let f = Fixture::new();
     let source = f.path("source.txt");

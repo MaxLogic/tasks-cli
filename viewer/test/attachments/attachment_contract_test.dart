@@ -17,6 +17,8 @@ import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/data/editor_models.dart';
 import 'package:tasks_viewer/data/cli_client.dart';
 import 'package:tasks_viewer/controllers/attachment_controller.dart';
+import 'package:tasks_viewer/controllers/detail_controller.dart'
+    show taskDetailDebounce;
 import 'package:tasks_viewer/platform/file_dialogs.dart';
 import 'package:tasks_viewer/ui/attachment_dialogs.dart';
 import 'package:tasks_viewer/ui/attachment_preview_dialog.dart';
@@ -1189,7 +1191,7 @@ void main() {
         await model.openTaskIndex(0);
         await tester.pumpAndSettle();
         await support.pressKey(tester, LogicalKeyboardKey.f3);
-        await support.pressAlt(tester, LogicalKeyboardKey.digit3);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit1);
         await support.pressAlt(tester, LogicalKeyboardKey.digit5);
         final controller = tester
             .widget<AttachmentPanel>(find.byType(AttachmentPanel))
@@ -1233,6 +1235,111 @@ void main() {
         announcements.dispose();
       },
     );
+  }
+  for (final switchTask in [false, true]) {
+    testWidgets('paste reply updates after navigation switchTask=$switchTask', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1600, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final launcher = DetailLauncher(true)
+        ..mutationStarted = Completer<void>()
+        ..releaseMutation = Completer<void>();
+      final client = ViewerCliClient(
+        environment: rig.client.environment,
+        launcher: launcher,
+        executableExists: (_) => true,
+      );
+      final backend = support.fakeWorkspaceReads(
+        tasks: {
+          '00000000-0000-4000-8000-000000000001': [
+            support.testTaskItem(42),
+            support.testTaskItem(43),
+          ],
+        },
+      );
+      final announcements = AnnouncementController(
+        clipPlayer: support.RecordingClipPlayer(),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ViewerWorkspaceHost(
+            environment: rig.client.environment,
+            readers: ViewerDataReader(
+              projects: backend,
+              tasks: backend,
+              detail: client,
+              update: client,
+              probe: client.probe,
+            ),
+            announcements: announcements,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final model = tester
+          .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
+          .model;
+      model.selectProjectIndex(0);
+      await tester.pumpAndSettle();
+      expect(model.detail, isNotNull, reason: 'project selected');
+      await model.openTaskIndex(0);
+      await tester.pumpAndSettle();
+      expect(model.detail!.detail, isNotNull);
+      if (!switchTask) {
+        await support.pressKey(tester, LogicalKeyboardKey.f3);
+        await support.pressAlt(tester, LogicalKeyboardKey.digit3);
+        expect(model.detail!.historyLoaded, isTrue);
+      }
+      await support.pressKey(tester, LogicalKeyboardKey.f2);
+      await support.pressControl(tester, LogicalKeyboardKey.keyV);
+      expect(find.textContaining('Attach to '), findsOneWidget);
+      await support.pressAlt(tester, LogicalKeyboardKey.keyA);
+      expect(launcher.mutationStarted!.isCompleted, isTrue);
+      final reads = backend.taskRequests.length;
+      if (switchTask) {
+        model.selectTaskIndex(1);
+        await tester.pump(taskDetailDebounce);
+        await tester.pumpAndSettle();
+        expect(model.detail!.taskId, 43);
+      }
+      final shows = launcher.calls
+          .where((args) => args.contains('show'))
+          .length;
+      final histories = launcher.calls
+          .where((args) => args.contains('history'))
+          .length;
+      launcher.releaseMutation!.complete();
+      await tester.pumpAndSettle();
+      expect(backend.taskRequests.length, reads);
+      // Local detail reads wait for the writer, including the selected task's
+      // legitimate navigation read. The attachment reply must add no reload.
+      expect(
+        launcher.calls.where((args) => args.contains('show')).length,
+        shows + (switchTask ? 1 : 0),
+      );
+      expect(model.tasks!.itemAt(0)!.attachmentCount, 1);
+      expect(model.tasks!.itemAt(0)!.version, 8);
+      expect(model.tasks!.itemAt(0)!.updatedMs, 1234);
+      if (switchTask) {
+        expect(model.detail!.taskId, 43);
+        expect(model.detail!.detail!.id, 43);
+        expect(model.detail!.detail!.version, 7);
+        expect(model.tasks!.selectedTaskId, 43);
+      } else {
+        expect(
+          launcher.calls.where((args) => args.contains('history')).length,
+          histories + 1,
+        );
+        expect(model.detail!.historyLoaded, isTrue);
+        expect(model.detail!.isHistoryLoading, isFalse);
+        expect(model.detail!.historyEvents.single.resultingVersion, 8);
+        expect(find.text('Loading history'), findsNothing);
+      }
+      await tester.pumpWidget(const SizedBox());
+      announcements.dispose();
+    });
   }
   for (final capable in [false, true]) {
     testWidgets(
@@ -1572,6 +1679,8 @@ class DetailLauncher implements ProcessLauncher {
   bool failDetails = false;
   bool rejectUpdate = false;
   int version = 7;
+  Completer<void>? mutationStarted;
+  Completer<void>? releaseMutation;
   List<Map<String, Object?>> attachments = [metadata];
   final calls = <List<String>>[];
   final bool capable;
@@ -1607,6 +1716,8 @@ class DetailLauncher implements ProcessLauncher {
       }, project: false);
     } else if (args.contains('attachment') &&
         (args.contains('detach') || args.contains('add'))) {
+      mutationStarted?.complete();
+      await releaseMutation?.future;
       final detach = args.contains('detach');
       version++;
       attachments = detach ? [] : [metadata];
@@ -1632,12 +1743,25 @@ class DetailLauncher implements ProcessLauncher {
                 ),
               )
               as Map<String, dynamic>;
-      (doc['data'] as Map<String, dynamic>)['version'] = version;
+      final id = int.parse(args[args.indexOf('show') + 1].split('-').last);
+      (doc['data'] as Map<String, dynamic>)['version'] = id == 42 ? version : 7;
+      (doc['data'] as Map<String, dynamic>)['id'] = id;
       (doc['data'] as Map<String, dynamic>)['attachments'] = attachments;
       response = jsonEncode(doc);
     } else if (args.contains('history')) {
       response = transport.historyDocument(
         projectId: args[args.indexOf('--project') + 1],
+        items: [
+          {
+            'event_id': 11,
+            'task_id': 42,
+            'entity_type': 'task',
+            'operation': 'update',
+            'resulting_version': version,
+            'created_ms': 1700000001000,
+            'snapshot_json': '{"version":$version}',
+          },
+        ],
       );
     } else if (args.contains('clipboard')) {
       response = envelope('attachment_clipboard', {

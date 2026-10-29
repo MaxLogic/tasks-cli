@@ -428,11 +428,12 @@ class TaskController extends ChangeNotifier {
   /// Patch cached rows in place. Keep the old snapshot token so later paging
   /// detects the write and uses the existing stale-snapshot recovery.
   void applyAttachmentWrite(TaskDetail detail, int count) {
-    if (_disposed) return;
+    // A user-requested reload owns its query and complete row fields. Let it
+    // finish instead of cancelling it or mixing old titles with new versions.
+    if (_disposed || _loading) return;
     _generation++;
     _cancelInFlight();
     _pagesInFlight.clear();
-    _loading = false;
     TaskItem patch(TaskItem row) =>
         row.id == detail.id && row.version <= detail.version
         ? row.withAttachmentWrite(detail, count)
