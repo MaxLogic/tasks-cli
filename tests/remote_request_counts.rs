@@ -5,7 +5,7 @@ use std::time::Instant;
 use support::remote_fixture::{ok, run, Fixture};
 
 fn measured_run(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-    if let Some(binary) = std::env::var_os("TSK062_MEASURE_BINARY") {
+    if let Some(binary) = std::env::var_os("TASKS_REQUEST_COUNT_BINARY") {
         support::process::command(binary)
             .args(["--data-root", root.to_str().unwrap(), "--format", "json"])
             .args(args)
@@ -257,7 +257,7 @@ fn remote_commands_send_only_operation_requests() {
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
             let count = f.gateway.requests() - before;
             println!(
-                "TSK062 sample={sample} command={name} requests={count} elapsed_ms={elapsed:.3}"
+                "REMOTE_REQUEST_COUNT sample={sample} command={name} requests={count} elapsed_ms={elapsed:.3}"
             );
             assert_eq!(value["schema_version"], 1);
             if name == "attachment-add" || name == "attachment-detach" {

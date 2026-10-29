@@ -171,9 +171,37 @@ impl RemoteClient {
         let reply = self.read(Method::GET, "/v1/info", b"")?;
         if reply["server_id"].as_str() != Some(self.server_id.to_string().as_str())
             || reply["ready"] != true
-            || reply["protocol_version"] != super::signing::PROTOCOL_VERSION
         {
             return Err(invalid_reply());
+        }
+        let version = |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(invalid_reply)
+        };
+        let latest = version(&reply["protocol_version"])?;
+        let (min, max) = match (
+            reply.get("min_protocol_version"),
+            reply.get("max_protocol_version"),
+        ) {
+            (None, None) => (latest, latest),
+            (Some(min), Some(max)) => (version(min)?, version(max)?),
+            _ => return Err(invalid_reply()),
+        };
+        if min > max || !(min..=max).contains(&latest) {
+            return Err(invalid_reply());
+        }
+        let client = super::signing::PROTOCOL_VERSION;
+        if client < min {
+            return Err(AppError::ClientUpgradeRequired(format!(
+                "update required: client protocol {client}; server supports protocols {min}..={max}; update the tasks CLI and viewer before retrying"
+            )));
+        }
+        if client > max {
+            return Err(AppError::ServerUpgradeRequired(format!(
+                "update required: client protocol {client}; server supports protocols {min}..={max}; update tasks-server before using this client"
+            )));
         }
         Ok(reply)
     }

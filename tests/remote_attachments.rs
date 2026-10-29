@@ -675,6 +675,39 @@ fn raw_frame(items: Value, envelopes: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[test]
+fn protocol_header_stripped_by_gateway_is_authentication_failure() {
+    use tasks_cli::remote::config::{self, Profile};
+    let f = Fixture::new();
+    let mut profile = config::load(&f.clients[0]).unwrap();
+    let gateway = support::https::TlsFixture::new(
+        "localhost",
+        false,
+        support::https::Reply::ProxyWithoutProtocolVersion(f.backend_address()),
+    );
+    let Profile::Remote {
+        server_url,
+        private_ca,
+        ..
+    } = &mut profile
+    else {
+        unreachable!()
+    };
+    *server_url = gateway.url();
+    *private_ca = gateway.options().private_ca;
+    config::save(&f.clients[0], &profile).unwrap();
+    let output = run(&f.clients[0], &["viewer", "info"]);
+    assert_eq!(output.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "authentication", "{error}");
+    assert!(!error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("protocol-1"));
+    assert_eq!(gateway.requests(), 1);
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn protocol_rejects_versionless_client_before_mutation() {
     protocol_upgrade_refusal(None, "client_upgrade_required");
 }

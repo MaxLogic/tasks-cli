@@ -60,6 +60,72 @@ fn assert_attachment_operations(value: &Value, expected: bool) {
     );
 }
 
+#[test]
+fn configure_checks_supported_range_instead_of_latest_advertised_version() {
+    use tasks_cli::remote::config::{self, Profile};
+    let f = Fixture::new();
+    let profile = config::load(&f.clients[0]).unwrap();
+    let info = tasks_cli::remote::client::RemoteClient::new(&profile)
+        .unwrap()
+        .info()
+        .unwrap();
+    assert_eq!(info["min_protocol_version"], 2);
+    assert_eq!(info["max_protocol_version"], 2);
+    let Profile::Remote {
+        server_id,
+        credential_id,
+        credential_file,
+        ..
+    } = config::load(&f.clients[0]).unwrap()
+    else {
+        unreachable!()
+    };
+    for (version, range, expected) in [
+        (3, Some((2, 3)), None),
+        (3, Some((3, 3)), Some("client_upgrade_required")),
+        (1, Some((1, 1)), Some("server_upgrade_required")),
+        (2, None, None),
+        (3, None, Some("client_upgrade_required")),
+        (3, Some((3, 2)), Some("remote_protocol")),
+    ] {
+        let mut info = json!({"protocol_version":version,"server_id":server_id,"ready":true});
+        if let Some((min, max)) = range {
+            info["min_protocol_version"] = json!(min);
+            info["max_protocol_version"] = json!(max);
+        }
+        let gateway = support::https::TlsFixture::new(
+            "localhost",
+            false,
+            support::https::Reply::JsonRoutes(vec![("/v1/info".into(), info)]),
+        );
+        let output = run(
+            &f.clients[0],
+            &[
+                "remote",
+                "configure",
+                "--server-url",
+                &gateway.url(),
+                "--server-id",
+                &server_id.to_string(),
+                "--credential-id",
+                &credential_id.to_string(),
+                "--credential-file",
+                credential_file.to_str().unwrap(),
+                "--private-ca",
+                gateway.options().private_ca.unwrap().to_str().unwrap(),
+            ],
+        );
+        if let Some(code) = expected {
+            assert_eq!(output.status.code(), Some(5));
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], code, "{error}");
+        } else {
+            ok(output);
+        }
+        assert_eq!(gateway.requests(), 1);
+    }
+}
+
 #[cfg(feature = "test-hooks")]
 #[test]
 fn server_and_remote_viewer_attachment_advertisements_agree_with_capability_hook() {

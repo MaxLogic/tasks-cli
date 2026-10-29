@@ -63,6 +63,7 @@ pub enum Reply {
     // HTTP intermediaries may omit Content-Length on an empty GET. Preserve
     // every other header and byte so this exercises the signed wire profile.
     ProxyWithoutEmptyGetLength(std::net::SocketAddr),
+    ProxyWithoutProtocolVersion(std::net::SocketAddr),
     // A signed older/future client against the real binary's supported range.
     ProxyProtocol {
         address: std::net::SocketAddr,
@@ -196,6 +197,7 @@ impl TlsFixture {
                     }
                     Reply::Proxy(address)
                     | Reply::ProxyWithoutEmptyGetLength(address)
+                    | Reply::ProxyWithoutProtocolVersion(address)
                     | Reply::ProxyProtocol { address, .. }
                     | Reply::ProxyWithLoss { address, .. } => {
                         if let Reply::ProxyProtocol {
@@ -203,6 +205,9 @@ impl TlsFixture {
                         } = &reply
                         {
                             resign_version(identity, &method, &uri, &mut headers, *version);
+                        }
+                        if matches!(reply, Reply::ProxyWithoutProtocolVersion(_)) {
+                            headers.remove("x-tasks-protocol-version");
                         }
                         let mut upstream = std::net::TcpStream::connect(address).unwrap();
                         upstream.set_read_timeout(Some(FIXTURE_IO_TIMEOUT)).unwrap();

@@ -48,6 +48,10 @@ pub struct Fixture {
     pub substitute_write: Arc<AtomicBool>,
 }
 impl Fixture {
+    pub fn backend_address(&self) -> std::net::SocketAddr {
+        self._backend.address
+    }
+
     pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let clients = [root.path().join("client-a"), root.path().join("client-b")];

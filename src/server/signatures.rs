@@ -177,7 +177,9 @@ impl OwnedServer {
                     || item.bare_item.as_string().map(|value| value.as_str()) != Some(name)
             })
         {
-            return Err(ServiceError::Unauthorized("unexpected signed components"));
+            return Err(ServiceError::Unauthorized(
+                "signed components do not match the request profile; check gateway header preservation",
+            ));
         }
         let string = |name: &str| {
             list.params

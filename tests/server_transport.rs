@@ -19,6 +19,19 @@ fn signed_fixture() -> (tempfile::TempDir, OwnedServer, SigningIdentity) {
 }
 
 #[test]
+fn upgrade_refusal_advertises_the_supported_protocol() {
+    use axum::response::IntoResponse;
+    let reply = ServiceError::UpgradeRequired {
+        code: "client_upgrade_required",
+        message: "update required".into(),
+        receipt: None,
+    }
+    .into_response();
+    assert_eq!(reply.status(), 426);
+    assert_eq!(reply.headers()["upgrade"], "tasks-protocol/2");
+}
+
+#[test]
 fn download_authentication_preserves_optional_signed_length_with_protocol_version() {
     use axum::http::HeaderMap;
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -89,10 +102,7 @@ fn download_authentication_preserves_optional_signed_length_with_protocol_versio
             .err()
             .expect("mismatched download components must be rejected");
         assert!(
-            matches!(
-                error,
-                ServiceError::Unauthorized("unexpected signed components")
-            ),
+            matches!(error, ServiceError::Unauthorized(_)),
             "{case}: {error}"
         );
     }

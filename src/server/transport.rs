@@ -238,7 +238,18 @@ impl IntoResponse for ServiceError {
             if let Some(receipt) = receipt {
                 body["receipt"] = serde_json::json!(receipt);
             }
-            return (StatusCode::UPGRADE_REQUIRED, Json(body)).into_response();
+            return (
+                StatusCode::UPGRADE_REQUIRED,
+                [(
+                    axum::http::header::UPGRADE,
+                    format!(
+                        "tasks-protocol/{}",
+                        crate::remote::signing::MAX_PROTOCOL_VERSION
+                    ),
+                )],
+                Json(body),
+            )
+                .into_response();
         }
         let (status, code) = self.http_error();
         // Storage details stay server-local; never return filesystem/SQL diagnostics.
