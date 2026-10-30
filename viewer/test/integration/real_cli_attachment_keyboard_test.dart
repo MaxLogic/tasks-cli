@@ -235,6 +235,7 @@ Future<AnnouncementController> mount(
   await real.waitFor(
     tester,
     () => find.byType(ViewerWorkspaceScope).evaluate().isNotEmpty,
+    diagnostics: () => h.launcher.diagnostics,
   );
   final model = tester
       .widget<ViewerWorkspaceScope>(find.byType(ViewerWorkspaceScope))
@@ -242,6 +243,7 @@ Future<AnnouncementController> mount(
   await real.waitFor(
     tester,
     () => model.projectList.totalCount > 0 && !model.projectList.isLoading,
+    diagnostics: () => h.launcher.diagnostics,
   );
   await tester.runAsync(() async {
     model.selectProjectIndex(0);

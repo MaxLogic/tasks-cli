@@ -1,3 +1,4 @@
+import '../support/fixture_directory.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:tasks_viewer/controllers/editor_controller.dart';
@@ -149,15 +150,10 @@ void main() {
     rig = Rig(root);
   });
   tearDown(() async {
-    rig.controller.dispose();
     try {
-      await root.delete(recursive: true);
-    } on FileSystemException catch (error) {
-      if (error.osError?.errorCode != 32) rethrow;
-      // Flutter may keep an image mapping until this test process exits.
-      // The worker cleans its explicit TEMP root after collecting the exit.
-      // ignore: avoid_print
-      print('DEFERRED_FIXTURE_CLEANUP ${root.path}');
+      rig.controller.dispose();
+    } finally {
+      await removeFixtureDirectory(root);
     }
   });
   for (final malformed in [false, true]) {
@@ -875,7 +871,7 @@ void main() {
     await tester.runAsync(
       () => file.writeAsBytes(
         base64Decode(
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=',
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
         ),
       ),
     );
@@ -888,13 +884,15 @@ void main() {
     });
     final announcements = <String>[];
     final semantics = tester.ensureSemantics();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: AttachmentPreviewDialog(
-          item: image,
-          path: file.path,
-          announce: announcements.add,
-          onSaveAs: () async {},
+    await tester.runAsync(
+      () => tester.pumpWidget(
+        MaterialApp(
+          home: AttachmentPreviewDialog(
+            item: image,
+            path: file.path,
+            announce: announcements.add,
+            onSaveAs: () async {},
+          ),
         ),
       ),
     );
@@ -902,6 +900,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 150));
     });
     await tester.pumpAndSettle();
+    await waitForFixtureImages(tester);
     expect(
       find.bySemanticsLabel(RegExp('Image tiny.png, 1 by 1 pixels, zoom')),
       findsOneWidget,

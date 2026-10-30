@@ -159,7 +159,15 @@ void main() {
       });
       await real.waitFor(
         tester,
-        () => find.byType(AttachmentPreviewDialog).evaluate().isNotEmpty,
+        () =>
+            find.byType(AttachmentPreviewDialog).evaluate().isNotEmpty &&
+            find.byType(TextField).evaluate().isNotEmpty &&
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .controller!
+                .text
+                .isNotEmpty,
+        realAsyncPump: true,
       );
       expect(
         state.item?.id,

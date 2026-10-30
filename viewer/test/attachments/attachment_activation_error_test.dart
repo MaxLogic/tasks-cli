@@ -9,6 +9,7 @@ import 'package:tasks_viewer/ui/attachment_dialogs.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/ui/attachment_preview_dialog.dart';
 
+import '../support/fixture_directory.dart';
 import 'attachment_contract_test.dart' as att;
 import '../integration/real_cli_attachments_test.dart' as real;
 import '../integration/real_cli_attachment_keyboard_test.dart' as keyboard;
@@ -22,7 +23,7 @@ void main() {
       final root = Directory.systemTemp.createTempSync(
         'attachment-activation-',
       );
-      addTearDown(() => removeFixture(root));
+      addTearDown(() => removeFixtureDirectory(root));
       final rig = att.Rig(root);
       addTearDown(rig.controller.dispose);
       await rig.probe();
@@ -57,13 +58,22 @@ void main() {
       expect(state.list.focusedRowIndex, 0);
       expect(state.list.hasListFocus, isTrue);
       await pointer.up();
-      if (activation == 'double-click') {
-        await tester.pump(const Duration(milliseconds: 50));
-        await tester.tap(row, kind: PointerDeviceKind.mouse);
-      } else {
-        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-      }
-      await tester.pumpAndSettle();
+      await tester.runAsync(() async {
+        if (activation == 'double-click') {
+          await tester.pump(const Duration(milliseconds: 50));
+          await tester.tap(row, kind: PointerDeviceKind.mouse);
+        } else {
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        }
+        await tester.pumpAndSettle();
+      });
+      await real.waitFor(
+        tester,
+        () =>
+            find.byType(TextField).evaluate().isNotEmpty &&
+            tester.widget<TextField>(find.byType(TextField)).controller!.text ==
+                'Preview',
+      );
       expect(find.byType(AttachmentPreviewDialog), findsOneWidget);
       expect(state.item?.displayId, 'A12');
       expect(rig.announcements.last, 'Opened run.log');
@@ -134,7 +144,7 @@ void main() {
     tester,
   ) async {
     final root = Directory.systemTemp.createTempSync('attachment-error-');
-    addTearDown(() => removeFixture(root));
+    addTearDown(() => removeFixtureDirectory(root));
     final rig = att.Rig(root);
     addTearDown(rig.controller.dispose);
     await rig.probe();
@@ -165,15 +175,4 @@ void main() {
     expect(rig.controller.busy, isFalse);
     expect(find.byType(AttachmentPreviewDialog), findsNothing);
   });
-}
-
-void removeFixture(Directory root) {
-  try {
-    root.deleteSync(recursive: true);
-  } on FileSystemException catch (error) {
-    if (error.osError?.errorCode != 32) rethrow;
-    // The worker removes its explicit TEMP root after the test process exits.
-    // ignore: avoid_print
-    print('DEFERRED_FIXTURE_CLEANUP ${root.path}');
-  }
 }

@@ -1180,7 +1180,33 @@ class ViewerCliClient
 
     final ViewerProcessHandle handle;
     try {
-      handle = await _launcher.start(executable, arguments);
+      final launch = _launcher.start(executable, arguments);
+      handle = cancellable
+          ? await launch.timeout(
+              remainingBudget(),
+              onTimeout: () {
+                // A launcher cannot be cancelled. Reap a late child without
+                // sending it the abandoned request.
+                unawaited(
+                  launch.then<void>((process) {
+                    _abandon(
+                      Future.wait<Object?>([
+                        _drain(process.stdout),
+                        _drain(process.stderr),
+                        process.exitCode,
+                      ]),
+                    );
+                    process.kill();
+                  }, onError: (Object _) {}),
+                );
+                throw TimeoutException('CLI launch deadline expired');
+              },
+            )
+          : await launch;
+    } on TimeoutException {
+      _finishLocalWriter(localReservation, -1);
+      _release(scopeKey, active);
+      throw ViewerTimeoutFailure(readTimeout);
     } on ProcessException catch (error) {
       _finishLocalWriter(localReservation, -1);
       _release(scopeKey, active);
@@ -1212,36 +1238,46 @@ class ViewerCliClient
     }
     if (active.cancelled) {
       handle.kill();
+      _release(scopeKey, active);
       throw const ViewerCancelledFailure();
     }
 
-    if (requestBytes != null) {
-      handle.addStdin(requestBytes);
-    }
-    try {
-      await handle.closeStdin();
-    } on Object {
-      // A process that died before reading stdin reports the real problem on
-      // its exit code and stderr; a broken pipe here is not the outcome.
-    }
-
-    final drained = Future.wait<Object?>(<Future<Object?>>[
+    // Drain concurrently with stdin so a child writing before it finishes
+    // reading cannot block input. Each phase consumes the same deadline.
+    Future<List<Object?>> drain() => Future.wait<Object?>(<Future<Object?>>[
       _drain(handle.stdout),
       _drain(handle.stderr),
       handle.exitCode,
     ]);
+    // Preserve mutation completion ordering and unknown-write handling.
+    Future<List<Object?>>? drained = cancellable ? drain() : null;
+    if (drained != null) _abandon(drained);
     final List<Object?> results;
     try {
+      if (requestBytes != null) handle.addStdin(requestBytes);
+      try {
+        final closed = handle.closeStdin();
+        if (cancellable) {
+          await closed.timeout(remainingBudget());
+        } else {
+          await closed;
+        }
+      } on TimeoutException {
+        rethrow;
+      } on Object {
+        // A broken pipe reports the real problem on exit/stderr.
+      }
+      drained ??= drain();
       results = await drained.timeout(remainingBudget());
     } on TimeoutException {
       if (originalWriteId != null) _timedOutWrites.add(originalWriteId);
       active.cancelled = cancellable;
-      _abandon(drained);
+      if (drained != null) _abandon(drained);
       if (cancellable) handle.kill();
       _release(scopeKey, active);
       throw ViewerTimeoutFailure(readTimeout);
     } on Object catch (error) {
-      _abandon(drained);
+      if (drained != null) _abandon(drained);
       if (cancellable) handle.kill();
       _release(scopeKey, active);
       throw ViewerMalformedResponseFailure(

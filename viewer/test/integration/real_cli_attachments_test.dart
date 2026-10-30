@@ -1,3 +1,4 @@
+import '../support/fixture_directory.dart';
 // Real local CLI boundary. Every process receives an isolated data root.
 // Clipboard cases require a separate test-hooks binary and never use the desktop.
 import 'dart:async';
@@ -24,7 +25,7 @@ import '../support/viewer_test_support.dart' as support;
 const cli = String.fromEnvironment('TASKS_VIEWER_TEST_CLI');
 const clipboardCli = String.fromEnvironment('TASKS_VIEWER_TEST_CLIPBOARD_CLI');
 const png =
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 
 void main() {
   for (final image in [true, false]) {
@@ -403,13 +404,15 @@ void main() {
     expect(item.kind, 'image');
     final path = await tester.runAsync(() => h.controller.materialize(item));
     final semantics = tester.ensureSemantics();
-    await tester.pumpWidget(
-      MaterialApp(
-        home: AttachmentPreviewDialog(
-          item: item,
-          path: path!,
-          announce: (_) {},
-          onSaveAs: () async {},
+    await tester.runAsync(
+      () => tester.pumpWidget(
+        MaterialApp(
+          home: AttachmentPreviewDialog(
+            item: item,
+            path: path!,
+            announce: (_) {},
+            onSaveAs: () async {},
+          ),
         ),
       ),
     );
@@ -420,6 +423,7 @@ void main() {
           .evaluate()
           .isNotEmpty,
     );
+    await waitForFixtureImages(tester);
     await support.pressControl(tester, LogicalKeyboardKey.digit1);
     expect(
       find.bySemanticsLabel('Image pixel.png, 1 by 1 pixels, zoom 100 percent'),
@@ -557,18 +561,46 @@ bool available(String executable) {
   return true;
 }
 
-Future<void> waitFor(WidgetTester tester, bool Function() ready) async {
+Future<void> waitFor(
+  WidgetTester tester,
+  bool Function() ready, {
+  String Function()? diagnostics,
+  bool realAsyncPump = false,
+}) async {
+  final elapsed = Stopwatch()..start();
   for (var i = 0; i < 150; i++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
-    await tester.pump();
+    if (realAsyncPump) {
+      await tester.runAsync(() => tester.pump());
+    } else {
+      await tester.pump();
+    }
     if (ready()) {
       await tester.pumpAndSettle();
       return;
     }
   }
-  fail('Real CLI/viewer did not reach expected state');
+  final workspace = find.byType(ViewerWorkspaceScope);
+  final states = <String, Object?>{'wait_ms': elapsed.elapsedMilliseconds};
+  if (workspace.evaluate().isNotEmpty) {
+    final model = tester.widget<ViewerWorkspaceScope>(workspace).model;
+    Map<String, Object?> state(dynamic list) => {
+      'loading': list.isLoading,
+      'total_count': list.totalCount,
+      'query': list.query,
+      'first_load_error': list.firstLoadError?.toString(),
+      'refresh_failure': list.refreshFailure?.toString(),
+      'announcement': list.announcement,
+    };
+    states['projects'] = state(model.projectList);
+    if (model.tasks != null) states['tasks'] = state(model.tasks);
+  }
+  fail(
+    'Real CLI/viewer did not reach expected state: '
+    '${jsonEncode(states)}; processes: ${diagnostics?.call() ?? "unavailable"}',
+  );
 }
 
 Future<String> hash(File file) async {
@@ -629,17 +661,7 @@ class Harness {
     final root = Directory.systemTemp.createTempSync(
       'viewer-real-attachments-',
     );
-    addTearDown(() {
-      try {
-        root.deleteSync(recursive: true);
-      } on FileSystemException catch (e) {
-        if (e.osError?.errorCode != 32) rethrow;
-        // Image mappings are released when the test process exits. The caller
-        // removes its explicit TEMP root after collecting that exit.
-        // ignore: avoid_print
-        print('DEFERRED_FIXTURE_CLEANUP ${root.path}');
-      }
-    });
+    addTearDown(() => removeFixtureDirectory(root));
     final executable = clipboard ? clipboardCli : cli;
     final fixture = clipboard
         ? (Directory('${root.path}/clipboard')..createSync())
@@ -745,6 +767,9 @@ class TrackingLauncher implements ProcessLauncher {
   final ProcessLauncher inner;
   final calls = <List<String>>[];
   var active = 0;
+  final _clock = Stopwatch()..start();
+  final timings = <Map<String, Object?>>[];
+  String get diagnostics => jsonEncode({'active': active, 'timings': timings});
   Completer<void>? _idle;
   Future<void> get idle => _idle?.future ?? Future.value();
   @override
@@ -753,12 +778,32 @@ class TrackingLauncher implements ProcessLauncher {
     List<String> arguments,
   ) async {
     calls.add(List.of(arguments));
+    final timing = <String, Object?>{
+      'arguments': List.of(arguments),
+      'start_ms': _clock.elapsedMilliseconds,
+    };
+    timings.add(timing);
     if (active++ == 0) _idle = Completer<void>();
     try {
       final handle = await inner.start(executable, arguments);
-      unawaited(handle.exitCode.whenComplete(_ended));
-      return handle;
-    } catch (_) {
+      timing['launched_ms'] = _clock.elapsedMilliseconds;
+      unawaited(
+        handle.exitCode.then<void>(
+          (code) {
+            timing['exit_ms'] = _clock.elapsedMilliseconds;
+            timing['exit_code'] = code;
+            _ended();
+          },
+          onError: (Object error) {
+            timing['exit_error'] = '$error';
+            _ended();
+          },
+        ),
+      );
+      return TimingHandle(handle, timing, _clock);
+    } catch (error) {
+      timing['launch_error'] = '$error';
+      timing['failed_ms'] = _clock.elapsedMilliseconds;
       _ended();
       rethrow;
     }
@@ -766,6 +811,41 @@ class TrackingLauncher implements ProcessLauncher {
 
   void _ended() {
     if (--active == 0) _idle!.complete();
+  }
+}
+
+class TimingHandle implements ViewerProcessHandle {
+  TimingHandle(this.inner, this.timing, this.clock);
+  final ViewerProcessHandle inner;
+  final Map<String, Object?> timing;
+  final Stopwatch clock;
+  @override
+  void addStdin(List<int> bytes) {
+    timing['stdin_bytes'] = bytes.length;
+    inner.addStdin(bytes);
+  }
+
+  @override
+  Future<void> closeStdin() async {
+    try {
+      await inner.closeStdin();
+      timing['stdin_closed_ms'] = clock.elapsedMilliseconds;
+    } catch (error) {
+      timing['stdin_error'] = '$error';
+      rethrow;
+    }
+  }
+
+  @override
+  Stream<List<int>> get stdout => inner.stdout;
+  @override
+  Stream<List<int>> get stderr => inner.stderr;
+  @override
+  Future<int> get exitCode => inner.exitCode;
+  @override
+  void kill() {
+    timing['kill_ms'] = clock.elapsedMilliseconds;
+    inner.kill();
   }
 }
 
