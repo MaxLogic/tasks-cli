@@ -25,7 +25,7 @@ use tasks_cli::remote::{
 
 #[test]
 fn leftover_capability_cache_is_ignored_and_never_replaced() {
-    let f = Fixture::new();
+    let f = Fixture::new_binary();
     let cache = f.clients[0].join("client/capabilities.json");
     assert!(!cache.exists(), "configure must not publish discovery");
     let bytes = b"{deliberately stale and malformed discovery}";
@@ -56,7 +56,7 @@ fn leftover_capability_cache_is_ignored_and_never_replaced() {
 
 #[test]
 fn keyed_detach_validates_the_key_in_its_only_request() {
-    let f = Fixture::new();
+    let f = Fixture::new_binary();
     let project = f.project().to_string();
     let body = f.body("keyed detach");
     ok(run(
@@ -134,7 +134,7 @@ fn keyed_detach_validates_the_key_in_its_only_request() {
 // Run with --release -- --nocapture for subprocess wall times, including startup.
 #[test]
 fn remote_commands_send_only_operation_requests() {
-    let f = Fixture::new();
+    let f = Fixture::new_binary();
     let project = f.project().to_string();
     let body = f.body("request-count fixture");
     let source = f.root.path().join("source.txt");
@@ -188,6 +188,7 @@ fn remote_commands_send_only_operation_requests() {
             std::fs::create_dir(&cache).unwrap();
         }
         let task = (sample + 1).to_string();
+        let task_key = format!("FIX-{:03}", sample + 1);
         let attachment = format!("A{}", sample + 1);
         let output = f.root.path().join(format!("download-{sample}.txt"));
         let saved = f.root.path().join(format!("saved-{sample}.txt"));
@@ -264,7 +265,7 @@ fn remote_commands_send_only_operation_requests() {
                 vec![
                     "attachment",
                     "detach",
-                    &task,
+                    &task_key,
                     &attachment,
                     "--expect-version",
                     "3",

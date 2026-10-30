@@ -9,6 +9,70 @@ use std::{
 use tasks_cli::server::{transport::ServiceState, OwnedServer, Registration};
 use uuid::Uuid;
 
+enum Backend {
+    InProcess(HttpBackend),
+    Binary(BinaryServer),
+}
+
+impl Backend {
+    fn address(&self) -> std::net::SocketAddr {
+        match self {
+            Self::InProcess(server) => server.address,
+            Self::Binary(server) => server.address,
+        }
+    }
+}
+
+struct BinaryServer {
+    child: std::process::Child,
+    address: std::net::SocketAddr,
+}
+
+impl BinaryServer {
+    fn new(root: &Path) -> Self {
+        use std::{net::TcpStream, time::Duration};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let log = root.join("server.log");
+        let mut server = Self {
+            child: super::process::command(env!("CARGO_BIN_EXE_tasks-server"))
+                .args(["--data-root", root.to_str().unwrap(), "serve", "--listen"])
+                .arg(address.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
+                .spawn()
+                .unwrap(),
+            address,
+        };
+        let deadline = std::time::Instant::now() + super::https::FIXTURE_IO_TIMEOUT;
+        loop {
+            assert!(
+                server.child.try_wait().unwrap().is_none(),
+                "tasks-server exited before readiness: {}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                return server;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server readiness deadline"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for BinaryServer {
+    fn drop(&mut self) {
+        // A kill can race an already-exited child; waiting still reaps it and
+        // releases its database handles before the checked fixture root closes.
+        let _ = self.child.kill();
+        self.child.wait().expect("wait for fixture tasks-server");
+    }
+}
+
 pub fn run(root: &Path, args: &[&str]) -> Output {
     command(root, args).output().unwrap()
 }
@@ -41,7 +105,7 @@ pub fn ok(output: Output) -> Value {
 pub struct Fixture {
     pub clients: [PathBuf; 2],
     pub gateway: TlsFixture,
-    _backend: HttpBackend,
+    _backend: Backend,
     pub drop_write: Arc<AtomicBool>,
     pub truncate_export: Arc<AtomicBool>,
     pub substitute_write: Arc<AtomicBool>,
@@ -51,10 +115,19 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn backend_address(&self) -> std::net::SocketAddr {
-        self._backend.address
+        self._backend.address()
     }
 
     pub fn new() -> Self {
+        Self::with_backend(false)
+    }
+
+    /// Exercise the shipped server executable behind the same signed TLS proxy.
+    pub fn new_binary() -> Self {
+        Self::with_backend(true)
+    }
+
+    fn with_backend(binary: bool) -> Self {
         let root = super::temp::TempDir::new();
         let clients = [root.path().join("client-a"), root.path().join("client-b")];
         let server = OwnedServer::initialize(&root.path().join("server")).unwrap();
@@ -70,7 +143,14 @@ impl Fixture {
             let registration: Registration = serde_json::from_value(public).unwrap();
             credentials.push(server.register(&registration).unwrap());
         }
-        let backend = HttpBackend::new(ServiceState::new(server));
+        let backend = if binary {
+            // Do not retain library-owned connections while the process owns
+            // this synthetic store, or while the checked root is removed.
+            drop(server);
+            Backend::Binary(BinaryServer::new(&root.path().join("server")))
+        } else {
+            Backend::InProcess(HttpBackend::new(ServiceState::new(server)))
+        };
         let drop_write = Arc::new(AtomicBool::new(false));
         let truncate_export = Arc::new(AtomicBool::new(false));
         let substitute_write = Arc::new(AtomicBool::new(false));
@@ -78,7 +158,7 @@ impl Fixture {
             "localhost",
             false,
             Reply::ProxyWithLoss {
-                address: backend.address,
+                address: backend.address(),
                 drop_next_mutation: drop_write.clone(),
                 truncate_next_export: truncate_export.clone(),
                 substitute_next_mutation: substitute_write.clone(),
