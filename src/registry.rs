@@ -1,6 +1,6 @@
 use crate::error::AppError;
-use crate::storage::{acquire_exclusive_lock, validate_storage_root};
-use crate::store::{create_project_db_with_key, StoreInfo};
+use crate::storage::{acquire_exclusive_lock, validate_storage_path, validate_storage_root};
+use crate::store::{create_project_db_with_key, data_root_project_path, StoreInfo};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -566,6 +566,22 @@ pub fn init_root(
     explicit_project: Option<Uuid>,
     key: Option<&str>,
 ) -> Result<StoreInfo, AppError> {
+    init_root_with_prepare(
+        data_root,
+        root,
+        explicit_project,
+        key,
+        create_project_db_with_key,
+    )
+}
+
+fn init_root_with_prepare(
+    data_root: &Path,
+    root: &Path,
+    explicit_project: Option<Uuid>,
+    key: Option<&str>,
+    prepare: impl FnOnce(&Path, &Uuid, Option<&str>) -> Result<StoreInfo, AppError>,
+) -> Result<StoreInfo, AppError> {
     let data_root = validate_storage_root(data_root)?;
     let canonical_root = root.canonicalize().map_err(|error| {
         AppError::Registry(format!(
@@ -575,14 +591,86 @@ pub fn init_root(
     })?;
     fs::create_dir_all(&data_root)
         .map_err(|error| AppError::io_path("create data root", &data_root, error))?;
+    let project_id = explicit_project.unwrap_or_else(Uuid::new_v4);
+    let path = registry_path(&data_root);
+    // This snapshot only avoids unnecessary preparation. Binding and key
+    // ownership are checked again under the lock before anything is published.
+    let snapshot = Registry::load(&path)?;
+    let needs_database = !data_root_project_path(&data_root, &project_id.to_string()).exists()
+        && !snapshot
+            .bindings
+            .iter()
+            .any(|binding| same_path(Path::new(&binding.root), &canonical_root));
+    let prepared = if needs_database {
+        // SQLite WAL setup, FULL commits, close-time checkpoints and schema
+        // validation can stall on storage. Keep them outside the global lock.
+        // A non-UUID staging directory is invisible to key scans. Place it next
+        // to the destination, including when projects/ or the UUID directory is
+        // a link to another local volume, so publication is a same-volume rename.
+        let db_path = data_root_project_path(&data_root, &project_id.to_string());
+        validate_storage_path(&db_path)?;
+        let project_dir = db_path
+            .parent()
+            .ok_or_else(|| AppError::Registry("project database has no parent directory".into()))?;
+        let staging_parent = if project_dir.is_dir() {
+            project_dir
+        } else {
+            project_dir.parent().ok_or_else(|| {
+                AppError::Registry("project directory has no parent directory".into())
+            })?
+        };
+        fs::create_dir_all(staging_parent).map_err(|error| {
+            AppError::io_path("create project staging directory", staging_parent, error)
+        })?;
+        let staging = tempfile::Builder::new()
+            .prefix(".init-")
+            .tempdir_in(staging_parent)
+            .map_err(|error| AppError::io_path("stage project database in", &data_root, error))?;
+        let info = match prepare(staging.path(), &project_id, key) {
+            Ok(info) => info,
+            Err(error) => {
+                staging.close().map_err(|cleanup| {
+                    AppError::io_path("remove staged project database from", &data_root, cleanup)
+                })?;
+                return Err(error);
+            }
+        };
+        Some((staging, info))
+    } else {
+        None
+    };
+    let result = init_root_locked(
+        &data_root,
+        &canonical_root,
+        explicit_project,
+        project_id,
+        key,
+        prepared.as_ref().map(|(_, info)| info),
+    );
+    if let Some((staging, _)) = prepared {
+        staging.close().map_err(|error| {
+            AppError::io_path("remove staged project database from", &data_root, error)
+        })?;
+    }
+    result
+}
+
+fn init_root_locked(
+    data_root: &Path,
+    canonical_root: &Path,
+    explicit_project: Option<Uuid>,
+    project_id: Uuid,
+    key: Option<&str>,
+    prepared: Option<&StoreInfo>,
+) -> Result<StoreInfo, AppError> {
     let lock_path = data_root.join("registry.lock");
     let _lock = acquire_exclusive_lock(&lock_path)?;
-    let path = registry_path(&data_root);
+    let path = registry_path(data_root);
     let mut registry = Registry::load(&path)?;
     if let Some(existing) = registry
         .bindings
         .iter()
-        .find(|binding| same_path(Path::new(&binding.root), &canonical_root))
+        .find(|binding| same_path(Path::new(&binding.root), canonical_root))
     {
         let existing_id = Uuid::parse_str(&existing.project_id).map_err(|_| {
             AppError::Registry(format!(
@@ -596,27 +684,69 @@ pub fn init_root(
             if requested != existing_id {
                 return Err(AppError::Usage(format!(
                     "root {} is already bound to project {}; pass --project {} to reuse that binding or choose another root",
-                    root.display(),
+                    canonical_root.display(),
                     existing.project_id,
                     existing.project_id
                 )));
             }
         }
-        let (info, update) = create_or_verify_keyed(&data_root, &existing_id, key)?;
+        let (info, update) = create_or_verify_keyed(data_root, &existing_id, key)?;
         if let Some(update) = update {
-            update.store(&data_root);
+            update.store(data_root);
         }
         return Ok(info);
     }
-    let project_id = explicit_project.unwrap_or_else(Uuid::new_v4);
-    let (info, update) = create_or_verify_keyed(&data_root, &project_id, key)?;
+    let (info, update) = if let Some(prepared) = prepared {
+        let update = key
+            .map(|key| crate::keys::ensure_available(data_root, key, Some(&project_id)))
+            .transpose()?;
+        let db_path = data_root_project_path(data_root, &project_id.to_string());
+        validate_storage_path(&db_path)?;
+        let parent = db_path
+            .parent()
+            .ok_or_else(|| AppError::Registry("project database has no parent directory".into()))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| AppError::io_path("create the project directory", parent, error))?;
+        let create_lock = acquire_exclusive_lock(&db_path.with_extension("create.lock"))?;
+        if db_path.exists() {
+            // Another init (or library caller) published this UUID while it was
+            // being prepared. Validate its database and key; never replace it.
+            drop(create_lock);
+            create_or_verify_keyed(data_root, &project_id, key)?
+        } else {
+            // The SQLite commit is already durable. Make the published name
+            // durable too before a registry binding can refer to it.
+            #[cfg(windows)]
+            atomicwrites::move_atomic(&prepared.db_path, &db_path)
+                .map_err(|error| AppError::io_path("publish project database", &db_path, error))?;
+            #[cfg(not(windows))]
+            {
+                fs::rename(&prepared.db_path, &db_path).map_err(|error| {
+                    AppError::io_path("publish project database", &db_path, error)
+                })?;
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| AppError::io_path("flush project directory", parent, error))?;
+            }
+            (
+                StoreInfo {
+                    project_id,
+                    db_path,
+                    project_key: prepared.project_key.clone(),
+                },
+                update,
+            )
+        }
+    } else {
+        create_or_verify_keyed(data_root, &project_id, key)?
+    };
     registry.bindings.push(RegistryBinding {
         root: canonical_root.to_string_lossy().to_string(),
         project_id: project_id.to_string(),
     });
     registry.store(&path)?;
     if let Some(update) = update {
-        update.store(&data_root);
+        update.store(data_root);
     }
     Ok(info)
 }
@@ -649,4 +779,118 @@ fn same_path(left: &Path, right: &Path) -> bool {
 pub fn list_bindings(data_root: &Path) -> Result<Registry, AppError> {
     let data_root = validate_storage_root(data_root)?;
     Registry::load(&registry_path(&data_root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_database_preparation_does_not_hold_registry_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let data = temp.path().join("data");
+        let info = init_root_with_prepare(&data, &root, None, Some("NEW"), |staging, id, key| {
+            let info = create_project_db_with_key(staging, id, key)?;
+            // A stalled database flush must not block every other project init.
+            let _probe = crate::storage::acquire_exclusive_lock_for(
+                &data.join("registry.lock"),
+                std::time::Duration::from_millis(40),
+            )?;
+            Ok(info)
+        })
+        .expect("database preparation must leave the registry available");
+        assert_eq!(info.project_key.as_deref(), Some("NEW"));
+        assert_eq!(
+            Registry::load(&registry_path(&data))
+                .unwrap()
+                .bindings
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn init_does_not_scan_another_writers_uncommitted_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let data = temp.path().join("data");
+        let other = create_project_db_with_key(&data, &Uuid::new_v4(), Some("HLD")).unwrap();
+        let registry_guard = acquire_exclusive_lock(&data.join("registry.lock")).unwrap();
+        let conn = rusqlite::Connection::open(&other.db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let result = init_root_with_prepare(&data, &root, None, Some("NEW"), |staging, id, key| {
+            let info = create_project_db_with_key(staging, id, key)?;
+            // Model another registry writer finishing while we prepare. Its
+            // database must not be scanned before its registry lock is released.
+            conn.execute_batch("COMMIT")?;
+            drop(registry_guard);
+            Ok(info)
+        });
+        assert!(result.is_ok(), "{:#?}", result.err());
+        assert_eq!(crate::keys::scan(&data, true).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn prepared_init_rechecks_key_ownership_before_publishing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("first");
+        let other = temp.path().join("second");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        let data = temp.path().join("data");
+        let result = init_root_with_prepare(&data, &root, None, Some("DUP"), |staging, id, key| {
+            let info = create_project_db_with_key(staging, id, key)?;
+            // The prepared key is unpublished and cannot prevent this winner.
+            init_root(&data, &other, None, key)?;
+            Ok(info)
+        });
+        assert!(
+            matches!(result, Err(AppError::Validation(message)) if message.contains("already used"))
+        );
+        let registry = Registry::load(&registry_path(&data)).unwrap();
+        assert_eq!(registry.bindings.len(), 1);
+        assert!(same_path(
+            Path::new(&registry.bindings[0].root),
+            &other.canonicalize().unwrap()
+        ));
+        assert_eq!(fs::read_dir(data.join("projects")).unwrap().count(), 1);
+        let projects = crate::keys::scan(&data, true).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].key.as_deref(), Some("DUP"));
+    }
+
+    #[test]
+    fn prepared_init_never_replaces_a_concurrently_created_uuid() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("first");
+        let other = temp.path().join("second");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        let data = temp.path().join("data");
+        let project = Uuid::new_v4();
+        let result = init_root_with_prepare(
+            &data,
+            &root,
+            Some(project),
+            Some("OLD"),
+            |staging, id, key| {
+                let info = create_project_db_with_key(staging, id, key)?;
+                init_root(&data, &other, Some(project), Some("WIN"))?;
+                Ok(info)
+            },
+        );
+        assert!(
+            matches!(result, Err(AppError::Validation(message)) if message.contains("init does not change keys"))
+        );
+        let registry = Registry::load(&registry_path(&data)).unwrap();
+        assert_eq!(registry.bindings.len(), 1);
+        assert_eq!(fs::read_dir(data.join("projects")).unwrap().count(), 1);
+        let projects = crate::keys::scan(&data, true).unwrap();
+        assert_eq!(projects[0].project_id, project);
+        assert_eq!(projects[0].key.as_deref(), Some("WIN"));
+    }
 }

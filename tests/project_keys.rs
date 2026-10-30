@@ -318,11 +318,26 @@ fn concurrent_inits_with_one_key_have_exactly_one_winner() {
             stderr(&a),
             stderr(&b)
         );
+        let (winner, loser_root, loser) = if a.status.success() {
+            (&first, &second, &b)
+        } else {
+            (&second, &first, &a)
+        };
+        assert!(stderr(loser).contains("already used"), "{}", stderr(loser));
+        assert!(winner.join(".tasks.json").is_file());
+        assert!(!loser_root.join(".tasks.json").exists());
         assert_eq!(env.project_dirs(), 1, "round {round}");
         assert_eq!(env.bindings(), 1, "round {round}");
         let keyed = tasks_cli::keys::scan(&env.data(), true).unwrap();
         assert_eq!(keyed.len(), 1);
         assert_eq!(keyed[0].key.as_deref(), Some("DUP"));
+        // A losing preparation must leave no staged database behind.
+        assert!(fs::read_dir(env.data().join("projects"))
+            .unwrap()
+            .all(
+                |entry| uuid::Uuid::parse_str(&entry.unwrap().file_name().to_string_lossy())
+                    .is_ok()
+            ));
     }
 }
 
