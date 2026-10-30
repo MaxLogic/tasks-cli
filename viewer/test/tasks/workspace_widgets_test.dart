@@ -591,7 +591,13 @@ void main() {
         // row replaces the placeholder under a different item key.
         await tester.sendKeyEvent(LogicalKeyboardKey.end, platform: 'windows');
         await tester.pump(const Duration(milliseconds: 16));
-        expect(list.selectedIndex, 249, reason: 'selection moves immediately');
+        expect(
+          list.selectedIndex,
+          0,
+          reason: 'confirmed selection stays until the target is ready',
+        );
+        expect(list.focusedRowIndex, 0);
+        expect(list.pendingTargetIndex, 249);
 
         await tester.pump(const Duration(milliseconds: 2000));
         await tester.pumpAndSettle();
@@ -610,7 +616,12 @@ void main() {
         // row, with focus, from wherever the list happens to be.
         await tester.sendKeyEvent(LogicalKeyboardKey.home, platform: 'windows');
         await tester.pump(const Duration(milliseconds: 16));
-        expect(list.selectedIndex, 0, reason: 'selection moves immediately');
+        expect(
+          list.selectedIndex,
+          0,
+          reason:
+              'the cached Home target selects when its real row takes focus',
+        );
 
         await tester.pump(const Duration(milliseconds: 2000));
         await tester.pumpAndSettle();

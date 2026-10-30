@@ -2,6 +2,7 @@
 library;
 
 import 'dart:io';
+import 'dart:ui' show Tristate;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,7 @@ import 'package:tasks_viewer/controllers/task_controller.dart';
 import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/ui/accessible_virtual_list.dart';
+import 'package:tasks_viewer/ui/app_shell.dart';
 import 'package:tasks_viewer/ui/projects_pane.dart';
 import 'package:tasks_viewer/ui/real_workspace.dart';
 import 'package:tasks_viewer/ui/tasks_pane.dart';
@@ -111,15 +113,19 @@ void main() {
             final fades = tester.widgetList<FadeTransition>(
               find.descendant(of: list, matching: find.byType(FadeTransition)),
             );
-            expect(
-              fades.any(
-                (f) =>
-                    f.alwaysIncludeSemantics &&
-                    f.opacity.value > 0 &&
-                    f.opacity.value < 1,
-              ),
-              isTrue,
-            );
+            // Revealing the selected project can scroll its short viewport,
+            // which ends decorative motion by the existing scroll contract.
+            if (kind == 'tasks') {
+              expect(
+                fades.any(
+                  (f) =>
+                      f.alwaysIncludeSemantics &&
+                      f.opacity.value > 0 &&
+                      f.opacity.value < 1,
+                ),
+                isTrue,
+              );
+            }
             final file = 'reversal_${kind}_${name}_110ms_2000x830.png';
             await expectLater(
               find.byType(TasksViewerApp),
@@ -135,6 +141,12 @@ void main() {
 
           model.tasks!.setSort(TaskSort.id);
           await tester.pumpAndSettle();
+          tester
+              .state<ViewerShellState>(find.byType(ViewerShell))
+              .handlesFor(ViewerRegion.tasks)
+              .filterFocus
+              .requestFocus();
+          await tester.pump();
           model.tasks!.setDirection(SortDirection.descending);
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 110));
@@ -142,11 +154,62 @@ void main() {
           await tester.pumpAndSettle();
           model.projectList.setSort(ProjectSort.name);
           await tester.pumpAndSettle();
-          model.projectList.setDirection(SortDirection.descending);
+          // Row-owned reversal must reveal the selected row immediately and
+          // therefore ends decorative motion. Exercise control-owned motion
+          // here; the settled captures below exercise row-owned Alt+I.
+          tester
+              .widgetList<IconButton>(find.byType(IconButton))
+              .firstWhere(
+                (button) =>
+                    button.focusNode?.debugLabel == 'projects direction',
+              )
+              .focusNode!
+              .requestFocus();
+          await tester.pump();
+          expect(
+            FocusManager.instance.primaryFocus?.debugLabel,
+            'projects direction',
+          );
+          await tester.sendKeyEvent(
+            LogicalKeyboardKey.space,
+            platform: 'windows',
+          );
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 110));
           await capture('projects', ViewerProjectsPane);
           await tester.pumpAndSettle();
+
+          // Capture settled keyboard outcomes separately from decorative motion.
+          // Each highlighted row must also own actual focus and model selection.
+          final shell = tester.state<ViewerShellState>(
+            find.byType(ViewerShell),
+          );
+          for (final (region, key, label) in [
+            (ViewerRegion.projects, LogicalKeyboardKey.f1, RegExp(r'^Alpha\.')),
+            (ViewerRegion.tasks, LogicalKeyboardKey.f2, RegExp(r'^T-001,')),
+          ]) {
+            await pressKey(tester, key);
+            await pressAlt(tester, LogicalKeyboardKey.keyI);
+            final list = shell.handlesFor(region).list;
+            expect(list.focusedRowIndex, 0);
+            expect(list.selectedIndex, 0);
+            final row = tester.getSemantics(find.bySemanticsLabel(label));
+            expect(row.flagsCollection.isFocused, Tristate.isTrue);
+            expect(row.flagsCollection.isSelected, Tristate.isTrue);
+            if (region == ViewerRegion.projects) {
+              expect(model.selectedProjectName, 'Alpha');
+              expect(model.tasks!.projectId, projects.first.projectId);
+            } else {
+              expect(model.tasks!.selectedTaskId, 1);
+              expect(model.detail!.taskId, 1);
+            }
+            await expectLater(
+              find.byType(TasksViewerApp),
+              matchesGoldenFile(
+                '$directory/resort_${region.name}_focused_selected_${name}_2000x830.png',
+              ),
+            );
+          }
         } finally {
           semantics.dispose();
         }

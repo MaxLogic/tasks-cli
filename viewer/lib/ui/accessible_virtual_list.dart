@@ -24,6 +24,27 @@ class AccessibleRowSemantics {
   final String? value;
 }
 
+/// Model-owned single selection. Used only by Tasks and Projects.
+abstract interface class VirtualListSelectionSource {
+  Key? get selectedKey;
+  int? get selectedIndex;
+  String? get unplacedLabel;
+}
+
+final class VirtualListSelection implements VirtualListSelectionSource {
+  const VirtualListSelection({
+    required this.selectedKey,
+    required this.selectedIndex,
+    this.unplacedLabel,
+  });
+  @override
+  final Key? selectedKey;
+  @override
+  final int? selectedIndex;
+  @override
+  final String? unplacedLabel;
+}
+
 /// A user selection gesture worth announcing, separate from ordinary row focus
 /// speech and silent programmatic selection (for example after a detach).
 class VirtualListSelectionChange {
@@ -55,6 +76,14 @@ class VirtualListController extends ChangeNotifier {
 
   /// Index of the row that currently owns keyboard focus, if any.
   int? get focusedRowIndex => _state?.focusedRowIndex;
+  Key? get focusedRowKey => _state?.focusedRowKey;
+
+  /// Rows one Page Up or Page Down moves.
+  int get pageRows => _state?._pageRows() ?? 10;
+
+  /// Ends the jump to [index]. False when a newer intent already replaced it,
+  /// so the owner must not report a failure the user no longer waits for.
+  bool failPending(int index) => _state?._failPending(index) ?? false;
 
   /// Focus the region: its selected row, or the first row when nothing is
   /// selected yet, or the list container when the list is empty.
@@ -74,8 +103,9 @@ class VirtualListController extends ChangeNotifier {
   /// it was opened from. That focus return is a restoration, not a fresh user
   /// move, so it must not re-run the guard: the next focus change is consumed
   /// once and, when it lands on the refused row, focus is pulled back to the
-  /// row the owner still has open.
-  void refuseMove(int refusedIndex, int restoreIndex) =>
+  /// row the owner still has open. With a null [restoreIndex] the owner's
+  /// selection has no row, so focus goes to the labelled list container.
+  void refuseMove(int refusedIndex, int? restoreIndex) =>
       _state?._refuseMove(refusedIndex, restoreIndex);
 
   /// Called by the owner when data for the pending target row arrived.
@@ -135,9 +165,15 @@ class AccessibleVirtualList extends StatefulWidget {
     this.emptyIsTransient = false,
     this.multiSelect = false,
     this.onSelectionChanged,
-  });
+    this.selectionSource,
+    this.onRowRequested,
+  }) : assert(selectionSource == null || !multiSelect);
 
   final VirtualListController controller;
+  final VirtualListSelectionSource? selectionSource;
+
+  /// An unloaded navigation intent, separate from confirmed selection.
+  final ValueChanged<int>? onRowRequested;
   final int itemCount;
   final double itemExtent;
 
@@ -205,6 +241,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     duration: const Duration(milliseconds: 292),
   );
   final Map<Key, _VirtualRowState> _mountedRows = {};
+  late final _FocusedRowTraversalPolicy _focusedRowPolicy =
+      _FocusedRowTraversalPolicy(
+        () => _mountedRows.values.map((row) => row._node).toSet(),
+      );
   Map<Key, double>? _pendingSnapshot;
   Duration? _snapshotAt;
   Map<Key, double>? _playSnapshot;
@@ -317,7 +357,23 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   );
   final Map<int, FocusNode> _rowNodes = <int, FocusNode>{};
 
-  int? _selectedIndex;
+  int? _legacySelectedIndex;
+  int? get _selectedIndex => widget.selectionSource == null
+      ? _legacySelectedIndex
+      : widget.selectionSource!.selectedIndex;
+  set _selectedIndex(int? value) {
+    if (widget.selectionSource == null) _legacySelectedIndex = value;
+  }
+
+  int? _commitFocusIndex;
+  final Map<Key, int> _indicesAfterReorder = {};
+  Key? get focusedRowKey {
+    for (final entry in _mountedRows.entries) {
+      if (entry.value._node.hasFocus) return entry.key;
+    }
+    return null;
+  }
+
   Set<int> _selectedIndices = {};
   Set<Key> _selectedKeys = {};
   Key? _leadKey;
@@ -337,6 +393,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   int? _refusedFocusIndex;
   int? _notifiedIndex;
   int? _pendingIndex;
+
+  /// Counts navigation intents, so a focus check from an earlier jump can tell
+  /// that a newer one, even one that finished at once, has replaced it.
+  int _jumpSerial = 0;
   bool _pendingReveal = true;
   int? _forwardIndex;
   int _focusAttempts = 0;
@@ -361,6 +421,44 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       widget.controller._attach(this);
     }
     _syncSelectionWithItemCount();
+    if (widget.selectionSource != null &&
+        oldWidget.motionKey?.scope == widget.motionKey?.scope &&
+        oldWidget.motionKey?.epoch != widget.motionKey?.epoch) {
+      final ownedFocus = _listHasFocus;
+      _jumpSerial++;
+      _pendingIndex = null;
+      _pendingFocusIntent = false;
+      _cancelSlowTimer();
+      _indicesAfterReorder.clear();
+      final keys = _mountedRows.keys.toSet();
+      for (var i = 0; i < widget.itemCount && keys.isNotEmpty; i++) {
+        final key = widget.itemKeyBuilder(i);
+        if (keys.remove(key)) _indicesAfterReorder[key] = i;
+      }
+      final target = _selectedIndex;
+      _commitFocusIndex = ownedFocus ? target : null;
+      if (target == null) {
+        // Refilters load page zero. Show it instead of an old placeholder
+        // viewport; anchor-only refreshes keep their loaded distant page.
+        // Scrolling never changes identity or focus.
+        if (_scroll.hasClients && (widget.isRowReady?.call(0) ?? true)) {
+          _scroll.jumpTo(0);
+        }
+        if (ownedFocus) _containerFocus.requestFocus();
+      } else {
+        _scrollToIndex(target);
+        // The keyed focused row survives; fallback rows request focus during
+        // their first build in this commit, before the old row is disposed.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _scrollToIndex(target);
+          if (_commitFocusIndex == target) {
+            _rowNodes[target]?.requestFocus();
+            _commitFocusIndex = null;
+          }
+        });
+      }
+    }
     if (widget.multiSelect) {
       if (oldWidget.multiSelect) {
         final indices = <int>{};
@@ -404,6 +502,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   }
 
   void _syncSelectionWithItemCount() {
+    if (widget.selectionSource != null) return;
     if (widget.itemCount == 0) {
       _selectedIndex = null;
       _selectedIndices = {};
@@ -465,6 +564,13 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   // --------------------------------------------------------------- selection
 
   void _focusRegion() {
+    if (widget.selectionSource case final source?) {
+      if (source.selectedKey != null && source.selectedIndex == null) {
+        _containerFocus.requestFocus();
+        return;
+      }
+    }
+
     if (widget.itemCount == 0) {
       _containerFocus.requestFocus();
       return;
@@ -473,7 +579,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     if (_selectedIndex == null) {
       _setSelectedIndex(index, notify: true);
     }
-    final node = _rowNodes[index];
+    final node = _readyRowNode(index);
     if (node != null && (widget.isRowReady?.call(index) ?? true)) {
       node.requestFocus();
       return;
@@ -487,6 +593,16 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   }
 
   void _setSelectedIndex(int? index, {required bool notify}) {
+    if (widget.selectionSource case final source?) {
+      if (notify &&
+          index != null &&
+          (widget.isRowReady?.call(index) ?? true) &&
+          widget.itemKeyBuilder(index) != source.selectedKey) {
+        widget.onSelectedIndexChanged?.call(index);
+      }
+      return;
+    }
+
     if (index != null && widget.itemCount > 0) {
       index = index.clamp(0, widget.itemCount - 1);
     } else {
@@ -596,6 +712,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       return;
     }
     _refusedFocusIndex = null;
+    _jumpSerial++;
     _finishMotion();
     _pendingSnapshot = null;
     final target = index.clamp(0, widget.itemCount - 1);
@@ -609,7 +726,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         userInitiated: userInitiated,
         notify: true,
       );
-    } else {
+    } else if (widget.selectionSource == null || !moveFocus) {
       _setSelectedIndex(target, notify: true);
     }
     if (!moveFocus) {
@@ -626,7 +743,13 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     _focusAttempts = 0;
     if (reveal) _scrollToIndex(target);
     _settleFocus();
-    if (_pendingIndex != null && !_containerFocus.hasFocus) {
+    if (widget.selectionSource != null &&
+        !(widget.isRowReady?.call(target) ?? true)) {
+      widget.onRowRequested?.call(target);
+    }
+    if (widget.selectionSource == null &&
+        _pendingIndex != null &&
+        !_containerFocus.hasFocus) {
       // design.md section 6: during an unloaded jump the focus stays in the
       // list region with a pending target instead of falling to the window.
       _containerFocus.requestFocus();
@@ -636,27 +759,43 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   /// Puts the selection back on [restoreIndex] after the owner refused the
   /// move to [refusedIndex]; the dialog's focus restoration is consumed by
   /// [_onRowFocusGained] instead of looking like a fresh move.
-  void _refuseMove(int refusedIndex, int restoreIndex) {
+  void _refuseMove(int refusedIndex, int? restoreIndex) {
     if (widget.itemCount == 0) {
       return;
     }
     _refusedFocusIndex = refusedIndex.clamp(0, widget.itemCount - 1);
     // The refused move is no longer a pending jump to that row.
+    _jumpSerial++;
     _pendingIndex = null;
     _pendingFocusIntent = false;
     _cancelSlowTimer();
+    if (restoreIndex == null) {
+      _containerFocus.requestFocus();
+      return;
+    }
     _setSelectedIndex(restoreIndex, notify: true);
   }
+
+  /// Where the next relative key starts: a pending jump outranks the row that
+  /// still holds focus while it loads.
+  int? get _navigationCursor => widget.selectionSource == null
+      ? _selectedIndex
+      : (_pendingIndex ?? focusedRowIndex ?? _selectedIndex);
 
   void _moveSelection(int delta) {
     if (widget.itemCount == 0) {
       return;
     }
-    final current = _selectedIndex ?? 0;
-    final target = widget.multiSelect
+    final cursor = _navigationCursor;
+    final current = cursor ?? 0;
+    final target = widget.selectionSource != null && cursor == null
+        ? 0
+        : widget.multiSelect
         ? (current + delta).clamp(0, widget.itemCount - 1)
         : current + delta;
-    if (target < 0 || target >= widget.itemCount || target == current) {
+    if (target < 0 ||
+        target >= widget.itemCount ||
+        (target == current && cursor != null)) {
       // Stay in place at a boundary without repeated speech; Shift at an
       // edge must not collapse a multi-selection onto the lead row.
       return;
@@ -712,6 +851,16 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
 
   // ------------------------------------------------------------ focus settle
 
+  FocusNode? _readyRowNode(int index) {
+    if (widget.selectionSource == null) return _rowNodes[index];
+    // A reader can finish before the frame that replaces its placeholder.
+    // Never request focus on that placeholder's soon-to-be-disposed node.
+    final row = _mountedRows[widget.itemKeyBuilder(index)];
+    return row != null && row.widget.ready && row.widget.index == index
+        ? row._node
+        : null;
+  }
+
   void _settleFocus() {
     if (!mounted) {
       return;
@@ -729,7 +878,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     }
     final ready = widget.isRowReady?.call(target) ?? true;
     if (ready) {
-      final node = _rowNodes[target];
+      final node = _readyRowNode(target);
       if (node != null) {
         _pendingIndex = null;
         // Take the focus when the move was deliberate, when the list already
@@ -777,8 +926,9 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   /// still be reachable). Retrying is bounded, and a row that survived without
   /// taking focus is left alone because another control holds it on purpose.
   void _confirmRowFocus(int target, FocusNode node) {
+    final jump = _jumpSerial;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _pendingIndex != null) {
+      if (!mounted || _pendingIndex != null || jump != _jumpSerial) {
         return; // A newer jump owns the pending state.
       }
       final current = _rowNodes[target];
@@ -830,6 +980,16 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     }
   }
 
+  bool _failPending(int index) {
+    if (_pendingIndex != index) return false;
+    _pendingIndex = null;
+    _pendingFocusIntent = false;
+    _cancelSlowTimer();
+    final focused = focusedRowIndex;
+    if (focused != null) _scrollToIndex(focused);
+    return true;
+  }
+
   void _onRowFocusGained(int index) {
     // The container callback also fires for this transition, because the
     // container's ancestor-inclusive `hasFocus` turned true with the row's.
@@ -841,11 +1001,23 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
         // The dialog that asked the guarding question handed focus back to the
         // row the owner refused; the highlight stays where the owner put it.
         final selected = _selectedIndex;
-        if (selected != null && selected != index) {
+        if (selected == null) {
+          // No row to return to. Keep the refusal marked so the container's
+          // focus entry cannot select a row and ask the same question again.
+          _refusedFocusIndex = refused;
+          _containerFocus.requestFocus();
+        } else if (selected != index) {
           _requestIndex(selected, moveFocus: true, forceFocus: true);
         }
         return;
       }
+    }
+    if (widget.selectionSource case final source?) {
+      if ((widget.isRowReady?.call(index) ?? true) &&
+          widget.itemKeyBuilder(index) != source.selectedKey) {
+        widget.onSelectedIndexChanged?.call(index);
+      }
+      return;
     }
     if (index != _selectedIndex) {
       if (widget.multiSelect) {
@@ -882,6 +1054,10 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       // seed below exists for.
       return;
     }
+    if (widget.selectionSource != null) {
+      if (_refusedFocusIndex == null) _focusRegion();
+      return;
+    }
     // Tab enters the collection at its selected row, or the first row.
     final index = _selectedIndex ?? 0;
     if (_selectedIndex == null) {
@@ -903,6 +1079,11 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   }
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!node.hasPrimaryFocus &&
+        (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.space)) {
+      return KeyEventResult.ignored;
+    }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
@@ -912,6 +1093,18 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     // focus back cannot claim a later focus change.
     _refusedFocusIndex = null;
     final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.tab &&
+        node.hasPrimaryFocus &&
+        HardwareKeyboard.instance.isShiftPressed &&
+        widget.selectionSource != null &&
+        !identical(node, _containerFocus)) {
+      // Rows are not Tab stops, so reverse traversal would stop at the
+      // container and enter the same row again. Leave the collection instead;
+      // from the row's own controls, return to the row first.
+      _containerFocus.requestFocus();
+      _containerFocus.previousFocus();
+      return KeyEventResult.handled;
+    }
     if (widget.multiSelect && HardwareKeyboard.instance.isControlPressed) {
       if (key == LogicalKeyboardKey.space) {
         if (event is KeyDownEvent && _selectedIndex != null) {
@@ -958,7 +1151,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     if (key == LogicalKeyboardKey.home) {
       // A relative move can never reach row zero from inside the list, so ask
       // for the first row directly, exactly like End asks for the last one.
-      if (_selectedIndex != 0 || widget.multiSelect) {
+      if (_navigationCursor != 0 || widget.multiSelect) {
         _requestIndex(
           0,
           moveFocus: true,
@@ -974,7 +1167,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.end) {
-      if (_selectedIndex != widget.itemCount - 1 || widget.multiSelect) {
+      if (_navigationCursor != widget.itemCount - 1 || widget.multiSelect) {
         _requestIndex(
           widget.itemCount - 1,
           moveFocus: true,
@@ -991,7 +1184,7 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
     }
     if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.space) {
       final index = _selectedIndex;
-      if (index != null && node.hasFocus) {
+      if (index != null && node.hasPrimaryFocus) {
         widget.onActivate?.call(index);
         return KeyEventResult.handled;
       }
@@ -1048,51 +1241,129 @@ class _AccessibleVirtualListState extends State<AccessibleVirtualList>
   // states share the group so the container's Focus keeps its element.
   @override
   Widget build(BuildContext context) => FocusTraversalGroup(
-    policy: WidgetOrderTraversalPolicy(),
+    policy: widget.selectionSource == null
+        ? WidgetOrderTraversalPolicy()
+        : _focusedRowPolicy,
     child: widget.itemCount == 0 ? _buildEmpty(context) : _buildRows(context),
   );
 
+  double? _viewportHeight;
+
+  bool _onViewportMetrics(ScrollMetricsNotification notification) {
+    final height = notification.metrics.viewportDimension;
+    final changed = _viewportHeight != null && _viewportHeight != height;
+    _viewportHeight = height;
+    if (changed && widget.selectionSource != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || _pendingIndex != null) return;
+        final focused = focusedRowIndex;
+        if (focused != null) _scrollToIndex(focused);
+      });
+    }
+    return false;
+  }
+
   Widget _buildRows(BuildContext context) {
-    return Focus(
-      focusNode: _containerFocus,
-      includeSemantics: false,
-      onFocusChange: _onContainerFocusChange,
-      onKeyEvent: _handleKeyEvent,
-      child: Semantics(
-        container: true,
-        explicitChildNodes: true,
-        focusable: true,
-        focused: _containerFocused,
-        label: widget.listLabel,
-        value: widget.multiSelect
-            ? '${_selectedIndices.length} selected'
-            : null,
-        child: NotificationListener<ScrollStartNotification>(
-          onNotification: (_) {
-            _finishMotion();
-            _pendingSnapshot = null;
-            return false;
-          },
-          child: ListView.builder(
-            controller: _scroll,
-            itemExtent: widget.itemExtent,
-            scrollCacheExtent: widget.cacheExtent == null
-                ? null
-                : ScrollCacheExtent.pixels(widget.cacheExtent!),
-            itemCount: widget.itemCount,
-            itemBuilder: (context, index) => _VirtualRow(
-              key: widget.itemKeyBuilder(index),
-              index: index,
-              selected: _isSelected(index),
-              ready: widget.isRowReady?.call(index) ?? true,
-              semantics: widget.rowSemanticsBuilder(index),
-              owner: this,
-              onKeyEvent: _handleKeyEvent,
-              child: widget.rowBuilder(context, index, _isSelected(index)),
+    return NotificationListener<ScrollMetricsNotification>(
+      onNotification: _onViewportMetrics,
+      child: Focus(
+        focusNode: _containerFocus,
+        includeSemantics: false,
+        onFocusChange: _onContainerFocusChange,
+        onKeyEvent: _handleKeyEvent,
+        child: Semantics(
+          container: true,
+          explicitChildNodes: true,
+          focusable: true,
+          focused: _containerFocused,
+          label: widget.selectionSource?.unplacedLabel == null
+              ? widget.listLabel
+              : '${widget.listLabel}. ${widget.selectionSource!.unplacedLabel}',
+          value: widget.multiSelect
+              ? '${_selectedIndices.length} selected'
+              : null,
+          child: NotificationListener<ScrollStartNotification>(
+            onNotification: (_) {
+              _finishMotion();
+              _pendingSnapshot = null;
+              return false;
+            },
+            child: ListView.builder(
+              controller: _scroll,
+              itemExtent: widget.itemExtent,
+              scrollCacheExtent: widget.cacheExtent == null
+                  ? null
+                  : ScrollCacheExtent.pixels(widget.cacheExtent!),
+              itemCount: widget.itemCount,
+              findChildIndexCallback: widget.selectionSource == null
+                  ? null
+                  : _indexForKey,
+              itemBuilder: (context, index) => _VirtualRow(
+                key: widget.itemKeyBuilder(index),
+                index: index,
+                selected: _isSelected(index),
+                ready: widget.isRowReady?.call(index) ?? true,
+                semantics: widget.rowSemanticsBuilder(index),
+                owner: this,
+                onKeyEvent: _handleKeyEvent,
+                child: widget.rowBuilder(context, index, _isSelected(index)),
+              ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  int? _indexForKey(Key key) {
+    final mountedIndex = _mountedRows[key]?.widget.index;
+    if (mountedIndex != null &&
+        mountedIndex < widget.itemCount &&
+        widget.itemKeyBuilder(mountedIndex) == key) {
+      return mountedIndex;
+    }
+    final index = _indicesAfterReorder[key];
+    return index != null &&
+            index < widget.itemCount &&
+            widget.itemKeyBuilder(index) == key
+        ? index
+        : null;
+  }
+}
+
+/// One Tab stop per collection: only the focused row's controls are stops.
+///
+/// Focus order follows row mount order, not row index, and reaching a row's
+/// control would select that row. A policy keeps this out of every focus move,
+/// which a per-row traversal flag would not.
+class _FocusedRowTraversalPolicy extends WidgetOrderTraversalPolicy {
+  _FocusedRowTraversalPolicy(this.rowNodes);
+
+  final Set<FocusNode> Function() rowNodes;
+
+  @override
+  bool previous(FocusNode currentNode) {
+    final rows = rowNodes();
+    final row = currentNode.ancestors.where(rows.contains).firstOrNull;
+    if (row != null) {
+      row.requestFocus();
+      return true;
+    }
+    return super.previous(currentNode);
+  }
+
+  @override
+  Iterable<FocusNode> sortDescendants(
+    Iterable<FocusNode> descendants,
+    FocusNode currentNode,
+  ) {
+    final rows = rowNodes();
+    return super.sortDescendants(
+      descendants.where((node) {
+        final row = node.ancestors.where(rows.contains).firstOrNull;
+        return row == null || row.hasFocus;
+      }).toList(),
+      currentNode,
     );
   }
 }
@@ -1121,7 +1392,11 @@ class _VirtualRow extends StatefulWidget {
   State<_VirtualRow> createState() => _VirtualRowState();
 }
 
-class _VirtualRowState extends State<_VirtualRow> {
+class _VirtualRowState extends State<_VirtualRow>
+    with AutomaticKeepAliveClientMixin<_VirtualRow> {
+  @override
+  bool get wantKeepAlive =>
+      widget.owner.widget.selectionSource != null && _focused;
   late final FocusNode _node = FocusNode(
     debugLabel: 'list-row-${widget.index}',
     skipTraversal: true,
@@ -1168,6 +1443,7 @@ class _VirtualRowState extends State<_VirtualRow> {
     if (oldWidget.index != widget.index || oldWidget.owner != widget.owner) {
       oldWidget.owner._unregisterRowNode(oldWidget.index, _node);
       widget.owner._registerRowNode(widget.index, _node);
+      _node.debugLabel = 'list-row-${widget.index}';
     }
     _prepareMotion();
   }
@@ -1192,6 +1468,11 @@ class _VirtualRowState extends State<_VirtualRow> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
+    if (widget.owner._commitFocusIndex == widget.index && widget.ready) {
+      _node.requestFocus();
+      widget.owner._commitFocusIndex = null;
+    }
     final colors = Theme.of(context).colorScheme;
     final multi = widget.owner.widget.multiSelect;
     final stroke = _focused ? 3.0 : (!multi && widget.selected ? 2.0 : 0.0);
@@ -1203,6 +1484,7 @@ class _VirtualRowState extends State<_VirtualRow> {
       onKeyEvent: widget.onKeyEvent,
       onFocusChange: (hasFocus) {
         setState(() => _focused = hasFocus);
+        updateKeepAlive();
         if (hasFocus) {
           widget.owner._onRowFocusGained(widget.index);
         }

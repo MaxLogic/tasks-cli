@@ -885,15 +885,23 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     required String clipId,
     bool refocusEdit = true,
   }) async {
+    final savedTaskId = _editor.base?.id;
+    final fromList = widget.model.tasks?.listFocus?.call().ownsFocus ?? false;
     _startBusyWatch();
     final result = await write();
-    await _afterWrite(result, clipId: clipId, refocusEdit: refocusEdit);
+    await _afterWrite(
+      result,
+      clipId: clipId,
+      refocusEdit: refocusEdit && !fromList,
+      savedTaskId: savedTaskId,
+    );
     return result;
   }
 
   /// Speaks the outcome the way design.md section 7 asks, then refreshes.
   Future<void> _afterWrite(
     EditorSaveResult result, {
+    int? savedTaskId,
     required String clipId,
     bool refocusEdit = true,
   }) async {
@@ -902,10 +910,14 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       case EditorSaveOutcome.saved:
       case EditorSaveOutcome.reconciled:
         widget.api.announce(result.message ?? 'Saved.', clipId: clipId);
-        await widget.model.noteConfirmedRead();
         if (refocusEdit) {
           _returnToEditAction();
+          // Rebuild the read-mode header and restore the editor's focus before
+          // refreshing membership. Removing the form must not make Flutter's
+          // temporary restoration to a list row look like a list-origin save.
+          await WidgetsBinding.instance.endOfFrame;
         }
+        await widget.model.noteConfirmedRead(savedTaskId: savedTaskId);
       case EditorSaveOutcome.noop:
         widget.api.announce(
           result.message ?? 'No changes needed',

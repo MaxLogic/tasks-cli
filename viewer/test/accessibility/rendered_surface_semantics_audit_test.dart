@@ -28,6 +28,9 @@ void main() {
     try {
       final harness = await pumpRealViewer(tester);
 
+      // Enter a real project row before asking for its context menu. A list
+      // without model selection no longer seeds an unrelated highlight.
+      await pressKey(tester, LogicalKeyboardKey.f1);
       await pressKey(tester, LogicalKeyboardKey.contextMenu);
       expect(find.text('Open in Explorer (E)'), findsOneWidget);
       expectAccessibleSemantics(tester);

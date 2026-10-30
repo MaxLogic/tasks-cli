@@ -1,21 +1,20 @@
-/// One project's tasks as a combined, filtered, paged query
-/// (viewer/spec.md sections 4.3, 5 and 6).
-///
-/// The controller owns the request parameters, the debounce, the page cache and
-/// every failure state, so the pane stays a rendering layer. It mirrors
-/// [ProjectController] deliberately: the two collections share navigation
-/// semantics but not their query fields, and a shared abstraction would have to
-/// parameterise every difference the CLI defines.
-///
-/// Safety rules:
-/// * each reload bumps a generation, and an older generation can never touch
-///   rows, counts or the selection;
-/// * a superseded read is cancelled, so it cannot deliver a late answer;
-/// * a stale snapshot keeps the last confirmed rows, drops every cached page
-///   and reloads from offset zero exactly once.
+/// Query controls backed by the shared atomic paged-selection core.
 library;
 
 import 'dart:async';
+import 'dart:convert';
+
+import 'paged_selection.dart';
+export 'paged_selection.dart'
+    show
+        ListSelection,
+        NoSelection,
+        Listed,
+        Retained,
+        RetainReason,
+        RowLoad,
+        RowLoadState,
+        ListFocus;
 
 import 'package:flutter/foundation.dart';
 
@@ -54,6 +53,7 @@ final class TaskListState {
     this.sort = TaskSort.priority,
     this.direction = SortDirection.ascending,
     this.selectedTaskId,
+    this.selectedIndexHint,
   });
 
   final String query;
@@ -67,6 +67,7 @@ final class TaskListState {
 
   /// Task the user last selected in this project, or null for none.
   final int? selectedTaskId;
+  final int? selectedIndexHint;
 }
 
 /// Task list state: parameters, paged rows, selection and failures.
@@ -80,7 +81,9 @@ class TaskController extends ChangeNotifier {
     this.prefetchRows = taskPrefetchRows,
   }) : // Private field, so an initializing formal cannot name the parameter.
        // ignore: prefer_initializing_formals
-       _reader = reader;
+       _reader = reader {
+    _core.addListener(_notify);
+  }
 
   /// Project UUID every read is routed by; never the working directory.
   final String projectId;
@@ -92,7 +95,6 @@ class TaskController extends ChangeNotifier {
   final int prefetchRows;
 
   Timer? _debounceTimer;
-  int _generation = 0;
   bool _disposed = false;
 
   String _query = '';
@@ -104,25 +106,27 @@ class TaskController extends ChangeNotifier {
   TaskSort _sort = TaskSort.priority;
   SortDirection _direction = SortDirection.ascending;
 
-  int _totalCount = 0;
-
-  // Sparse index over the filtered result: a null entry is a row the viewer has
-  // not materialised yet. Rows are small immutable DTOs, never widgets or focus
-  // nodes; the bounded page cache below is what grows with navigation.
-  List<TaskItem?> _rows = const <TaskItem?>[];
-  final Map<int, List<TaskItem>> _pages = <int, List<TaskItem>>{};
-  final List<int> _pageUse = <int>[];
-  final Set<int> _pagesInFlight = <int>{};
-  String? _snapshot;
-  int? _sampledAtMs;
-  int? _selectedTaskId;
-  bool _loading = false;
-  bool _refreshAfterLoad = false;
-  bool _staleRetryUsed = false;
-  ViewerFailure? _firstLoadError;
-  ViewerFailure? _refreshFailure;
-  String? _notice;
-
+  late final _core = PagedSelectionCore<TaskItem, int>(
+    keyOf: (item) => item.id,
+    cancelRead: _cancelInFlight,
+    listLabel: 'Tasks',
+    describe: (id, item) =>
+        'Selected task ${viewerCanonicalTaskId(id, projectKey)}',
+    pageSize: pageSize,
+    maxCachedPages: maxCachedPages,
+    prefetchRows: prefetchRows,
+  );
+  bool Function(int)? get isSelectionPinned => _core.isSelectionPinned;
+  set isSelectionPinned(bool Function(int)? probe) =>
+      _core.isSelectionPinned = probe;
+  ListFocus<int> Function()? get listFocus => _core.listFocus;
+  set listFocus(ListFocus<int> Function()? probe) => _core.listFocus = probe;
+  ListSelection<int> get selection => _core.selection;
+  ViewerFailure? get pageFailure => _core.pageFailure;
+  String? get retainedText => _core.retainedText;
+  String? get unplacedLabel => _core.unplacedLabel;
+  int get announcementSerial => _core.announcementSerial;
+  String? get announcement => _core.announcement;
   // ------------------------------------------------------------- parameters
 
   String get query => _query;
@@ -135,43 +139,27 @@ class TaskController extends ChangeNotifier {
   TaskSort get sort => _sort;
   SortDirection get direction => _direction;
 
-  /// Exact filtered row count reported by the CLI, not the loaded count.
-  int get totalCount => _totalCount;
-
-  int get rowCount => _totalCount;
-
-  /// Rows currently held for display, including retained stale rows.
-  int get loadedRowCount => _rows.where((row) => row != null).length;
-
-  /// When the last successful first-page read arrived, in local milliseconds.
-  int? get sampledAtMs => _sampledAtMs;
-
-  bool get isLoading => _loading;
-
-  int _resultEpoch = 0;
-  int get resultEpoch => _resultEpoch;
-
-  bool get hasRows => _totalCount > 0;
-
-  /// True while any confirmed rows are on screen (possibly stale).
-  bool get hasConfirmedData => loadedRowCount > 0;
-
-  /// Set only when the first load failed and there is nothing to show.
-  ViewerFailure? get firstLoadError => _firstLoadError;
-
-  /// Set when a refresh failed; the previous rows stay visible as stale.
-  ViewerFailure? get refreshFailure => _refreshFailure;
-
-  /// A non-fatal message such as a repeated snapshot invalidation.
-  String? get notice => _notice;
-
-  int? get selectedTaskId => _selectedTaskId;
-
-  int get cachedPageCount => _pages.length;
-
-  String? get snapshotToken => _snapshot;
-
-  /// How many filter groups are active, for the collapsed Filters button.
+  int get totalCount => _core.totalCount;
+  int get rowCount => totalCount;
+  int get loadedRowCount => _core.loadedRowCount;
+  int? get sampledAtMs => _core.sampledAtMs;
+  bool get isLoading => _core.isLoading;
+  int get resultEpoch => _core.resultEpoch;
+  bool get hasRows => totalCount > 0;
+  bool get hasConfirmedData => _core.published != null;
+  ViewerFailure? get firstLoadError => _core.firstLoadError;
+  ViewerFailure? get refreshFailure => _core.refreshFailure;
+  String? get notice => _core.notice;
+  int? get selectedTaskId => _core.selectedId;
+  int get cachedPageCount => _core.cachedPageCount;
+  String? get snapshotToken => _core.snapshotToken;
+  TaskItem? itemAt(int index) => _core.itemAt(index);
+  bool isRowReady(int index) => itemAt(index) != null;
+  bool isPageCached(int index) => _core.isPageCached(index);
+  List<int> get cachedPageIndexes => _core.cachedPageIndexes;
+  int? indexOfTask(int id) => _core.indexOf(id);
+  TaskItem? get selectedItem => _core.selectedItem;
+  int? get selectedIndex => _core.selectedIndex;
   int get activeFilterCount =>
       (query.trim().isEmpty ? 0 : 1) +
       (scope == TaskScope.open ? 0 : 1) +
@@ -179,45 +167,6 @@ class TaskController extends ChangeNotifier {
       (priorities.isEmpty ? 0 : 1) +
       (labels.isEmpty ? 0 : 1) +
       (readiness == TaskReadiness.any ? 0 : 1);
-
-  TaskItem? itemAt(int index) {
-    if (index < 0 || index >= _rows.length) {
-      return null;
-    }
-    return _rows[index];
-  }
-
-  bool isRowReady(int index) => itemAt(index) != null;
-
-  /// True while the page that owns [index] is still in the bounded cache.
-  bool isPageCached(int index) =>
-      index >= 0 && _pages.containsKey(index ~/ pageSize);
-
-  /// Cached page indexes, least recently used first.
-  List<int> get cachedPageIndexes => List<int>.unmodifiable(_pageUse);
-
-  int? indexOfTask(int taskId) {
-    for (var index = 0; index < _rows.length; index++) {
-      if (_rows[index]?.id == taskId) {
-        return index;
-      }
-    }
-    return null;
-  }
-
-  TaskItem? get selectedItem {
-    final id = _selectedTaskId;
-    if (id == null) {
-      return null;
-    }
-    final index = indexOfTask(id);
-    return index == null ? null : _rows[index];
-  }
-
-  int? get selectedIndex {
-    final id = _selectedTaskId;
-    return id == null ? null : indexOfTask(id);
-  }
 
   TaskQuery buildQuery({required int offset}) => TaskQuery(
     query: _searchQuery(),
@@ -231,8 +180,8 @@ class TaskController extends ChangeNotifier {
     offset: offset,
     limit: pageSize,
     // Offset zero always recounts; later pages reuse the token from the first
-    // page so a changed list becomes visible as stale_snapshot.
-    snapshot: offset == 0 ? null : _snapshot,
+    // page so a changed list becomes visible as stalesnapshotToken.
+    snapshot: offset == 0 ? null : snapshotToken,
   );
 
   String _searchQuery() {
@@ -240,7 +189,7 @@ class TaskController extends ChangeNotifier {
     if (RegExp(r'^[0-9]+$').hasMatch(text)) {
       final id = int.tryParse(text);
       if (id != null) {
-        return viewerCanonicalTaskId(id, _projectKey);
+        return viewerCanonicalTaskId(id, projectKey);
       }
     }
     return text;
@@ -258,7 +207,8 @@ class TaskController extends ChangeNotifier {
     readiness: _readiness,
     sort: _sort,
     direction: _direction,
-    selectedTaskId: _selectedTaskId,
+    selectedTaskId: selectedTaskId,
+    selectedIndexHint: selectedIndex,
   );
 
   /// Replaces every parameter at once, for a project the user returns to.
@@ -279,7 +229,8 @@ class TaskController extends ChangeNotifier {
     _readiness = state.readiness;
     _sort = state.sort;
     _direction = state.direction;
-    _selectedTaskId = state.selectedTaskId;
+    _core.select(state.selectedTaskId, projectSwitch: true);
+    _restoreHint = state.selectedIndexHint;
     _notify();
   }
 
@@ -426,336 +377,110 @@ class TaskController extends ChangeNotifier {
     unawaited(reload());
   }
 
-  /// Patch cached rows in place. Keep the old snapshot token so later paging
-  /// detects the write and uses the existing stale-snapshot recovery.
+  /// Preserve TSK-063 attachment version checks and deferred refresh.
   void applyAttachmentWrite(
     TaskDetail detail,
     int count, {
     required int baseVersion,
   }) {
-    if (_disposed) return;
-    // This read may have taken its snapshot before the write committed. Let
-    // it finish, then coalesce confirmed writes into one post-commit refresh.
-    if (_loading) {
-      _refreshAfterLoad = true;
-      return;
-    }
-    if (_rows.any(
-      (row) => row?.id == detail.id && row!.version < baseVersion,
-    )) {
-      // Attachment-only state cannot repair a title/status from an older base.
-      unawaited(refresh());
-      return;
-    }
-    _generation++;
-    _cancelInFlight();
-    _pagesInFlight.clear();
-    TaskItem patch(TaskItem row) =>
-        row.id == detail.id && row.version == baseVersion
-        ? row.withAttachmentWrite(detail, count)
-        : row;
-    _rows = [for (final row in _rows) row == null ? null : patch(row)];
-    for (final index in _pages.keys.toList()) {
-      _pages[index] = _pages[index]!.map(patch).toList();
-    }
-    _notify();
-  }
-
-  /// F5 and the Refresh button: same parameters, fresh rows.
-  Future<void> refresh() => reload(retainSelection: true, keepStaleRows: true);
-
-  /// Retry after a first-load failure.
-  Future<void> retry() => reload(retainSelection: true);
-
-  /// Reloads from offset zero, discarding cached pages.
-  Future<void> reload({
-    bool retainSelection = false,
-    bool keepStaleRows = false,
-  }) {
-    _debounceTimer?.cancel();
-    final generation = ++_generation;
-    _cancelInFlight();
-    _pages.clear();
-    _pageUse.clear();
-    _pagesInFlight.clear();
-    _snapshot = null;
-    _staleRetryUsed = false;
-    _notice = null;
-    _loading = true;
-    final previousSelectionIndex = indexOfTask(_selectedTaskId ?? -1);
-    if (!keepStaleRows) {
-      _rows = const <TaskItem?>[];
-      _totalCount = 0;
-      _sampledAtMs = null;
-    }
-    _notify();
-    return _loadOffsetZero(
-      generation,
-      retainSelection: retainSelection,
-      previousSelectionIndex: previousSelectionIndex,
+    final older = cachedPageIndexes.any(
+      (p) => List.generate(
+        pageSize,
+        (i) => itemAt(p * pageSize + i),
+      ).any((r) => r?.id == detail.id && r!.version < baseVersion),
+    );
+    _core.patch(
+      (row) => row.id == detail.id && row.version == baseVersion
+          ? row.withAttachmentWrite(detail, count)
+          : row,
+      needsRefresh: older,
     );
   }
 
-  void selectIndex(int? index) {
-    _selectTask(index == null ? null : itemAt(index)?.id);
-  }
-
-  void selectTaskId(int? taskId) => _selectTask(taskId);
-
-  void _selectTask(int? taskId) {
-    if (_selectedTaskId == taskId) {
-      return;
-    }
-    _selectedTaskId = taskId;
-    _notify();
-  }
-
-  // ----------------------------------------------------------------- paging
-
-  /// Makes the page that owns [index] available, prefetching near a boundary.
-  Future<void> ensureRow(int index) async {
-    if (index < 0 || index >= _totalCount) {
-      return;
-    }
-    final pageIndex = index ~/ pageSize;
-    final offset = pageIndex * pageSize;
-    final pending = _loadPage(pageIndex);
-    if (index - offset >= pageSize - prefetchRows &&
-        offset + pageSize < _totalCount) {
-      unawaited(_prefetchPage(pageIndex + 1));
-    }
-    await pending;
-  }
-
-  Future<void> _prefetchPage(int pageIndex) async {
-    if (_pages.containsKey(pageIndex) || _pagesInFlight.contains(pageIndex)) {
-      return;
-    }
-    await _loadPage(pageIndex);
-  }
-
-  Future<void> _loadPage(int pageIndex) async {
-    if (_pages.containsKey(pageIndex) || _pagesInFlight.contains(pageIndex)) {
-      _touchPage(pageIndex);
-      return;
-    }
-    final generation = _generation;
-    final offset = pageIndex * pageSize;
-    _pagesInFlight.add(pageIndex);
-    try {
+  String? get projectKey => _core.published?.projectKey;
+  int? _restoreHint;
+  PagedSelectionSpec<TaskItem, int> _spec() {
+    final q = buildQuery(offset: 0);
+    var key = projectKey;
+    Future<SelectionPage<TaskItem>> read(
+      int offset,
+      String? token,
+      String query,
+    ) async {
       final page = await _reader.fetchTasks(
         projectId,
-        buildQuery(offset: offset),
+        TaskQuery(
+          query: query,
+          scope: q.scope,
+          statuses: q.statuses,
+          priorities: q.priorities,
+          labels: q.labels,
+          readiness: q.readiness,
+          sort: q.sort,
+          direction: q.direction,
+          offset: offset,
+          limit: pageSize,
+          snapshot: token,
+        ),
       );
-      if (generation != _generation) {
-        return;
-      }
-      _applyPage(page, pageIndex: pageIndex);
-      _firstLoadError = null;
-      _refreshFailure = null;
-      _notify();
-    } on ViewerCancelledFailure {
-      return;
-    } on ViewerFailure catch (failure) {
-      if (generation != _generation) {
-        return;
-      }
-      await _handleFailure(failure, generation);
-    } finally {
-      _pagesInFlight.remove(pageIndex);
-    }
-  }
-
-  Future<void> _loadOffsetZero(
-    int generation, {
-    required bool retainSelection,
-    required int? previousSelectionIndex,
-  }) async {
-    try {
-      final page = await _reader.fetchTasks(projectId, buildQuery(offset: 0));
-      if (generation != _generation) {
-        return;
-      }
-      _resetRows();
-      _applyPage(page, pageIndex: 0);
-      _resultEpoch++;
-      _firstLoadError = null;
-      _refreshFailure = null;
-      _notice = null;
-      _retainOrClearSelection(
-        page,
-        retainSelection: retainSelection,
-        previousSelectionIndex: previousSelectionIndex,
+      key = page.projectKey;
+      return SelectionPage(
+        items: page.items,
+        total: page.totalCount,
+        snapshot: page.snapshot,
+        sampledAtMs: taskSampleClock(),
+        projectKey: page.projectKey,
       );
-    } on ViewerCancelledFailure {
-      return;
-    } on ViewerFailure catch (failure) {
-      if (generation != _generation) {
-        return;
-      }
-      await _handleFailure(failure, generation);
-    } finally {
-      if (generation == _generation) {
-        _loading = false;
-        if (_refreshAfterLoad) {
-          _refreshAfterLoad = false;
-          await refresh();
-        } else {
-          _notify();
-        }
-      }
     }
+
+    return PagedSelectionSpec(
+      filterKey: jsonEncode([
+        q.query,
+        q.scope.wireValue,
+        q.statuses,
+        q.priorities,
+        q.labels,
+        q.readiness.wireValue,
+      ]),
+      sortKey: q.sort,
+      direction: q.direction,
+      emptySearch: q.query.isEmpty,
+      read: (offset, token) => read(offset, token, q.query),
+      membership: (id) => read(0, null, viewerCanonicalTaskId(id, key)),
+    );
   }
 
-  /// Snapshot invalidation: keep the stale rows, drop the cache, reload once.
-  Future<void> _handleFailure(ViewerFailure failure, int generation) async {
-    if (failure is ViewerCliErrorFailure && failure.isStaleSnapshot) {
-      _pages.clear();
-      _pageUse.clear();
-      _snapshot = null;
-      if (_staleRetryUsed) {
-        _notice = 'Tasks are changing. Refresh to load the latest list.';
-        _loading = false;
-        _notify();
-        return;
-      }
-      _staleRetryUsed = true;
-      _loading = true;
-      _notify();
-      await _loadOffsetZero(
-        generation,
-        retainSelection: true,
-        previousSelectionIndex: indexOfTask(_selectedTaskId ?? -1),
-      );
-      return;
-    }
-    if (hasConfirmedData) {
-      // Keep the last confirmed rows visible and label them stale.
-      _refreshFailure = failure;
-    } else {
-      _firstLoadError = failure;
-      _rows = const <TaskItem?>[];
-      _totalCount = 0;
-    }
-    _loading = false;
-    _notify();
+  Future<void> refresh({bool userInitiated = true, int? savedId}) {
+    _debounceTimer?.cancel();
+    return _core.reload(
+      _spec(),
+      userInitiated: userInitiated,
+      savedId: savedId,
+      restoreHint: _restoreHint,
+    );
   }
 
-  /// The project's key from the latest page, or null when it has none.
-  String? get projectKey => _projectKey;
-  String? _projectKey;
-
-  void _applyPage(TaskPage page, {required int pageIndex}) {
-    _projectKey = page.projectKey;
-    if (_totalCount != page.totalCount) {
-      _totalCount = page.totalCount;
-      final resized = List<TaskItem?>.filled(_totalCount, null);
-      final carriedRows = _rows;
-      final limit = resized.length < carriedRows.length
-          ? resized.length
-          : carriedRows.length;
-      for (var index = 0; index < limit; index++) {
-        resized[index] = carriedRows[index];
-      }
-      _rows = resized;
-    }
-    final offset = pageIndex * pageSize;
-    for (var index = 0; index < page.items.length; index++) {
-      final target = offset + index;
-      if (target >= _rows.length) {
-        break;
-      }
-      _rows[target] = page.items[index];
-    }
-    _pages[pageIndex] = page.items;
-    _touchPage(pageIndex);
-    if (page.snapshot != null) {
-      _snapshot = page.snapshot;
-    }
-    if (pageIndex == 0) {
-      _sampledAtMs = taskSampleClock();
-    }
-    _trimPages();
-  }
-
-  void _resetRows() {
-    _rows = const <TaskItem?>[];
-    _totalCount = 0;
-    _sampledAtMs = null;
-  }
-
-  /// Clears a selection that provably left the result set.
-  ///
-  /// Only page zero is authoritative after a reload: a task the viewer reached
-  /// on a later page keeps its detail until the user navigates, because
-  /// dropping it from an unrelated page would be a guess.
-  void _retainOrClearSelection(
-    TaskPage page, {
-    required bool retainSelection,
-    required int? previousSelectionIndex,
-  }) {
-    final selected = _selectedTaskId;
-    if (selected == null || retainSelection) {
-      return;
-    }
-    if (previousSelectionIndex != null && previousSelectionIndex >= pageSize) {
-      return;
-    }
-    final stillListed = page.items.any((item) => item.id == selected);
-    if (!stillListed) {
-      _selectedTaskId = null;
-    }
-  }
-
-  void _touchPage(int pageIndex) {
-    _pageUse.remove(pageIndex);
-    _pageUse.add(pageIndex);
-  }
-
-  void _trimPages() {
-    while (_pages.length > maxCachedPages) {
-      final candidate = _pageUse.firstWhere(
-        (pageIndex) => !_pageHoldsSelection(pageIndex),
-        orElse: () => -1,
-      );
-      if (candidate < 0) {
-        return;
-      }
-      _pages.remove(candidate);
-      _pageUse.remove(candidate);
-    }
-  }
-
-  bool _pageHoldsSelection(int pageIndex) {
-    final id = _selectedTaskId;
-    if (id == null) {
-      return false;
-    }
-    final items = _pages[pageIndex];
-    if (items == null) {
-      return false;
-    }
-    return items.any((item) => item.id == id);
-  }
-
+  Future<void> retry() => refresh();
+  Future<void> reload() => refresh();
+  void selectIndex(int? index) =>
+      _core.select(index == null ? null : itemAt(index)?.id, rowFocus: true);
+  void selectTaskId(int? id) => _core.select(id);
+  Future<RowLoad> ensureRow(int index) => _core.ensureRow(index);
   void _cancelInFlight() {
     final reader = _reader;
-    if (reader is CancellableTaskReader) {
-      reader.cancelScope('tasks');
-    }
+    if (reader is CancellableTaskReader) reader.cancelScope('tasks');
   }
 
   void _notify() {
-    if (!_disposed) {
-      notifyListeners();
-    }
+    if (!_disposed) notifyListeners();
   }
 
   @override
   void dispose() {
     _disposed = true;
     _debounceTimer?.cancel();
-    _cancelInFlight();
+    _core.removeListener(_notify);
+    _core.dispose();
     super.dispose();
   }
 }

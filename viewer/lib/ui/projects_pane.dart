@@ -25,6 +25,19 @@ import 'viewer_format.dart';
 import 'workspace_model.dart';
 
 /// Projects region bound to one workspace model.
+final class _ProjectSelectionSource implements VirtualListSelectionSource {
+  const _ProjectSelectionSource(this.projects);
+  final ProjectController projects;
+  @override
+  Key? get selectedKey => projects.selectedProjectId == null
+      ? null
+      : ValueKey<String>(projects.selectedProjectId!);
+  @override
+  int? get selectedIndex => projects.selectedIndex;
+  @override
+  String? get unplacedLabel => projects.unplacedLabel;
+}
+
 class ViewerProjectsPane extends StatefulWidget {
   const ViewerProjectsPane({super.key, required this.api, required this.model});
 
@@ -48,6 +61,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   final ProjectLauncher _projectLauncher = const ProjectLauncher();
   String? _pendingRecoveryError;
   final _copyFlash = ViewerFlashController();
+  int _announcementSerial = 0;
 
   ProjectController get _projects => widget.model.projectList;
 
@@ -58,6 +72,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
   void initState() {
     super.initState();
     widget.api.registerScopeCommands(CommandScope.projects, _onScopeCommand);
+    _projects.listFocus = () => ListFocus<String>(
+      ownsFocus: _handles.list.hasListFocus,
+      index: _handles.list.focusedRowIndex,
+      key: _handles.list.focusedRowKey is ValueKey<String>
+          ? (_handles.list.focusedRowKey as ValueKey<String>).value
+          : null,
+    );
     _projects.addListener(_syncExternalQuery);
     _search.text = _projects.query;
   }
@@ -67,6 +88,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     _copyFlash.dispose();
     widget.api.registerScopeCommands(CommandScope.projects, null);
     _projects.removeListener(_syncExternalQuery);
+    _projects.listFocus = null;
     _search.dispose();
     _stateFocus.dispose();
     _sortFocus.dispose();
@@ -78,6 +100,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
   /// Mirrors a query the pane did not type, for example a restored preference.
   void _syncExternalQuery() {
+    if (_projects.announcementSerial != _announcementSerial) {
+      _announcementSerial = _projects.announcementSerial;
+      if (_projects.announcement case final text?) {
+        widget.api.announce(text, dynamic: true);
+      }
+    }
     final query = _projects.query;
     if (query != _search.text && !_handles.filterFocus.hasFocus) {
       _search.text = query;
@@ -175,11 +203,21 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
   /// Fetches the page that owns [index] and settles the pending row focus.
   Future<void> _ensureRow(int index) async {
-    await widget.model.ensureProjectRow(index);
-    if (!mounted) {
-      return;
+    final result = await widget.model.ensureProjectRow(index);
+    if (!mounted) return;
+    switch (result.state) {
+      case RowLoadState.ready:
+        _handles.list.retryPending();
+      case RowLoadState.failed:
+        if (_handles.list.failPending(index)) {
+          widget.api.announce(
+            'Could not load row ${index + 1}: ${result.failure!.message}',
+            dynamic: true,
+          );
+        }
+      case RowLoadState.superseded:
+        _handles.list.failPending(index);
     }
-    _handles.list.retryPending();
   }
 
   Future<void> _copyProjectId() async {
@@ -230,10 +268,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
             final pendingBudget = hasPendingChange
                 ? constraints.maxHeight * 0.25
                 : 0.0;
+            final status = _buildStatusLine(context, projects);
             final budget = viewerPaneBudgetFor(
               context,
               constraints.maxHeight - pendingBudget,
               footerShare: 0.5,
+              statusHeight:
+                  status?.heightFor(context, constraints.maxWidth) ?? 0,
             );
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -244,7 +285,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 ),
                 ViewerPaneRegion(
                   maxHeight: budget.status,
-                  child: _buildStatusLine(context, projects),
+                  child: status ?? const SizedBox.shrink(),
                 ),
                 if (hasPendingChange)
                   ViewerPaneRegion(
@@ -473,11 +514,14 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     );
   }
 
-  Widget _buildStatusLine(BuildContext context, ProjectController projects) {
+  ViewerStatusLine? _buildStatusLine(
+    BuildContext context,
+    ProjectController projects,
+  ) {
     final blocking = widget.model.startupError ?? projects.firstLoadError;
     if (blocking != null && !projects.hasConfirmedData) {
       // The failure view below carries the actionable message on its own.
-      return const SizedBox.shrink();
+      return null;
     }
     final segments = <String>[
       if (projects.isLoading && !projects.hasConfirmedData)
@@ -496,10 +540,12 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     return ViewerStatusLine(
       text: segments.join('  |  '),
       detail: failure != null
-          ? 'Refresh failed: ${failure.message} The rows above are the last '
+          ? 'Refresh failed: ${failure.message} The rows below are the last '
                 'confirmed data.'
-          : projects.notice,
-      warning: failure != null,
+          : projects.pageFailure != null
+          ? 'Could not load rows: ${projects.pageFailure!.message} Press F5 to refresh.'
+          : projects.notice ?? projects.unplacedLabel,
+      warning: failure != null || projects.pageFailure != null,
     );
   }
 
@@ -519,6 +565,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     final itemCount = projects.totalCount;
     final duplicates = _duplicateProjectNames(projects);
     return Focus(
+      skipTraversal: true,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent) return KeyEventResult.ignored;
         final index = handles.list.selectedIndex;
@@ -545,6 +592,8 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       },
       child: AccessibleVirtualList(
         controller: handles.list,
+        selectionSource: _ProjectSelectionSource(projects),
+        onRowRequested: (index) => unawaited(_ensureRow(index)),
         itemCount: itemCount,
         motionKey: ListMotionKey(
           scope: 'projects',
@@ -636,6 +685,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
       ],
     );
     if (!mounted) return;
+    _handles.list.focusRegion();
     if (action != null) await _runProjectAction(item, index, action);
   }
 
@@ -710,10 +760,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
 
   /// Puts the list highlight back where the model still is after a refusal.
   void _restoreRowSelection(int refusedIndex) {
-    final current = widget.model.projectList.selectedIndex;
-    if (current != null) {
-      _handles.list.refuseMove(refusedIndex, current);
-    }
+    _handles.list.refuseMove(
+      refusedIndex,
+      widget.model.projectList.selectedIndex,
+    );
   }
 
   void _onRowActivated(int index) {

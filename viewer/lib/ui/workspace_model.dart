@@ -92,6 +92,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
          announcements: announcements,
          dataRoot: environment.dataRoot,
        ) {
+    projectList.isSelectionPinned = (_) => editor.isEditing;
     projectList.addListener(_onProjectListChanged);
     editor.addListener(_onEditorChanged);
     clipboard.addListener(_notify);
@@ -286,15 +287,15 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   }
 
   /// F5 and the Refresh button: every visible scope reads again.
-  Future<void> refresh() async {
+  Future<void> refresh({bool userInitiated = true}) async {
     if (_startupError != null) {
       await retryStartup();
       return;
     }
     final tasks = _tasks;
     final reads = <Future<void>>[
-      projectList.refresh(),
-      if (tasks != null) tasks.refresh(),
+      projectList.refresh(userInitiated: userInitiated),
+      if (tasks != null) tasks.refresh(userInitiated: userInitiated),
     ];
     await Future.wait<void>(reads);
     await _detail?.reload();
@@ -308,7 +309,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     if (!isStaleAt(DateTime.now())) {
       return;
     }
-    await refresh();
+    await refresh(userInitiated: false);
   }
 
   @override
@@ -358,12 +359,11 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   }
 
   /// Makes the page that owns [index] available for a virtual jump.
-  Future<void> ensureProjectRow(int index) => projectList.ensureRow(index);
+  Future<RowLoad> ensureProjectRow(int index) => projectList.ensureRow(index);
 
   /// Makes the page that owns [index] available for a virtual jump.
-  Future<void> ensureTaskRow(int index) async {
-    await _tasks?.ensureRow(index);
-  }
+  Future<RowLoad> ensureTaskRow(int index) =>
+      _tasks?.ensureRow(index) ?? Future.value(const RowLoad.superseded());
 
   /// Activates one details tab; History loads its first page on first use.
   void showTab(TaskDetailTab tab) => _detail?.setTab(tab);
@@ -453,9 +453,9 @@ class ViewerWorkspaceModel extends ChangeNotifier {
   }
 
   /// Re-reads what a confirmed write changed: the task and its list row.
-  Future<void> noteConfirmedRead() async {
+  Future<void> noteConfirmedRead({int? savedTaskId}) async {
     final detail = _detail;
-    await _tasks?.refresh();
+    await _tasks?.refresh(savedId: savedTaskId);
     await detail?.reload();
   }
 
@@ -639,6 +639,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
       reader: readers.detail,
     );
     _tasks = tasks;
+    tasks.isSelectionPinned = (id) => editor.isEditing && editor.base?.id == id;
     _detail = detail;
     tasks.addListener(_onTasksChanged);
     detail.addListener(_onDetailChanged);

@@ -98,6 +98,15 @@ class FakeTaskReader implements CancellableTaskReader {
   final List<String> cancelledScopes = <String>[];
   final List<Completer<TaskPage>> manual = <Completer<TaskPage>>[];
   bool manualMode = false;
+  Completer<void>? _cancel;
+  Future<TaskPage> _cancellable(Future<TaskPage> read) {
+    final cancel = Completer<void>();
+    _cancel = cancel;
+    return Future.any([
+      read,
+      cancel.future.then<TaskPage>((_) => throw const ViewerCancelledFailure()),
+    ]);
+  }
 
   TaskQuery get lastRequest => requests.last;
 
@@ -107,17 +116,20 @@ class FakeTaskReader implements CancellableTaskReader {
     if (manualMode) {
       final completer = Completer<TaskPage>();
       manual.add(completer);
-      return completer.future;
+      return _cancellable(completer.future);
     }
     final handler = responder;
     if (handler == null) {
       throw StateError('no responder and not in manual mode');
     }
-    return handler(projectId, query);
+    return _cancellable(handler(projectId, query));
   }
 
   @override
-  void cancelScope(String scopeKey) => cancelledScopes.add(scopeKey);
+  void cancelScope(String scopeKey) {
+    cancelledScopes.add(scopeKey);
+    if (!(_cancel?.isCompleted ?? true)) _cancel!.complete();
+  }
 }
 
 /// Answers from a fixed catalog, failing the first [staleFailures] reads with
@@ -813,7 +825,7 @@ void main() {
       expect(controller.selectedTaskId, isNull);
     });
 
-    test('a reload drops a selection that left the result set', () async {
+    test('a refresh retains detail for a task proven absent', () async {
       var total = 10;
       final reader = FakeTaskReader(
         (projectId, query) async =>
@@ -827,7 +839,8 @@ void main() {
       total = 2;
       await controller.reload();
 
-      expect(controller.selectedTaskId, isNull);
+      expect(controller.selectedTaskId, 6);
+      expect(controller.selection, isA<Retained<int>>());
       expect(controller.rowCount, 2);
     });
 
@@ -846,12 +859,12 @@ void main() {
       expect(
         controller.selectedTaskId,
         251,
-        reason: 'only page zero is authoritative; dropping it would be a guess',
+        reason: 'refresh starts at the selection page',
       );
       expect(
         controller.selectedIndex,
-        isNull,
-        reason: 'the row is not materialized again until it is requested',
+        250,
+        reason: 'refresh atomically publishes the selection page',
       );
     });
   });
@@ -907,10 +920,7 @@ void main() {
 
       expect(controller.itemAt(0)?.id, 1, reason: 'the confirmed row stays');
       expect(controller.loadedRowCount, 100);
-      expect(
-        controller.refreshFailure?.message,
-        contains('database is locked'),
-      );
+      expect(controller.pageFailure?.message, contains('database is locked'));
       expect(controller.firstLoadError, isNull);
       expect(controller.isRowReady(150), isFalse);
       expect(controller.isLoading, isFalse);
@@ -992,8 +1002,8 @@ void main() {
       expect(controller.hasRows, isTrue);
       expect(
         controller.cachedPageCount,
-        0,
-        reason: 'every cached page is dropped for the retry',
+        1,
+        reason: 'the confirmed result is retained atomically on failure',
       );
       expect(
         controller.selectedTaskId,

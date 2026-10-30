@@ -23,6 +23,25 @@ import 'viewer_format.dart';
 import 'workspace_model.dart';
 
 /// Tasks region bound to one workspace model.
+final class _TaskSelectionSource implements VirtualListSelectionSource {
+  const _TaskSelectionSource(this.model);
+  final ViewerWorkspaceModel model;
+  @override
+  Key? get selectedKey {
+    final tasks = model.tasks;
+    return tasks?.selectedTaskId == null
+        ? null
+        : ValueKey<String>(
+            viewerCanonicalTaskId(tasks!.selectedTaskId!, tasks.projectKey),
+          );
+  }
+
+  @override
+  int? get selectedIndex => model.tasks?.selectedIndex;
+  @override
+  String? get unplacedLabel => model.tasks?.unplacedLabel;
+}
+
 class ViewerTasksPane extends StatefulWidget {
   const ViewerTasksPane({super.key, required this.api, required this.model});
 
@@ -64,6 +83,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   };
 
   TaskController? _bound;
+  int _announcementSerial = 0;
   bool _filtersVisible = false;
 
   TaskController? get _tasks => widget.model.tasks;
@@ -82,6 +102,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   void dispose() {
     widget.api.registerScopeCommands(CommandScope.tasks, null);
     widget.model.removeListener(_syncExternalControls);
+    _bound?.listFocus = null;
     _search.dispose();
     _labels.dispose();
     _scopeOpenFocus.dispose();
@@ -108,7 +129,22 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
   void _syncExternalControls() {
     final tasks = _tasks;
     if (!identical(tasks, _bound)) {
+      _bound?.listFocus = null;
       _bound = tasks;
+      _announcementSerial = 0;
+      if (tasks != null) {
+        tasks.listFocus = () => ListFocus<int>(
+          ownsFocus: _handles.list.hasListFocus,
+          index: _handles.list.focusedRowIndex,
+          key: int.tryParse(
+            (_handles.list.focusedRowKey is ValueKey<String>
+                    ? (_handles.list.focusedRowKey as ValueKey<String>).value
+                    : '')
+                .split('-')
+                .last,
+          ),
+        );
+      }
       if (tasks == null) {
         _search.clear();
         _labels.clear();
@@ -120,6 +156,12 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     }
     if (tasks == null) {
       return;
+    }
+    if (tasks.announcementSerial != _announcementSerial) {
+      _announcementSerial = tasks.announcementSerial;
+      if (tasks.announcement case final text?) {
+        widget.api.announce(text, dynamic: true);
+      }
     }
     final query = tasks.query;
     if (query != _search.text && !_handles.filterFocus.hasFocus) {
@@ -301,11 +343,21 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
 
   /// Fetches the page that owns [index] and settles the pending row focus.
   Future<void> _ensureRow(int index) async {
-    await widget.model.ensureTaskRow(index);
-    if (!mounted) {
-      return;
+    final result = await widget.model.ensureTaskRow(index);
+    if (!mounted) return;
+    switch (result.state) {
+      case RowLoadState.ready:
+        _handles.list.retryPending();
+      case RowLoadState.failed:
+        if (_handles.list.failPending(index)) {
+          widget.api.announce(
+            'Could not load row ${index + 1}: ${result.failure!.message}',
+            dynamic: true,
+          );
+        }
+      case RowLoadState.superseded:
+        _handles.list.failPending(index);
     }
-    _handles.list.retryPending();
   }
 
   void _onRowSelected(int index) {
@@ -328,10 +380,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
 
   /// Puts the list highlight back where the model still is after a refusal.
   void _restoreRowSelection(int refusedIndex) {
-    final current = widget.model.tasks?.selectedIndex;
-    if (current != null) {
-      _handles.list.refuseMove(refusedIndex, current);
-    }
+    _handles.list.refuseMove(refusedIndex, widget.model.tasks?.selectedIndex);
   }
 
   void _onRowActivated(int index) {
@@ -380,7 +429,13 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         }
         return LayoutBuilder(
           builder: (context, constraints) {
-            final budget = viewerPaneBudgetFor(context, constraints.maxHeight);
+            final status = _buildStatusLine(context, tasks);
+            final budget = viewerPaneBudgetFor(
+              context,
+              constraints.maxHeight,
+              statusHeight:
+                  status?.heightFor(context, constraints.maxWidth) ?? 0,
+            );
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
@@ -401,7 +456,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
                 ),
                 ViewerPaneRegion(
                   maxHeight: budget.status,
-                  child: _buildStatusLine(context, tasks),
+                  child: status ?? const SizedBox.shrink(),
                 ),
                 Expanded(child: _buildList(context, tasks)),
               ],
@@ -846,11 +901,14 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
 
   // --------------------------------------------------------------- status
 
-  Widget _buildStatusLine(BuildContext context, TaskController tasks) {
+  ViewerStatusLine? _buildStatusLine(
+    BuildContext context,
+    TaskController tasks,
+  ) {
     final failure = tasks.firstLoadError;
     if (failure != null && !tasks.hasConfirmedData) {
       // The failure view below carries the actionable message on its own.
-      return const SizedBox.shrink();
+      return null;
     }
     final sampled = tasks.sampledAtMs;
     final refreshFailure = tasks.refreshFailure;
@@ -868,10 +926,12 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         if (sampled != null) 'sampled ${viewerTimestamp(context, sampled)}',
       ].join('  |  '),
       detail: refreshFailure != null
-          ? 'Refresh failed: ${refreshFailure.message} The rows above are the '
+          ? 'Refresh failed: ${refreshFailure.message} The rows below are the '
                 'last confirmed data.'
-          : tasks.notice,
-      warning: refreshFailure != null,
+          : tasks.pageFailure != null
+          ? 'Could not load rows: ${tasks.pageFailure!.message} Press F5 to refresh.'
+          : tasks.notice ?? tasks.unplacedLabel,
+      warning: refreshFailure != null || tasks.pageFailure != null,
     );
   }
 
@@ -893,6 +953,7 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     final projectTotal = widget.model.selectedProject?.stats?.total;
     final projectEmpty = projectTotal == 0;
     return Focus(
+      skipTraversal: true,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent || !handles.list.hasListFocus) {
           return KeyEventResult.ignored;
@@ -928,6 +989,8 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
       },
       child: AccessibleVirtualList(
         controller: handles.list,
+        selectionSource: _TaskSelectionSource(widget.model),
+        onRowRequested: (index) => unawaited(_ensureRow(index)),
         itemCount: itemCount,
         motionKey: ListMotionKey(
           scope: tasks.projectId,

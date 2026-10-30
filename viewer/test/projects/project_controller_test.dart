@@ -82,6 +82,17 @@ class RecordingReader implements CancellableProjectReader {
 
   /// When true, each call waits for the test to complete a completer.
   bool manualMode = false;
+  Completer<void>? _cancel;
+  Future<ProjectPage> _cancellable(Future<ProjectPage> read) {
+    final cancel = Completer<void>();
+    _cancel = cancel;
+    return Future.any([
+      read,
+      cancel.future.then<ProjectPage>(
+        (_) => throw const ViewerCancelledFailure(),
+      ),
+    ]);
+  }
 
   int get callCount => requests.length;
 
@@ -93,17 +104,20 @@ class RecordingReader implements CancellableProjectReader {
     if (manualMode) {
       final completer = Completer<ProjectPage>();
       manual.add(completer);
-      return completer.future;
+      return _cancellable(completer.future);
     }
     final handler = responder;
     if (handler == null) {
       throw StateError('no responder and not in manual mode');
     }
-    return handler(query);
+    return _cancellable(handler(query));
   }
 
   @override
-  void cancelScope(String scopeKey) => cancelledScopes.add(scopeKey);
+  void cancelScope(String scopeKey) {
+    cancelledScopes.add(scopeKey);
+    if (!(_cancel?.isCompleted ?? true)) _cancel!.complete();
+  }
 }
 
 /// A reader that answers from a fixed catalog, failing the first [staleFailures]
@@ -503,21 +517,25 @@ void main() {
     },
   );
 
-  test('a reload drops the previous selection when it is gone', () async {
-    var total = 10;
-    final reader = RecordingReader(
-      responder: (query) async => syntheticPage(query, total: total),
-    );
-    final controller = ProjectController(reader: reader);
-    addTearDown(controller.dispose);
-    await controller.reload();
-    controller.selectIndex(5);
+  test(
+    'a refresh retains the previous project detail when it is gone',
+    () async {
+      var total = 10;
+      final reader = RecordingReader(
+        responder: (query) async => syntheticPage(query, total: total),
+      );
+      final controller = ProjectController(reader: reader);
+      addTearDown(controller.dispose);
+      await controller.reload();
+      controller.selectIndex(5);
 
-    total = 2;
-    await controller.reload();
-    expect(controller.selectedProjectId, isNull);
-    expect(controller.rowCount, 2);
-  });
+      total = 2;
+      await controller.reload();
+      expect(controller.selectedProjectId, projectItem(5).projectId);
+      expect(controller.selection, isA<Retained<String>>());
+      expect(controller.rowCount, 2);
+    },
+  );
 
   test('a manual refresh keeps a selection that is still present', () async {
     final reader = RecordingReader(

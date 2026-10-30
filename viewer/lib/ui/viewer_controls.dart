@@ -61,6 +61,7 @@ ViewerPaneBudget viewerPaneBudgetFor(
   BuildContext context,
   double height, {
   double footerShare = 0.4,
+  double statusHeight = 0,
 }) {
   if (height <= 0) {
     return const ViewerPaneBudget(header: 0, status: 0, footer: 0);
@@ -70,7 +71,10 @@ ViewerPaneBudget viewerPaneBudgetFor(
   if (available <= 0) {
     return const ViewerPaneBudget(header: 0, status: 0, footer: 0);
   }
-  final status = math.min(viewerStatusReserve(context), available * 0.25);
+  final status = math.min(
+    math.max(viewerStatusReserve(context), statusHeight),
+    available * 0.25,
+  );
   final rest = available - status;
   return ViewerPaneBudget(
     header: rest * (1 - footerShare),
@@ -79,9 +83,10 @@ ViewerPaneBudget viewerPaneBudgetFor(
   );
 }
 
-/// Reserve for the pane's own status line: two wrapped lines of small text
-/// plus their padding. The cap only has to be generous, because the region
-/// scrolls when the real line is taller than the reserve.
+/// Smallest reserve for the pane's own status line: two wrapped lines of small
+/// text plus their padding. A taller line passes its measured height to
+/// [viewerPaneBudgetFor], and the region scrolls only when the pane cannot give
+/// it that much.
 double viewerStatusReserve(BuildContext context) {
   final theme = Theme.of(context);
   final scaler = MediaQuery.textScalerOf(context);
@@ -198,12 +203,36 @@ class ViewerStatusLine extends StatelessWidget {
 
   final bool warning;
 
+  static const EdgeInsets _padding = EdgeInsets.fromLTRB(12, 4, 12, 4);
+
+  /// Height of this line at [width], count and detail both wrapped.
+  double heightFor(BuildContext context, double width) {
+    final style = DefaultTextStyle.of(
+      context,
+    ).style.merge(Theme.of(context).textTheme.bodySmall);
+    double measure(String value) {
+      final painter = TextPainter(
+        text: TextSpan(text: value, style: style),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+      )..layout(maxWidth: math.max(0, width - _padding.horizontal));
+      final height = painter.height;
+      painter.dispose();
+      return height;
+    }
+
+    final detailText = detail;
+    return _padding.vertical +
+        measure(text) +
+        (detailText == null ? 0 : measure(detailText));
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final detailText = detail;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      padding: _padding,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
