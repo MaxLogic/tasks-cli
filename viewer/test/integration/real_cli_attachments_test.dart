@@ -51,7 +51,8 @@ void main() {
           clipPlayer: support.RecordingClipPlayer(),
         );
         addTearDown(announcements.dispose);
-        await tester.pumpWidget(
+        await support.pumpIoWidget(
+          tester,
           MaterialApp(
             home: ViewerWorkspaceHost(
               environment: h.environment,
@@ -248,7 +249,8 @@ void main() {
       final announcements = AnnouncementController(
         clipPlayer: support.RecordingClipPlayer(),
       );
-      await tester.pumpWidget(
+      await support.pumpIoWidget(
+        tester,
         MaterialApp(
           home: ViewerWorkspaceHost(
             environment: h.environment,

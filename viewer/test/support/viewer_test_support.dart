@@ -516,6 +516,13 @@ class RealViewerHarness {
   String? get liveText => announcements.liveRegionText;
 }
 
+/// Mounts widgets whose startup reads will be awaited in [WidgetTester.runAsync].
+/// Keep startup in that same real-async zone: a serialized replacement read must
+/// be able to drain its cancelled predecessor without requiring a test pump.
+Future<void> pumpIoWidget(WidgetTester tester, Widget widget) async {
+  await tester.runAsync(() => tester.pumpWidget(widget));
+}
+
 /// Pumps the real three-pane workspace over [FakeWorkspaceReads].
 ///
 /// The default fixture is two projects with three tasks each; pass [reads] to

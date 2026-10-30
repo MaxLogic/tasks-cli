@@ -130,7 +130,8 @@ void main() {
             final announcements = AnnouncementController(
               clipPlayer: support.RecordingClipPlayer(),
             );
-            await tester.pumpWidget(
+            await support.pumpIoWidget(
+              tester,
               MaterialApp(
                 home: ViewerWorkspaceHost(
                   environment: fixture.environment,
