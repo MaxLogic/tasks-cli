@@ -240,6 +240,8 @@ fn create_selection_schema(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+pub type TaskUpdateResult = (u64, TaskStatus, u64, Option<u64>);
+
 #[derive(Debug)]
 pub struct Store {
     pub project_id: Uuid,
@@ -3102,6 +3104,29 @@ impl Store {
         expect_version: u64,
         changes: TaskUpdate,
     ) -> Result<(u64, TaskStatus, u64, Option<u64>), AppError> {
+        self.update_task_read(id, expect_version, changes, |_, _| Ok(()))
+            .map(|(result, ())| result)
+    }
+
+    pub fn update_task_with_state(
+        &mut self,
+        id: u64,
+        expect_version: u64,
+        changes: TaskUpdate,
+    ) -> Result<(TaskUpdateResult, Option<crate::viewer::TaskWriteState>), AppError> {
+        let project = self.project_id.to_string();
+        self.update_task_read(id, expect_version, changes, |conn, id| {
+            crate::viewer::task_write_state(conn, &project, id)
+        })
+    }
+
+    fn update_task_read<R>(
+        &mut self,
+        id: u64,
+        expect_version: u64,
+        changes: TaskUpdate,
+        read: impl FnOnce(&Connection, u64) -> Result<R, AppError>,
+    ) -> Result<(TaskUpdateResult, R), AppError> {
         let project_id = self.project_id;
         let key = self.project_key.clone();
         let rid = |id: u64| render_keyed_task_id(key.as_deref(), id);
@@ -3242,7 +3267,9 @@ impl Store {
                 (_, true) => current_deps.is_empty(),
             };
         if no_change {
-            return Ok((id, next_status_value, cur_version as u64, None));
+            let state = read(&tx, id)?;
+            tx.commit()?;
+            return Ok(((id, next_status_value, cur_version as u64, None), state));
         }
         if let Some(replacement) = requested_deps.as_deref() {
             Self::validate_task_dependencies_exist(
@@ -3321,12 +3348,16 @@ impl Store {
             |r| r.get::<_, i64>(0),
         )?;
         maybe_precommit_fail("update")?;
+        let state = read(&tx, id)?;
         tx.commit()?;
         Ok((
-            id,
-            next_status_value,
-            new_version as u64,
-            Some(event_id as u64),
+            (
+                id,
+                next_status_value,
+                new_version as u64,
+                Some(event_id as u64),
+            ),
+            state,
         ))
     }
 

@@ -7,6 +7,7 @@
 /// no-op rather than a spurious write.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'models.dart';
 
 /// The six editable fields, in the documented form order.
@@ -413,6 +414,7 @@ final class ViewerUpdateResult {
     required this.status,
     required this.version,
     required this.eventId,
+    this.taskState,
   });
 
   factory ViewerUpdateResult.fromJson(Map<String, Object?> json) {
@@ -453,6 +455,7 @@ final class ViewerUpdateResult {
       status: status,
       version: version,
       eventId: eventId,
+      taskState: TaskWriteState.parse(json['task_state'], id, version, status),
     );
   }
 
@@ -466,6 +469,62 @@ final class ViewerUpdateResult {
 
   /// New history event, or null when the store created none (a no-op).
   final int? eventId;
+  final TaskWriteState? taskState;
 
   bool get isNoop => eventId == null;
+}
+
+/// Optional committed state. A damaged optimization never obscures a valid
+/// mutation acknowledgement: the caller falls back to authoritative reads.
+final class TaskWriteState {
+  const TaskWriteState(this.detail, this.row, {required this.hasDependents});
+  final TaskDetail detail;
+  final TaskItem row;
+  final bool hasDependents;
+
+  static TaskWriteState? parse(
+    Object? raw,
+    int id,
+    int version,
+    String status,
+  ) {
+    if (raw is! Map<String, Object?>) return null;
+    final detailJson = raw['detail'], rowJson = raw['row'];
+    final hasDependents = raw['has_dependents'];
+    if (detailJson is! Map<String, Object?> ||
+        rowJson is! Map<String, Object?> ||
+        hasDependents is! bool ||
+        detailJson['attachments'] is! List ||
+        !detailJson.containsKey('project_key') ||
+        rowJson['attachment_count'] is! int) {
+      return null;
+    }
+    try {
+      final detail = TaskDetail.fromJson(detailJson);
+      final row = TaskItem.fromJson(rowJson, path: 'task_state.row');
+      if (detail.id != id ||
+          row.id != id ||
+          detail.version != version ||
+          row.version != version ||
+          detail.status != status ||
+          row.status != status ||
+          detail.title != row.title ||
+          detail.priority != row.priority ||
+          detail.createdMs != row.createdMs ||
+          detail.updatedMs != row.updatedMs ||
+          detail.displayId != row.displayId ||
+          !listEquals(detail.labels, row.labels) ||
+          detail.deps.length != row.dependencyCount ||
+          detail.attachments.length != row.attachmentCount ||
+          row.waitingDependencyCount < 0 ||
+          row.waitingDependencyCount > row.dependencyCount ||
+          row.verifyingDependencyCount < 0 ||
+          row.verifyingDependencyCount > row.waitingDependencyCount) {
+        return null;
+      }
+      return TaskWriteState(detail, row, hasDependents: hasDependents);
+    } on ViewerFailure {
+      return null;
+    }
+  }
 }

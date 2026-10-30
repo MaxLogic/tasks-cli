@@ -231,15 +231,20 @@ class TaskDetailController extends ChangeNotifier {
   void applyAttachmentWrite(
     TaskDetail updated, {
     required bool historyVisible,
-  }) {
+  }) => applyConfirmedWrite(updated, historyVisible: historyVisible);
+
+  void applyConfirmedWrite(TaskDetail updated, {required bool historyVisible}) {
     if (_disposed ||
         _taskId != updated.id ||
         (_detail?.version ?? 0) > updated.version) {
       return;
     }
     _generation++;
+    _debounceTimer?.cancel();
     _cancelInFlight();
+    final bodyChanged = _detail?.body != updated.body;
     _detail = updated;
+    if (bodyChanged) _recomputeMatches();
     _loading = false;
     _loadError = null;
     // A paste can complete while History is visible from another region.

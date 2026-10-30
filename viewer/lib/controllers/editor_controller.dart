@@ -153,6 +153,7 @@ final class EditorSaveResult {
     this.version,
     this.eventId,
     this.conflict,
+    this.writeReply,
   });
 
   final EditorSaveOutcome outcome;
@@ -168,6 +169,7 @@ final class EditorSaveResult {
 
   /// Open conflict, for [EditorSaveOutcome.conflict].
   final EditorConflict? conflict;
+  final ViewerUpdateResult? writeReply;
 
   bool get isSuccess =>
       outcome == EditorSaveOutcome.saved ||
@@ -1072,6 +1074,7 @@ class ViewerEditorController extends ChangeNotifier {
         message: statusText(result),
         version: result.version,
         eventId: result.eventId,
+        writeReply: result,
       );
     } on ViewerCancelledFailure {
       _saving = false;

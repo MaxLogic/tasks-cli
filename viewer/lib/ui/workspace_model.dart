@@ -459,18 +459,53 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     await detail?.reload();
   }
 
+  Future<void> applyTaskWriteReply(
+    ViewerUpdateResult? reply,
+    TaskDetail? base,
+    String? projectId, {
+    int? savedTaskId,
+  }) async {
+    if (selectedProjectId != projectId) return;
+    final state = reply?.taskState;
+    if (state == null ||
+        base == null ||
+        base.id != reply?.id ||
+        reply!.version < base.version) {
+      await noteConfirmedRead(savedTaskId: savedTaskId);
+      return;
+    }
+    final detail = _detail;
+    final current = detail?.detail;
+    // Related metadata can advance without changing this task's version.
+    // An equal-version read already confirmed this commit after it occurred.
+    final confirmed =
+        current != null &&
+            current.id == state.detail.id &&
+            current.version >= state.detail.version
+        ? current
+        : state.detail;
+    detail?.applyConfirmedWrite(
+      confirmed,
+      historyVisible: detail.tab == TaskDetailTab.history,
+    );
+    await _tasks?.refresh(savedId: savedTaskId);
+  }
+
   /// F4 from anywhere in the window; the pane owns focus and speech.
   Future<void> beginEditTask() async {
     await editorHost?.beginEdit();
   }
 
   /// Ctrl+D from anywhere in the window.
-  Future<void> markDoneTask() async {
-    await editorHost?.markDone();
+  Future<void> markDoneTask({bool announceConflictReturn = true}) async {
+    await editorHost?.markDone(announceConflictReturn: announceConflictReturn);
   }
 
   /// Context-menu status changes use the editor's versioned save workflow.
-  Future<void> changeTaskStatus(String status) async {
+  Future<void> changeTaskStatus(
+    String status, {
+    bool announceConflictReturn = true,
+  }) async {
     if (!editor.canWrite || editor.isSaving || editorHost == null) return;
     final original = editor.base;
     final projectId = selectedProjectId;
@@ -483,7 +518,7 @@ class ViewerWorkspaceModel extends ChangeNotifier {
     }
     editor.beginEdit();
     editor.setField(EditorField.status, status);
-    await editorHost?.save();
+    await editorHost?.save(announceConflictReturn: announceConflictReturn);
   }
 
   /// Ctrl+S from anywhere in the window; a no-op without an open editor.

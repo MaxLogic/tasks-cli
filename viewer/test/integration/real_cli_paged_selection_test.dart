@@ -4,6 +4,8 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tasks_viewer/controllers/task_controller.dart';
+import 'package:tasks_viewer/data/editor_models.dart';
 import 'package:tasks_viewer/data/models.dart';
 import 'package:tasks_viewer/ui/app_shell.dart';
 import 'package:tasks_viewer/ui/real_workspace.dart';
@@ -13,7 +15,7 @@ import 'real_cli_attachment_keyboard_test.dart' as keyboard;
 
 void main() {
   testWidgets(
-    'real CLI 1000 rows: distant F5, ID reverse and bounded filter',
+    'real CLI 1000 rows: distant F5, ID reverse, bounded filter and save-to-End',
     (tester) async {
       final h = (await tester.runAsync(() async {
         final h = await real.Harness.start();
@@ -114,6 +116,62 @@ void main() {
       await support.pressKey(tester, LogicalKeyboardKey.f2);
       expect(list.focusedRowIndex, isNull);
       expect(model.tasks!.selectedTaskId, 951);
+      // A committed reply refreshes the list token before the next jump.
+      await tester.runAsync(() async {
+        model.tasks!.restoreState(
+          const TaskListState(scope: TaskScope.all, sort: TaskSort.id),
+        );
+        await model.tasks!.reload();
+      });
+      await real.waitFor(tester, () => !model.tasks!.isLoading);
+      list.focusRegion();
+      await tester.pumpAndSettle();
+      await tester.runAsync(() => Future<void>.sync(() => list.goToIndex(150)));
+      await real.waitFor(tester, () => list.focusedRowIndex == 150);
+      // Row selection uses a fake-clock debounce; process waits alone do not
+      // advance it in this real-CLI widget test.
+      await tester.pump(const Duration(milliseconds: 300));
+      await real.waitFor(
+        tester,
+        () => model.detail?.detail?.id == 151 && !model.detail!.isLoading,
+      );
+      before = h.launcher.calls.length;
+      await support.pressKey(tester, LogicalKeyboardKey.f4);
+      await real.waitFor(tester, () => model.editor.isEditing);
+      model.editor.setField(EditorField.title, 'Real CLI saved before End');
+      await tester.runAsync(
+        () => support.pressControl(tester, LogicalKeyboardKey.keyS),
+      );
+      await real.waitFor(
+        tester,
+        () =>
+            !model.editor.isEditing &&
+            !model.tasks!.isLoading &&
+            model.detail?.detail?.title == 'Real CLI saved before End',
+      );
+      expect(
+        h.launcher.calls.skip(before),
+        hasLength(2),
+        reason: 'One update plus one fresh list read; no detail read',
+      );
+      list.focusRegion();
+      await tester.pumpAndSettle();
+      expect(model.tasks!.isRowReady(999), isFalse);
+      before = h.launcher.calls.length;
+      await tester.runAsync(
+        () => support.pressKey(tester, LogicalKeyboardKey.end),
+      );
+      await real.waitFor(
+        tester,
+        () => list.focusedRowIndex == 999 && model.tasks!.selectedIndex == 999,
+      );
+      expect(model.tasks!.selectedTaskId, 1000);
+      expect(model.tasks!.pageFailure, isNull);
+      expect(
+        h.launcher.calls.skip(before).where((args) => args.contains('tasks')),
+        hasLength(1),
+        reason: 'Fresh snapshot needs only the target page',
+      );
       await tester.pumpWidget(const SizedBox());
       await tester.runAsync(() => h.launcher.idle);
     },

@@ -737,28 +737,29 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                     let id = store.resolve_ref(&id)?;
                     let body = body_file.as_deref().map(read_text).transpose()?;
                     let deps = deps.map(|v| store.resolve_ref_list(&v)).transpose()?;
-                    let (id, resulting_status, version, event_id) = store.update_task(
-                        id,
-                        expect_version,
-                        TaskUpdate {
-                            priority,
-                            labels: if clear_labels {
-                                Some(Vec::new())
-                            } else {
-                                labels
-                                    .as_deref()
-                                    .map(tasks_cli::labels::parse)
-                                    .transpose()?
+                    let ((id, resulting_status, version, event_id), task_state) = store
+                        .update_task_with_state(
+                            id,
+                            expect_version,
+                            TaskUpdate {
+                                priority,
+                                labels: if clear_labels {
+                                    Some(Vec::new())
+                                } else {
+                                    labels
+                                        .as_deref()
+                                        .map(tasks_cli::labels::parse)
+                                        .transpose()?
+                                },
+                                title,
+                                body,
+                                status,
+                                deps,
+                                clear_deps,
+                                add_labels: split_labels(add_label.as_deref()),
+                                remove_labels: split_labels(remove_label.as_deref()),
                             },
-                            title,
-                            body,
-                            status,
-                            deps,
-                            clear_deps,
-                            add_labels: split_labels(add_label.as_deref()),
-                            remove_labels: split_labels(remove_label.as_deref()),
-                        },
-                    )?;
+                        )?;
                     keyed_envelope(
                         Some(project_id),
                         store.project_key.as_deref(),
@@ -768,6 +769,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                             status: resulting_status.to_string(),
                             version,
                             event_id,
+                            task_state,
                         },
                         cli.format,
                     );

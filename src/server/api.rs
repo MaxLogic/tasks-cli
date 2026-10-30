@@ -460,14 +460,15 @@ impl Mutation {
                             .collect::<Result<_, _>>()?,
                     );
                 }
-                let (id, status, version, event_id) =
-                    store.update_task(id, v.expect_version, v.changes)?;
+                let ((id, status, version, event_id), task_state) =
+                    store.update_task_with_state(id, v.expect_version, v.changes)?;
                 CommandPayload::Update {
                     id,
                     display_id: store.display_id(id),
                     status: status.to_string(),
                     version,
                     event_id,
+                    task_state,
                 }
             }
             Self::Rules(v) => CommandPayload::RulesSet {

@@ -289,6 +289,15 @@ fn remote_commands_send_only_operation_requests() {
                 "REMOTE_REQUEST_COUNT sample={sample} command={name} requests={count} elapsed_ms={elapsed:.3}"
             );
             assert_eq!(value["schema_version"], 1);
+            if name == "update" {
+                assert_eq!(count, 1, "update returns state in its only signed request");
+                let state = &value["data"]["task_state"];
+                assert_eq!(state["detail"]["title"], "changed");
+                assert_eq!(state["detail"]["version"], 2);
+                assert_eq!(state["row"]["version"], 2);
+                assert_eq!(state["row"]["attachment_count"], 0);
+                assert_eq!(state["has_dependents"], false);
+            }
             if name == "attachment-add" || name == "attachment-detach" {
                 assert_eq!(count, 1, "warm attachment write uses one signed request");
                 let state = &value["data"]["attachment_state"];

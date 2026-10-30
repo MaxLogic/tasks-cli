@@ -606,7 +606,10 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   ///
   /// A clean selected task needs no confirmation; a dirty editor asks first and
   /// keeps the draft until the store confirms (spec.md section 7).
-  Future<EditorSaveResult?> _markDone({bool fromHeader = false}) async {
+  Future<EditorSaveResult?> _markDone({
+    bool fromHeader = false,
+    bool announceConflictReturn = true,
+  }) async {
     final editor = _editor;
     final base = editor.base;
     if (base == null) {
@@ -639,11 +642,16 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           return _runWrite(
             () => editor.markDone(includeDraft: true),
             clipId: 'task_done',
+            announceConflictReturn: announceConflictReturn,
           );
         case MarkDoneDirtyDecision.discardAndMarkDone:
           // Discard sends only the status: the draft survives a failure or a
           // conflict and is cleared once the store confirms.
-          return _runWrite(() => editor.markDone(), clipId: 'task_done');
+          return _runWrite(
+            () => editor.markDone(),
+            clipId: 'task_done',
+            announceConflictReturn: announceConflictReturn,
+          );
         case MarkDoneDirtyDecision.cancel:
         case null:
           return null;
@@ -654,6 +662,7 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     final result = await _runWrite(
       () => editor.markDone(),
       clipId: 'task_done',
+      announceConflictReturn: announceConflictReturn,
     );
     if (restoreHeaderFocus && result.outcome == EditorSaveOutcome.failed) {
       // The in-flight disabled button loses focus before the CLI answers.
@@ -674,16 +683,21 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
 
   /// Save / Ctrl+S from the form and the shell's fallback action.
   @override
-  Future<EditorSaveResult?> save() async {
+  Future<EditorSaveResult?> save({bool announceConflictReturn = true}) async {
     final editor = _editor;
     if (!editor.isEditing || editor.isSaving) {
       return null;
     }
-    return _runWrite(() => editor.save(), clipId: 'task_saved');
+    return _runWrite(
+      () => editor.save(),
+      clipId: 'task_saved',
+      announceConflictReturn: announceConflictReturn,
+    );
   }
 
   @override
-  Future<EditorSaveResult?> markDone() => _markDone();
+  Future<EditorSaveResult?> markDone({bool announceConflictReturn = true}) =>
+      _markDone(announceConflictReturn: announceConflictReturn);
 
   /// The reconciliation Retry under the form's unknown-outcome banner.
   Future<void> _retryReconciliation() async {
@@ -748,7 +762,10 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   }
 
   @override
-  Future<void> resolveConflict(EditorConflict conflict) async {
+  Future<void> resolveConflict(
+    EditorConflict conflict, {
+    bool announceReturnToEditor = true,
+  }) async {
     final editor = _editor;
     final canonical = conflict.current.canonicalId;
     final decision = await widget.api.showModal<EditorConflictDecision>(
@@ -775,10 +792,12 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
                     (context) => ViewerConflictReviewDialog(conflict: conflict),
                   );
         if (choices == null) {
-          widget.api.announce(
-            'No choices applied. $canonical still conflicts with your draft.',
-            dynamic: true,
-          );
+          if (announceReturnToEditor) {
+            widget.api.announce(
+              'No choices applied. $canonical still conflicts with your draft.',
+              dynamic: true,
+            );
+          }
           return;
         }
         editor.applyConflictReview(choices);
@@ -793,11 +812,13 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
         }
       case EditorConflictDecision.returnToEditor:
       case null:
-        widget.api.announce(
-          '$canonical changed in the store. Resolve the conflict before '
-          'saving; your draft is kept.',
-          dynamic: true,
-        );
+        if (announceReturnToEditor) {
+          widget.api.announce(
+            '$canonical changed in the store. Resolve the conflict before '
+            'saving; your draft is kept.',
+            dynamic: true,
+          );
+        }
     }
   }
 
@@ -884,8 +905,11 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
     Future<EditorSaveResult> Function() write, {
     required String clipId,
     bool refocusEdit = true,
+    bool announceConflictReturn = true,
   }) async {
-    final savedTaskId = _editor.base?.id;
+    final writeBase = _editor.base;
+    final writeProjectId = widget.model.selectedProjectId;
+    final savedTaskId = writeBase?.id;
     final fromList = widget.model.tasks?.listFocus?.call().ownsFocus ?? false;
     _startBusyWatch();
     final result = await write();
@@ -894,6 +918,9 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       clipId: clipId,
       refocusEdit: refocusEdit && !fromList,
       savedTaskId: savedTaskId,
+      writeBase: writeBase,
+      writeProjectId: writeProjectId,
+      announceConflictReturn: announceConflictReturn,
     );
     return result;
   }
@@ -902,8 +929,11 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
   Future<void> _afterWrite(
     EditorSaveResult result, {
     int? savedTaskId,
+    TaskDetail? writeBase,
+    String? writeProjectId,
     required String clipId,
     bool refocusEdit = true,
+    bool announceConflictReturn = true,
   }) async {
     final editor = _editor;
     switch (result.outcome) {
@@ -917,7 +947,12 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
           // temporary restoration to a list row look like a list-origin save.
           await WidgetsBinding.instance.endOfFrame;
         }
-        await widget.model.noteConfirmedRead(savedTaskId: savedTaskId);
+        await widget.model.applyTaskWriteReply(
+          result.writeReply,
+          writeBase,
+          writeProjectId,
+          savedTaskId: savedTaskId,
+        );
       case EditorSaveOutcome.noop:
         widget.api.announce(
           result.message ?? 'No changes needed',
@@ -944,7 +979,10 @@ class _ViewerDetailsPaneState extends State<ViewerDetailsPane>
       case EditorSaveOutcome.conflict:
         final conflict = result.conflict;
         if (conflict != null) {
-          await resolveConflict(conflict);
+          await resolveConflict(
+            conflict,
+            announceReturnToEditor: announceConflictReturn,
+          );
         }
     }
   }

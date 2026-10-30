@@ -1140,7 +1140,19 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
           !await model.selectTaskRow(index)) {
         return;
       }
-      await model.openTaskIndex(index);
+      final statusAction =
+          action == _TaskMenuAction.done ||
+          action == _TaskMenuAction.block ||
+          action == _TaskMenuAction.cancel;
+      final confirmed = model.detail?.detail;
+      final implicitEditor = statusAction && !model.editor.isEditing;
+      final projectId = model.selectedProjectId;
+      if (!statusAction ||
+          confirmed?.id != item.id ||
+          confirmed?.version != item.version ||
+          model.detail!.isLoading) {
+        await model.openTaskIndex(index);
+      }
       if (!mounted ||
           !identical(tasks, model.tasks) ||
           model.detail?.detail?.id != item.id) {
@@ -1160,11 +1172,27 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
         case _TaskMenuAction.edit:
           await model.beginEditTask();
         case _TaskMenuAction.done:
-          await model.markDoneTask();
+          await model.markDoneTask(announceConflictReturn: !implicitEditor);
         case _TaskMenuAction.block:
-          await model.changeTaskStatus('blocked');
+          await model.changeTaskStatus(
+            'blocked',
+            announceConflictReturn: !implicitEditor,
+          );
         case _TaskMenuAction.cancel:
-          await model.changeTaskStatus('cancelled');
+          await model.changeTaskStatus(
+            'cancelled',
+            announceConflictReturn: !implicitEditor,
+          );
+      }
+      if (implicitEditor &&
+          model.selectedProjectId == projectId &&
+          model.editor.base?.id == item.id &&
+          model.editor.conflict != null) {
+        await model.editor.discardDraft();
+        widget.api.announce(
+          '${item.canonicalId} changed in the store. No status change was saved.',
+          dynamic: true,
+        );
       }
     } on Object catch (error) {
       widget.api.announce('Task action failed: $error', dynamic: true);

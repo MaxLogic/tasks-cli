@@ -147,6 +147,20 @@ class ModelStore extends FakeWorkspaceReads {
         return false;
       }
       if (!q.labels.every(t.labels.contains)) return false;
+      final prerequisites = t.deps.map((id) => records[projectId]![id]!);
+      if (q.readiness == TaskReadiness.runnable &&
+          (!['todo', 'in-progress'].contains(t.status) ||
+              t.labels.contains('needs-human') ||
+              prerequisites.any(
+                (p) => !['done', 'to-verify'].contains(p.status),
+              ))) {
+        return false;
+      }
+      if (q.readiness == TaskReadiness.waiting &&
+          (viewerStatusIsTerminal(t.status) ||
+              prerequisites.every((p) => p.status == 'done'))) {
+        return false;
+      }
       final search = modelFold(q.query.trim());
       if (search.isEmpty) return true;
       final match = RegExp(r'^[a-z]+-0*(\d+)$').firstMatch(search);
@@ -235,27 +249,40 @@ class ModelStore extends FakeWorkspaceReads {
     };
   }
 
-  TaskItem row(TaskDetail t) => TaskItem(
-    id: t.id,
-    displayId: t.displayId,
-    title: t.title,
-    status: t.status,
-    priority: t.priority,
-    version: t.version,
-    labels: t.labels,
-    dependencyCount: t.deps.length,
-    waitingDependencyCount: 0,
-    createdMs: t.createdMs,
-    updatedMs: t.updatedMs,
-    attachmentCount: t.attachments.length,
-  );
+  TaskItem row(TaskDetail t, {String? projectId}) {
+    final statuses = projectId == null
+        ? t.dependencySummaries.map((p) => p.status)
+        : t.deps.map((id) => records[projectId]![id]!.status);
+    return TaskItem(
+      id: t.id,
+      displayId: t.displayId,
+      title: t.title,
+      status: t.status,
+      priority: t.priority,
+      version: t.version,
+      labels: t.labels,
+      dependencyCount: t.deps.length,
+      waitingDependencyCount: viewerStatusIsTerminal(t.status)
+          ? 0
+          : statuses.where((s) => s != 'done').length,
+      verifyingDependencyCount: viewerStatusIsTerminal(t.status)
+          ? 0
+          : statuses.where((s) => s == 'to-verify').length,
+      createdMs: t.createdMs,
+      updatedMs: t.updatedMs,
+      attachmentCount: t.attachments.length,
+    );
+  }
+
   @override
   Future<TaskPage> fetchTasks(String projectId, TaskQuery q) async {
     taskRequests.add(q);
     taskProjectIds.add(projectId);
     final items = orderedTasks(projectId, q);
     final token = _token(projectId, q.toJson(), items.length);
-    taskSnapshots[token] = items.map(row).toList();
+    taskSnapshots[token] = items
+        .map((t) => row(t, projectId: projectId))
+        .toList();
     final read = StoreRead(
       step,
       'tasks',
@@ -265,7 +292,11 @@ class ModelStore extends FakeWorkspaceReads {
     );
     await _read(read);
     _validate(q.snapshot, token, read);
-    final page = items.skip(q.offset).take(q.limit).map(row).toList();
+    final page = items
+        .skip(q.offset)
+        .take(q.limit)
+        .map((t) => row(t, projectId: projectId))
+        .toList();
     return TaskPage(
       protocolVersion: 1,
       items: page,
@@ -348,6 +379,8 @@ class ModelStore extends FakeWorkspaceReads {
 class ModelWriter extends FakeTaskWriter {
   ModelWriter(this.store);
   final ModelStore store;
+  bool includeTaskState = false;
+  Object? Function(Object?)? taskStateTransform;
   @override
   Future<ViewerUpdateResult> updateTask(
     String projectId,
@@ -368,12 +401,34 @@ class ModelWriter extends FakeTaskWriter {
     json['updated_ms'] = old.updatedMs + 1;
     store.records[projectId]![request.id] = TaskDetail.fromJson(json);
     store.version++;
-    return ViewerUpdateResult(
-      id: request.id,
-      status: store.records[projectId]![request.id]!.status,
-      version: old.version + 1,
-      eventId: store.version,
-    );
+    final detail = store.records[projectId]![request.id]!;
+    final row = store.row(detail, projectId: projectId);
+    final reply = <String, Object?>{
+      'command': 'viewer_update',
+      'protocol_version': 1,
+      'id': request.id,
+      'status': detail.status,
+      'version': detail.version,
+      'event_id': store.version,
+      if (includeTaskState)
+        'task_state': {
+          'detail': detailJson(detail)..['attachments'] = <Object?>[],
+          'row': {
+            ...detailJson(detail),
+            'dependency_count': row.dependencyCount,
+            'waiting_dependency_count': row.waitingDependencyCount,
+            'verifying_dependency_count': row.verifyingDependencyCount,
+            'attachment_count': row.attachmentCount,
+          },
+          'has_dependents': store.records[projectId]!.values.any(
+            (t) => t.deps.contains(request.id),
+          ),
+        },
+    };
+    if (taskStateTransform != null) {
+      reply['task_state'] = taskStateTransform!(reply['task_state']);
+    }
+    return ViewerUpdateResult.fromJson(reply);
   }
 }
 

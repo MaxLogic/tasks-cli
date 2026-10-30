@@ -149,6 +149,8 @@ pub enum CommandPayload {
         status: String,
         version: u64,
         event_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_state: Option<crate::viewer::TaskWriteState>,
     },
     History {
         id: u64,

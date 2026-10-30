@@ -327,8 +327,8 @@ class Run {
     // too before the next operation assumes a current editor version.
     await d.start(d.h.model.refresh(userInitiated: false));
     if (tasks.selectedTaskId == null) await d.select(ViewerRegion.tasks, 0);
-    // Other sequences write to the store. A stale token would cancel the next
-    // jump by design, so each sequence starts from a current result.
+    // Other sequences write to the store. Start each independent sequence
+    // from a current result; staleJump exercises navigation recovery itself.
     if (projects) await refreshList();
   }
 
@@ -886,6 +886,32 @@ Future<void> dirtyRefusal(Run r) async {
 /// A failed post-save read must not lose the saved origin, however the user
 /// recovers, until they choose another task.
 Future<void> savedRecovery(Run r) async {
+  // Every confirmed save refreshes the list and retires an old warning.
+  await r.resetFilters();
+  final d = r.d, tasks = d.h.model.tasks!;
+  tasks.setSort(TaskSort.id);
+  await d.settle();
+  await d.select(ViewerRegion.tasks, 0);
+  await pressKey(r.tester, LogicalKeyboardKey.f4);
+  await d.settle();
+  d.h.model.editor.setField(
+    EditorField.title,
+    'Warning recovered ${d.store.version}',
+  );
+  d.store.failure = (read) => read.scope == 'tasks' ? scripted : null;
+  await d.start(tasks.refresh(userInitiated: false));
+  expect(tasks.refreshFailure, isNotNull);
+  d.store.failure = null;
+  d.store.writer.includeTaskState = true;
+  d.store.reads.clear();
+  d.store.detailRequests.clear();
+  await pressControl(r.tester, LogicalKeyboardKey.keyS);
+  await d.settle();
+  d.store.writer.includeTaskState = false;
+  expect(tasks.refreshFailure, isNull);
+  expect(d.store.reads.where((read) => read.scope == 'tasks'), hasLength(1));
+  expect(d.store.detailRequests, isEmpty);
+  r.count('saved:warningCleared');
   final modes = [
     if (fullMatrix) ...['retry', 'filter'],
     'reverse',
@@ -912,8 +938,10 @@ Future<void> savedSequence(Run r, String mode, {required bool focused}) async {
   await d.settle();
   d.h.model.editor.setField(EditorField.status, 'done');
   store.failure = (read) => read.scope == 'tasks' ? scripted : null;
+  store.writer.includeTaskState = true;
   await pressControl(tester, LogicalKeyboardKey.keyS);
   await d.settle();
+  store.writer.includeTaskState = false;
   expect(store.records[tasks.projectId]![id]!.status, 'done');
   expect(tasks.refreshFailure, isNotNull);
   expect(tasks.selectedTaskId, id);
@@ -1381,6 +1409,14 @@ void main() {
                 expect(d.store.reads, isNotEmpty);
                 expectJob(d, projects, old);
               case Op.save:
+                // Alternate an unchanged-position save and a moving,
+                // filter-removing save through the real editor workflow.
+                final removes = effective[Op.save]!.isOdd;
+                tasks.setSort(removes ? TaskSort.updated : TaskSort.id);
+                await d.settle();
+                d.store.writer.includeTaskState = true;
+                final findText = d.h.model.detail!.detail!.body;
+                d.h.model.detail!.setFindText(findText);
                 await pressKey(tester, LogicalKeyboardKey.f2);
                 await d.settle();
                 await pressKey(tester, LogicalKeyboardKey.f4);
@@ -1391,11 +1427,18 @@ void main() {
                   textFieldWithLabel('Title (Alt+T)'),
                   'Generated $seed step $step',
                 );
-                if (step.isEven) {
+                d.h.model.editor.setField(
+                  EditorField.body,
+                  // Other generated scenarios use body as a match-all query.
+                  // Keep that token while replacing the full old Find text.
+                  'Committed body $seed/$step',
+                );
+                if (removes) {
                   d.h.model.editor.setField(EditorField.status, 'done');
                 }
                 final taskOld = before(d, false);
                 d.store.reads.clear();
+                d.store.detailRequests.clear();
                 await pressControl(tester, LogicalKeyboardKey.keyS);
                 await d.settle();
                 expect(d.store.writer.requests.length, count + 1);
@@ -1403,10 +1446,44 @@ void main() {
                   d.store.records[tasks.projectId]![id]!.title,
                   'Generated $seed step $step',
                 );
+                expect(d.store.detailRequests, isEmpty);
+                expect(d.h.model.detail!.findText, findText);
+                expect(d.h.model.detail!.matchCount, 0);
+                expect(d.h.model.editor.isEditing, isFalse);
+                expect(d.h.model.editor.isDirty, isFalse);
                 expectJob(d, false, taskOld, savedId: id);
+                d.store.writer.includeTaskState = false;
               case Op.listStatus:
                 await d.focus(ViewerRegion.tasks);
+                // The cached row still owns the write version. A conflicting
+                // implicit action must not leave a hidden editor after Esc.
+                final conflictId = tasks.selectedTaskId!;
+                d.store.mutate(
+                  tasks.projectId,
+                  conflictId,
+                  title: 'External $seed/$step',
+                );
+                final priorWrites = d.store.writer.requests.length;
+                await pressKey(
+                  tester,
+                  d.h.model.editor.base!.status == 'blocked'
+                      ? LogicalKeyboardKey.keyX
+                      : LogicalKeyboardKey.keyB,
+                );
+                await d.settle();
+                expect(find.byType(ViewerConflictDialog), findsOneWidget);
+                await pressKey(tester, LogicalKeyboardKey.escape);
+                await d.settle();
+                expect(d.store.writer.requests.length, priorWrites + 1);
+                expect(d.h.model.editor.isEditing, isFalse);
+                expect(d.h.model.editor.isDirty, isFalse);
+                expect(
+                  d.h.list(ViewerRegion.tasks).focusedRowIndex,
+                  tasks.selectedIndex,
+                );
+                await d.start(d.h.model.refresh(userInitiated: false));
                 final taskOld = before(d, false);
+                d.store.reads.clear();
                 final count = d.store.writer.requests.length;
                 await pressKey(tester, LogicalKeyboardKey.keyD);
                 await d.settle();
@@ -1632,7 +1709,11 @@ void main() {
               'attachment:superseded',
             ],
             if (projectsRun) ...['refusal:located', 'refusal:retained'],
-            if (tasksRun) ...['saved:reverse', 'saved:owed'],
+            if (tasksRun) ...[
+              'saved:reverse',
+              'saved:owed',
+              'saved:warningCleared',
+            ],
             if (fullMatrix) ...[
               'saved:retry',
               'saved:filter',

@@ -219,6 +219,63 @@ pub struct ViewerUpdatePayload {
     pub status: String,
     pub version: u64,
     pub event_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<TaskWriteState>,
+}
+
+/// Optional, bounded post-update state, captured before the write commits.
+#[derive(Debug, Serialize)]
+pub struct TaskWriteState {
+    pub detail: ViewerShowPayload,
+    pub row: TaskItem,
+    pub has_dependents: bool,
+}
+
+pub(crate) fn task_write_state(
+    conn: &Connection,
+    project_id: &str,
+    id: u64,
+) -> Result<Option<TaskWriteState>, AppError> {
+    let project_key = crate::keys::read_key(conn)?;
+    let key = project_key.as_deref();
+    // Large existing rules/dependency text must not turn a valid update into a
+    // failed write merely to supply this optional optimization.
+    // At most 1 MiB of source text, including rules and dependency titles.
+    // Even JSON's worst-case sixfold escaping leaves room in the 16 MiB
+    // remote envelope for the row, metadata and receipt.
+    if show_source_bytes(conn, id)? > 1024 * 1024 {
+        return Ok(None);
+    }
+    let (task, created_ms, updated_ms) = read_task_detail(conn, project_id, id, key)?;
+    let mut statement = conn.prepare(
+        "SELECT id, title, status, priority, version, created_ms, updated_ms FROM tasks WHERE id=?1",
+    )?;
+    let mut rows = statement.query([id])?;
+    let mut row = read_task_item(
+        rows.next()?
+            .ok_or_else(|| AppError::Database("updated task is missing".into()))?,
+        key,
+    )?;
+    drop(rows);
+    drop(statement);
+    populate_task_items(conn, std::slice::from_mut(&mut row))?;
+    row.display_id = render_keyed_task_id(key, id);
+    let has_dependents = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dependencies WHERE depends_on_id=?1)",
+        [id],
+        |row| row.get(0),
+    )?;
+    Ok(Some(TaskWriteState {
+        detail: ViewerShowPayload {
+            protocol_version: PROTOCOL_VERSION,
+            project_key,
+            task,
+            created_ms,
+            updated_ms,
+        },
+        row,
+        has_dependents,
+    }))
 }
 
 /// `viewer info` reports the protocol surface without opening or creating a store.
@@ -2248,6 +2305,15 @@ pub fn show_in_store(store: &Store, raw_id: &str) -> Result<ViewerShowPayload, A
 }
 
 fn preflight_show_budget(conn: &Connection, id: u64) -> Result<(), AppError> {
+    if show_source_bytes(conn, id)? > 4 * 1024 * 1024 {
+        return Err(AppError::ResponseLimit(
+            "viewer show source text exceeds 4 MiB; reduce the task text or rules".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn show_source_bytes(conn: &Connection, id: u64) -> Result<i64, AppError> {
     let bytes: i64 = conn.query_row(
         "SELECT COALESCE((SELECT length(CAST(title AS BLOB))+length(CAST(body AS BLOB)) FROM tasks WHERE id=?1),0)
           + COALESCE((SELECT length(CAST(rules_markdown AS BLOB)) FROM project LIMIT 1),0)
@@ -2255,12 +2321,7 @@ fn preflight_show_budget(conn: &Connection, id: u64) -> Result<(), AppError> {
               (SELECT depends_on_id FROM dependencies WHERE task_id=?1)),0)
           + COALESCE((SELECT SUM(length(CAST(label AS BLOB))) FROM task_labels WHERE task_id=?1),0)",
         [id as i64], |row| row.get(0))?;
-    if bytes > 4 * 1024 * 1024 {
-        return Err(AppError::ResponseLimit(
-            "viewer show source text exceeds 4 MiB; reduce the task text or rules".into(),
-        ));
-    }
-    Ok(())
+    Ok(bytes)
 }
 
 fn read_task_detail(
@@ -2413,8 +2474,8 @@ pub fn update_in_store(store: &mut Store, request: Value) -> Result<ViewerUpdate
             EDITABLE_FIELD_NAMES.join(", ")
         )));
     }
-    let (id, status, version, event_id) =
-        store.update_task(request.id, request.expect_version, request.changes)?;
+    let ((id, status, version, event_id), task_state) =
+        store.update_task_with_state(request.id, request.expect_version, request.changes)?;
     Ok(ViewerUpdatePayload {
         protocol_version: PROTOCOL_VERSION,
         display_id: store.display_id(id),
@@ -2422,6 +2483,7 @@ pub fn update_in_store(store: &mut Store, request: Value) -> Result<ViewerUpdate
         status: status.to_string(),
         version,
         event_id,
+        task_state,
     })
 }
 

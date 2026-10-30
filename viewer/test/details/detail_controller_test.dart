@@ -193,6 +193,50 @@ class FakeDetailReader implements CancellableTaskDetailReader {
 }
 
 void main() {
+  for (final visible in [false, true]) {
+    test(
+      'confirmed write resets history and event state; visible=$visible',
+      () async {
+        var version = 1;
+        final reader = FakeDetailReader(
+          detailResponder: (_, id) async => detailFor(id),
+          historyResponder:
+              (_, taskId, {int? after, required int limit, int? event}) async =>
+                  historyPage([
+                    historyEvent(
+                      version,
+                      taskId: taskId,
+                      resultingVersion: version,
+                    ),
+                  ]),
+        );
+        final controller = buildDetailController(reader);
+        addTearDown(controller.dispose);
+        await controller.openTask(5);
+        controller.setTab(TaskDetailTab.history);
+        await Future<void>.delayed(Duration.zero);
+        await controller.selectEvent(1);
+        expect(controller.eventSnapshot, isNotNull);
+        expect(reader.historyRequests, hasLength(2));
+        if (!visible) controller.setTab(TaskDetailTab.details);
+        version = 2;
+        controller.applyConfirmedWrite(
+          detailFor(5, version: 2),
+          historyVisible: visible,
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.openedEventId, isNull);
+        expect(controller.eventSnapshot, isNull);
+        expect(controller.isEventLoading, isFalse);
+        expect(controller.eventError, isNull);
+        expect(reader.historyRequests, hasLength(visible ? 3 : 2));
+        await controller.ensureHistoryLoaded();
+        expect(controller.historyEvents.single.resultingVersion, 2);
+        expect(reader.historyRequests, hasLength(3));
+      },
+    );
+  }
+
   group('selection', () {
     test('arrow selection waits for the debounce and reads once', () async {
       final reader = FakeDetailReader(
@@ -755,6 +799,38 @@ void main() {
         controller.findPrevious();
         expect(controller.matchIndex, 1);
         expect(controller.findNotice, 'Wrapped to the last match');
+      },
+    );
+
+    test(
+      'L5-6 unchanged-body writes preserve the current Find match',
+      () async {
+        final controller = await openWithBody('alpha alpha alpha alpha');
+        addTearDown(controller.dispose);
+        controller.setFindText('alpha');
+        for (var i = 0; i < 3; i++) {
+          controller.findNext();
+        }
+        final before = controller.detail!;
+        controller.applyAttachmentWrite(
+          before.withAttachmentWrite(
+            version: before.version + 1,
+            updatedMs: before.updatedMs + 1,
+            attachments: before.attachments,
+          ),
+          historyVisible: false,
+        );
+        expect(controller.matchCount, 4);
+        expect(controller.matchIndex, 3);
+        expect(controller.matchStart, 18);
+        controller.applyConfirmedWrite(
+          detailFor(5, body: 'short', version: before.version + 2),
+          historyVisible: false,
+        );
+        expect(controller.matchCount, 0);
+        expect(controller.matchIndex, -1);
+        controller.findNext();
+        expect(controller.matchStart, isNull);
       },
     );
 

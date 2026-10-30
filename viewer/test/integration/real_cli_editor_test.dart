@@ -136,6 +136,9 @@ void main() {
     expect(response['command'], 'viewer_update');
     expect(response['version'], 2);
     expect(response['event_id'], saved.eventId);
+    expect(saved.writeReply?.taskState?.detail.title, editedTitle);
+    expect(saved.writeReply?.taskState?.row.version, 2);
+    expect(saved.writeReply?.taskState?.row.attachmentCount, 0);
 
     await harness.assertSingleUpdate(
       taskId: taskId,

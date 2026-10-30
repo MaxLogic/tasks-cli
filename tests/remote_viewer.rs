@@ -277,6 +277,8 @@ fn receipt_survives_lost_cli_ack_and_replay_precedes_a_later_external_edit() {
     ));
     let replay = ok(run(&f.clients[1], &["viewer", "reconcile", &receipt]));
     assert_eq!(replay["data"]["version"], 2);
+    assert_eq!(replay["data"]["task_state"]["detail"]["title"], "original");
+    assert_eq!(replay["data"]["task_state"]["row"]["version"], 2);
     let recovery = ok(run(&f.clients[1], &["viewer", "recovery"]));
     assert_eq!(recovery["data"]["items"][0]["request_id"], receipt);
     assert_eq!(recovery["data"]["items"][0]["outcome_known"], true);
@@ -297,6 +299,53 @@ fn receipt_survives_lost_cli_ack_and_replay_precedes_a_later_external_edit() {
     let pending = ok(run(&f.clients[1], &["viewer", "recovery"]));
     assert_eq!(pending["data"]["items"][0]["request_id"], next);
     ok(run(&f.clients[1], &["viewer", "acknowledge", &next]));
+}
+
+#[test]
+fn viewer_save_status_and_done_return_committed_state_in_one_signed_request() {
+    let f = Fixture::new_binary();
+    let project = f.project().to_string();
+    create(&f, &project, "before", None);
+    for (index, changes) in [
+        json!({"title":"edited"}),
+        json!({"status":"blocked"}),
+        json!({"status":"done"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let receipt = Uuid::new_v4().to_string();
+        let before = f.gateway.requests();
+        let reply = ok(request(
+            &f.clients[0],
+            &[
+                "--project",
+                &project,
+                "viewer",
+                "update",
+                "--request-file",
+                "-",
+            ],
+            json!({"id":1,"expect_version":index+1,"changes":changes,"request_id":receipt}),
+        ));
+        assert_eq!(
+            f.gateway.requests() - before,
+            1,
+            "one signed request per viewer update"
+        );
+        let data = &reply["data"];
+        assert_eq!(data["task_state"]["detail"]["title"], "edited");
+        assert_eq!(data["task_state"]["detail"]["version"], index + 2);
+        assert_eq!(data["task_state"]["row"]["status"], data["status"]);
+        assert_eq!(data["task_state"]["row"]["version"], index + 2);
+        assert_eq!(data["task_state"]["has_dependents"], false);
+        ok(run(&f.clients[0], &["viewer", "acknowledge", &receipt]));
+        assert_eq!(
+            f.gateway.requests() - before,
+            1,
+            "acknowledgement is local only"
+        );
+    }
 }
 #[test]
 fn blocked_completion_remains_refused_after_prerequisite_changes_and_archive_is_shared() {

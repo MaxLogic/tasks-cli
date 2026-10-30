@@ -2721,6 +2721,11 @@ fn viewer_update_applies_all_six_fields_and_records_one_event() {
     .data();
     assert_eq!(ids(&page), [target]);
     assert_eq!(page["items"][0]["dependency_count"], 1);
+    let mut expected_detail = shown.clone();
+    expected_detail.as_object_mut().unwrap().remove("command");
+    assert_eq!(data["task_state"]["detail"], expected_detail);
+    assert_eq!(data["task_state"]["row"], page["items"][0]);
+    assert_eq!(data["task_state"]["has_dependents"], false);
     assert_eq!(
         page["items"][0]["waiting_dependency_count"], 1,
         "a nonterminal dependency makes the task wait"
@@ -2779,6 +2784,8 @@ fn viewer_update_noop_and_version_conflict_write_nothing() {
     assert_eq!(noop["id"], id);
     assert_eq!(noop["status"], "todo");
     assert_eq!(noop["version"], version, "a no-op keeps the version");
+    assert_eq!(noop["task_state"]["detail"]["version"], version);
+    assert_eq!(noop["task_state"]["row"]["updated_ms"], updated_before);
     assert!(
         noop["event_id"].is_null(),
         "a no-op reports no event: {noop}"
@@ -2814,6 +2821,57 @@ fn viewer_update_noop_and_version_conflict_write_nothing() {
     assert_eq!(task_title(&project, id), "noop target");
     assert_eq!(task_version(&project, id), version);
     assert_eq!(task_events(&project, id), events);
+}
+
+#[test]
+fn update_state_is_transactional_and_large_optional_state_does_not_refuse_the_write() {
+    use tasks_cli::model::TaskUpdate;
+    let project = Project::new();
+    let id = project.add_plain("transactional", TaskStatus::Ready);
+    project.add("dependent", TaskStatus::Ready, Priority::P2, &[], vec![id]);
+    let mut store = project.store();
+    store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let ((_, _, version, event), state) = store
+        .update_task_with_state(
+            id,
+            1,
+            TaskUpdate {
+                title: Some("inside transaction".into()),
+                ..TaskUpdate::default()
+            },
+        )
+        .unwrap();
+    let state = state.unwrap();
+    assert_eq!(version, 2);
+    assert!(event.is_some());
+    assert_eq!(state.detail.task.title, "inside transaction");
+    assert_eq!(state.row.title, "inside transaction");
+    assert!(state.has_dependents);
+    assert_eq!(
+        task_title(&project, id),
+        "transactional",
+        "another connection cannot see the uncommitted update"
+    );
+    store.conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(task_version(&project, id), 1);
+    drop(store);
+    let large = project.add_body("large body", &"x".repeat(1024 * 1024), TaskStatus::Ready);
+    let result = project
+        .run(&[
+            "update",
+            &large.to_string(),
+            "--expect-version",
+            "1",
+            "--title",
+            "still valid",
+        ])
+        .data();
+    assert_eq!(result["version"], 2);
+    assert!(
+        result.get("task_state").is_none(),
+        "oversized optional state falls back instead of refusing a valid write"
+    );
+    assert_eq!(task_title(&project, large), "still valid");
 }
 
 #[test]

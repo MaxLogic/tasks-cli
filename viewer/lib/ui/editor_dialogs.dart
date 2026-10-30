@@ -36,12 +36,13 @@ abstract class ViewerEditorHost {
   /// Save / Ctrl+S for the open draft, with its conflict and reconciliation
   /// dialogs. The result is the store's verdict; null means nothing was
   /// attempted, because no editor was open or a write was already running.
-  Future<EditorSaveResult?> save();
+  /// Implicit list actions announce their own final outcome on dismissal.
+  Future<EditorSaveResult?> save({bool announceConflictReturn = true});
 
   /// Ctrl+D for the selected task: the dirty-draft dialog first when the open
   /// editor has changes, then one version-checked update to `done`. Null when
   /// the task was already done, the user cancelled, or a write was running.
-  Future<EditorSaveResult?> markDone();
+  Future<EditorSaveResult?> markDone({bool announceConflictReturn = true});
 
   /// Runs the conflict workflow for [conflict] and follows its answer.
   Future<void> resolveConflict(EditorConflict conflict);
