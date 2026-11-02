@@ -37,7 +37,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   file_selector: ^1.1.0
   window_manager: ^0.5.2
-  screen_retriever: ^0.2.2
+  screen_retriever: ^0.3.0
   # Windows shell link registration (IShellLink) for "Start with Windows".
   win32: ^6.3.0
   ffi: ^2.1.4
