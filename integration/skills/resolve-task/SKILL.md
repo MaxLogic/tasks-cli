@@ -3,7 +3,7 @@ name: resolve-task
 description: "Resolve explicitly selected engineering tasks from a shared SQLite backlog. Use for named task IDs, selected backlog items, or a requested task sweep. Apply acceptance-driven implementation, focused TDD, risk-based verification, exact-candidate proof, and versioned lifecycle transitions."
 metadata:
   author: Pawel Piotrowski
-  version: "6.3.4"
+  version: "6.4.0"
   adapted-from: "resolve-task (5.2.0)"
 ---
 
@@ -78,11 +78,12 @@ See [verification](references/verification.md).
 1. Read current task/version and deps. Coordinator transitions ready work to
    `in-progress` with the observed `--expect-version` (no extra `show` for a
    status-only change); exit 4 means stale, so re-read and reconcile.
-2. Extract acceptance from Outcome, Proof, rules/specs and notes. Each outcome
-   needs observable proof. Split independently provable work before coding;
+2. Extract acceptance from Outcome, Examples, Proof, rules/specs and notes.
+   Each outcome needs observable proof; use its examples as the test list. Split independently provable work before coding;
    retain a reason when a large change is indivisible.
 3. Add meaningful failing proof for behavior slices, implement GREEN, and run
    cheap stabilization. Report TDD as yes, mutation, partial, or no with reason.
+   Classify a failing pre-existing test under `tdd` before changing code or test.
    Reversible prose edits need relevant validation, not artificial RED tests.
 4. Self-check risk, then request independent review when justified. Review after
    GREEN before broad task gates. Each confirmed must-fix is a separate
