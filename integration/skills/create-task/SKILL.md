@@ -3,7 +3,7 @@ name: create-task
 description: "Add, split, reword, reprioritize, block, complete, or otherwise maintain durable tasks in a shared SQLite backlog. Use for requested task management and independent follow-up or prerequisite work. During resolve-task, own formulation while the coordinator applies ledger edits. Do not invoke merely because a backlog exists."
 metadata:
   author: Pawel Piotrowski
-  version: "4.2.0"
+  version: "4.3.0"
   adapted-from: "create-task (3.5.0)"
 ---
 
@@ -42,6 +42,20 @@ Proof:
 - Run: <exact executable command>
   Expect: <exit code, output, result, or measured condition>
 ```
+
+For a task that changes behavior, add 2-5 concrete examples after Outcome:
+
+```text
+Examples:
+- Given <input or state> -> <expected result>
+- Given <invalid, boundary, or error input> -> <expected rejection or result>
+```
+
+Examples illustrate the Outcome rule and must agree with it; they never
+replace it. Include at least one rejection, boundary, or error case. An example
+you cannot write marks an open question: resolve it or record it as a blocker
+instead of guessing. Omit Examples for refactoring, wiring, or other work
+without behavior change.
 
 Proof names targeted checks only: the exact new or changed tests, the owning
 fixture or module, and a compile of the changed surface. Never write "full suite
