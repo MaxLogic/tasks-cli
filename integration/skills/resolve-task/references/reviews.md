@@ -21,6 +21,12 @@ the distinct risk it covers and why the first reviewer cannot cover it. Pure
 test ports, test deletions, documentation, and mechanical registrations usually
 need self-review plus the next batch gate, not a reviewer per file.
 
+When the user named no model and no orchestrated run governs, choose the
+reviewer's model under the agent-toolkit `rules/models.md`
+(`F:\projects\MaxLogic\agent-toolkit\rules\models.md`, WSL
+`/mnt/f/projects/MaxLogic/agent-toolkit/rules/models.md`) when it is present.
+It selects the model only; it never adds a reviewer.
+
 ## Timing
 
 Ask for architecture/acceptance feedback before coding when it could change the
