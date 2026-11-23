@@ -51,6 +51,12 @@ production route end to end: a timing over a representative input, a size
 check of the produced artifact, a memory sample. Record it as an execution in
 the evidence record like any other gate; it does not replace the Final run.
 
+For a timing gate on a machine that is also in use, first measure the noise
+with that probe. Fix the sample count, allowed outlier share, hard cap and
+environment exclusions before the first full qualification; changes to the
+target still need the user. Between fixes run the short probe. Run the full
+matrix once per batch or final candidate unless the probe shows a regression.
+
 Classify the probe result before continuing:
 
 - **Target reachable:** continue; the Final gate stays scheduled.
