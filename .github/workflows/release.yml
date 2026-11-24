@@ -53,6 +53,8 @@ jobs:
             target/release-build
           key: ${{ runner.os }}-cli-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Check, test and build CLI
+        env:
+          TASKS_CLI_SENTRY_DSN: ${{ secrets.TASKS_CLI_SENTRY_DSN }}
         run: |
           cargo fmt --check
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -63,6 +65,25 @@ jobs:
           cargo test --locked --features server,test-hooks --no-fail-fast --jobs 2
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo build --release --locked --bin tasks --jobs 2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Upload CLI debug symbols to Sentry
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_URL: ${{ secrets.SENTRY_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_AUTH_TOKEN)) {
+            Write-Host 'SENTRY_AUTH_TOKEN secret not set; skipping CLI symbol upload.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_URL)) { $env:SENTRY_URL = 'https://de.sentry.io/' }
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_ORG)) { $env:SENTRY_ORG = 'maxlogic' }
+          $asset = if ($IsWindows) { 'sentry-cli-Windows-x86_64.exe' } else { 'sentry-cli-Linux-x86_64' }
+          $cliBin = Join-Path $env:RUNNER_TEMP $asset
+          Invoke-WebRequest -Uri "https://github.com/getsentry/sentry-cli/releases/download/3.8.2/$asset" -OutFile $cliBin
+          if (-not $IsWindows) { chmod +x $cliBin }
+          pwsh -NoProfile -File viewer/tool/upload-sentry-symbols.ps1 -Component cli -CliTargetDirectory "$env:CARGO_TARGET_DIR" -SentryCliPath $cliBin -FailIfUnconfigured
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Test archive tooling
         run: python -m unittest discover -s release -p test_package.py -v
@@ -111,6 +132,9 @@ jobs:
             target/verify-cli
           key: ${{ runner.os }}-viewer-cli-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Verify and build isolated viewer bundle
+        env:
+          TASKS_CLI_SENTRY_DSN: ${{ secrets.TASKS_CLI_SENTRY_DSN }}
+          TASKS_VIEWER_SENTRY_DSN: ${{ secrets.TASKS_VIEWER_SENTRY_DSN }}
         run: |
           # Golden fixtures render local timestamps in the maintainer's Warsaw zone.
           Set-TimeZone -Id 'Central European Standard Time'
@@ -119,6 +143,23 @@ jobs:
           pwsh -NoProfile -File viewer/tool/verify-windows.ps1 -FlutterRoot "$env:RUNNER_TEMP/flutter" -PackageOutputRoot "$env:GITHUB_WORKSPACE/target/public-viewer" -GoldenBaseline windows-server-2022 -SkipReleaseUia -EvidenceRoot "$env:GITHUB_WORKSPACE/viewer/target/evidence/viewer/public-release"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git diff --exit-code
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Upload viewer debug symbols to Sentry
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_URL: ${{ secrets.SENTRY_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_AUTH_TOKEN)) {
+            Write-Host 'SENTRY_AUTH_TOKEN secret not set; skipping viewer symbol upload.'
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_URL)) { $env:SENTRY_URL = 'https://de.sentry.io/' }
+          if ([string]::IsNullOrWhiteSpace($env:SENTRY_ORG)) { $env:SENTRY_ORG = 'maxlogic' }
+          $cliBin = Join-Path $env:RUNNER_TEMP 'sentry-cli-Windows-x86_64.exe'
+          Invoke-WebRequest -Uri 'https://github.com/getsentry/sentry-cli/releases/download/3.8.2/sentry-cli-Windows-x86_64.exe' -OutFile $cliBin
+          pwsh -NoProfile -File viewer/tool/upload-sentry-symbols.ps1 -Component viewer -FlutterRoot "$env:RUNNER_TEMP/flutter" -SentryCliPath $cliBin -FailIfUnconfigured
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package and smoke-test extracted viewer CLI
         run: python release/package.py --component viewer --platform windows --input target/public-viewer --commit $env:GITHUB_SHA

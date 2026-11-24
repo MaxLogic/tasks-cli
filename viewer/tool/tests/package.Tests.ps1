@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 <#
 .SYNOPSIS
 Focused tests for viewer/tool/package.ps1.
@@ -185,6 +185,11 @@ Describe 'package.ps1 bundle helpers' {
         $findings = Find-BundleCredential -Root $script:Bundle
         @($findings).Count | Should -Be 1
         @($findings)[0] | Should -BeLike '*data/leak.json*'
+        Set-Content -LiteralPath (Join-Path $script:Bundle 'data/sentry-leak.txt') `
+            -Value 'sntryu_not_a_real_token_123456' -Encoding utf8NoBOM
+        $sentryFindings = Find-BundleCredential -Root $script:Bundle
+        @($sentryFindings).Count | Should -Be 2
+        ($sentryFindings -join "`n") | Should -BeLike '*data/sentry-leak.txt*'
     }
 
     It 'writes a hash list that matches Get-FileHash and excludes itself' {

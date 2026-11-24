@@ -1,4 +1,4 @@
-#requires -Version 7.0
+﻿#requires -Version 7.0
 <#
 .SYNOPSIS
 Assembles the portable viewer release bundle with its matching CLI.
@@ -55,7 +55,9 @@ param(
 
     [int]$LaunchTimeoutSeconds = 60,
 
-    [switch]$KeepLaunchRoot
+    [switch]$KeepLaunchRoot,
+
+    [switch]$UploadSymbols
 )
 
 Set-StrictMode -Version Latest
@@ -275,7 +277,7 @@ function Find-BundleCredential {
         [string]$Root
     )
 
-    $markers = @('ELEVENLABS_API_KEY', 'xi-api-key')
+    $markers = @('ELEVENLABS_API_KEY', 'xi-api-key', 'SENTRY_AUTH_TOKEN', 'sntryu_', 'sntrys_')
     $findings = [System.Collections.Generic.List[string]]::new()
     foreach ($file in Get-BundleFile -Root $Root) {
         $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($file.FullName))
@@ -552,19 +554,92 @@ function Get-PackageCopyManifest {
     foreach ($entry in $files.GetEnumerator()) { "$($entry.Value)  $($entry.Key)" }
 }
 
+function Get-PackageFlutterBuildArguments {
+    <#
+    .SYNOPSIS
+    Builds Flutter Windows release arguments, injecting optional build-time Sentry defines.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ViewerRoot,
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [string]$SourceCommit
+    )
+
+    $argsList = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @('build', 'windows', '--release')) {
+        $argsList.Add($item)
+    }
+
+    $dsn = [string]$env:TASKS_VIEWER_SENTRY_DSN
+    if ([string]::IsNullOrWhiteSpace($dsn) -and $env:TASKS_SENTRY_USE_PRIVATE_OVERLAY -ne '0') {
+        $sentryJson = Join-Path -Path $RepositoryRoot -ChildPath '.private/integration/sentry.json'
+        if (Test-Path -LiteralPath $sentryJson -PathType Leaf) {
+            try {
+                $parsed = Get-Content -LiteralPath $sentryJson -Raw | ConvertFrom-Json
+                $viewerProject = $parsed.projects.'tasks-viewer'
+                if ($null -ne $viewerProject -and -not [string]::IsNullOrWhiteSpace($viewerProject.dsn)) {
+                    $dsn = [string]$viewerProject.dsn
+                }
+            }
+            catch {
+                Write-PackageMessage -Message "package: warning: could not read optional Sentry DSN from '$sentryJson'"
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($dsn)) {
+        $argsList.Add("--dart-define=TASKS_VIEWER_SENTRY_DSN=$($dsn.Trim())")
+        $release = [string]$env:TASKS_VIEWER_RELEASE
+        if ([string]::IsNullOrWhiteSpace($release)) {
+            $pubspecPath = Join-Path -Path $ViewerRoot -ChildPath 'pubspec.yaml'
+            $version = '0.1.0'
+            if (Test-Path -LiteralPath $pubspecPath -PathType Leaf) {
+                $match = Select-String -LiteralPath $pubspecPath -Pattern '^version:\s*([^\s+#]+)' | Select-Object -First 1
+                if ($null -ne $match) {
+                    $version = $match.Matches[0].Groups[1].Value
+                }
+            }
+            $shortSha = if (-not [string]::IsNullOrWhiteSpace($SourceCommit) -and $SourceCommit.Length -ge 7) {
+                $SourceCommit.Substring(0, 7)
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($SourceCommit)) {
+                $SourceCommit
+            }
+            else {
+                'unknown'
+            }
+            $release = "tasks-viewer@$version+$shortSha"
+        }
+        $argsList.Add("--dart-define=TASKS_VIEWER_RELEASE=$($release.Trim())")
+    }
+
+    return @($argsList)
+}
+
 function Invoke-PackageFlutterBuild {
     <#
     .SYNOPSIS
     Uses the verifier's launcher and release flags without importing its helpers into the caller.
     #>
-    param([string]$ViewerRoot, [string]$EvidenceRoot)
+    param(
+        [string]$ViewerRoot,
+        [string]$EvidenceRoot,
+        [string]$RepositoryRoot,
+        [string]$SourceCommit
+    )
+    $buildArgs = if (-not [string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+        @(Get-PackageFlutterBuildArguments -ViewerRoot $ViewerRoot -RepositoryRoot $RepositoryRoot -SourceCommit $SourceCommit)
+    }
+    else {
+        @('build', 'windows', '--release')
+    }
     $result = & {
-        param($buildViewerRoot)
+        param($buildViewerRoot, $flutterArgs)
         . (Join-Path $PSScriptRoot 'verify-windows.ps1')
         $launcher = Resolve-FlutterLauncher
-        Invoke-FlutterCommand -Launcher $launcher -Arguments @('build', 'windows', '--release') `
+        Invoke-FlutterCommand -Launcher $launcher -Arguments $flutterArgs `
             -WorkingDirectory $buildViewerRoot -TimeoutSeconds 1800
-    } $ViewerRoot
+    } $ViewerRoot $buildArgs
     $log = "flutter build windows --release`nexit: $($result.ExitCode)`ntimed_out: $($result.TimedOut)`n$($result.StdOut)`n$($result.StdErr)"
     if (-not [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
         New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
@@ -608,7 +683,9 @@ function Invoke-PackageTool {
 
         [int]$LaunchTimeoutSeconds = 60,
 
-        [switch]$KeepLaunchRoot
+        [switch]$KeepLaunchRoot,
+
+        [switch]$UploadSymbols
     )
 
     $findings = [System.Collections.Generic.List[string]]::new()
@@ -657,7 +734,8 @@ function Invoke-PackageTool {
         # Invalidate a previous successful stamp before attempting the new build.
         if (Test-Path -LiteralPath $stampPath) { Remove-Item -LiteralPath $stampPath -Force }
         Write-PackageMessage -Message 'package: building Flutter Windows release'
-        Invoke-PackageFlutterBuild -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot
+        Invoke-PackageFlutterBuild -ViewerRoot $viewerFull -EvidenceRoot $EvidenceRoot `
+            -RepositoryRoot $repositoryFull -SourceCommit $sourceIdentity.Commit
         if ($sourceFingerprint -ne (Get-ViewerSourceFingerprint -ViewerRoot $viewerFull)) {
             throw 'Viewer inputs changed during the Flutter build; run packaging again on stable sources.'
         }
@@ -821,6 +899,18 @@ function Invoke-PackageTool {
     $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metadataPath -Encoding utf8NoBOM
     Write-BundleHashFile -Root $outputFull -HashPath $hashPath
 
+    if ($UploadSymbols -and $findings.Count -eq 0) {
+        Write-PackageMessage -Message 'package: uploading debug symbols to Sentry'
+        $symbolScript = Join-Path -Path $PSScriptRoot -ChildPath 'upload-sentry-symbols.ps1'
+        if (Test-Path -LiteralPath $symbolScript -PathType Leaf) {
+            & $symbolScript -Component all -RepositoryRoot $repositoryFull `
+                -ViewerRoot $viewerFull -CliTargetDirectory $CliTargetDirectory
+            if ($LASTEXITCODE -ne 0) {
+                $findings.Add("Sentry debug symbol upload failed with exit code $LASTEXITCODE.")
+            }
+        }
+    }
+
     $bundleFiles = Get-BundleFile -Root $outputFull
     $result = [pscustomobject]@{
         Ok              = ($findings.Count -eq 0)
@@ -856,7 +946,8 @@ if ($MyInvocation.InvocationName -ne '.') {
             -PackageParentRoot $PackageParentRoot -PackageSourceRoot $PackageSourceRoot `
             -CliExecutable $CliExecutable -FfprobePath $FfprobePath `
             -AnnouncementToolPath $AnnouncementToolPath -EvidenceRoot $EvidenceRoot `
-            -WorkingRoot $WorkingRoot -LaunchTimeoutSeconds $LaunchTimeoutSeconds -KeepLaunchRoot:$KeepLaunchRoot
+            -WorkingRoot $WorkingRoot -LaunchTimeoutSeconds $LaunchTimeoutSeconds `
+            -KeepLaunchRoot:$KeepLaunchRoot -UploadSymbols:$UploadSymbols
         foreach ($finding in $toolResult.Findings) {
             Write-PackageMessage -Message "package: $finding"
         }
