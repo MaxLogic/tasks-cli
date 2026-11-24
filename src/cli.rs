@@ -316,6 +316,40 @@ pub enum Command {
     Viewer(ViewerCommand),
 }
 
+impl Command {
+    /// Static subcommand label for diagnostics; never includes arguments or task text.
+    pub fn telemetry_name(&self) -> &'static str {
+        match self {
+            Self::Attachment(_) => "attachment",
+            #[cfg(feature = "remote")]
+            Self::Remote(_) => "remote",
+            Self::ContextSetup { .. } => "context-setup",
+            Self::ContextHook { .. } => "context-hook",
+            Self::Init { .. } => "init",
+            Self::ProjectKey { .. } => "project-key",
+            Self::Bind { .. } => "bind",
+            Self::List { .. } => "list",
+            Self::Unlocks { .. } => "unlocks",
+            Self::Search { .. } => "search",
+            Self::Enrich { .. } => "enrich",
+            Self::EnrichClipboard => "enrich-clipboard",
+            Self::Show { .. } => "show",
+            Self::Create { .. } => "create",
+            Self::Update { .. } => "update",
+            Self::History { .. } => "history",
+            Self::ProjectHistory { .. } => "project-history",
+            Self::Rules(_) => "rules",
+            Self::Import { .. } => "import",
+            Self::Export { .. } => "export",
+            Self::BulkImport { .. } => "bulk-import",
+            Self::Backup { .. } => "backup",
+            Self::Migrate => "migrate",
+            Self::Doctor => "doctor",
+            Self::Viewer(_) => "viewer",
+        }
+    }
+}
+
 #[cfg(feature = "remote")]
 #[derive(Subcommand, Debug, Clone)]
 pub enum RemoteCommand {

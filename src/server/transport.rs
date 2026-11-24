@@ -204,6 +204,9 @@ impl ServiceState {
 }
 
 fn error(status: StatusCode, code: &str, message: &str) -> Response {
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        crate::telemetry::capture_server_internal_error(code, message);
+    }
     (
         status,
         Json(serde_json::json!({"error":{"code":code,"message":message}})),

@@ -1013,6 +1013,7 @@ fn json_requested(args: &[String]) -> bool {
 }
 
 fn main() {
+    let _telemetry = tasks_cli::telemetry::init_cli();
     let args = std::env::args().collect::<Vec<_>>();
     let json = json_requested(&args);
     let cli = match Cli::try_parse() {
@@ -1036,6 +1037,7 @@ fn main() {
             std::process::exit(error.exit_code());
         }
     };
+    tasks_cli::telemetry::set_command_tag(cli.command.telemetry_name());
     if let Err(error) = execute(cli.clone()) {
         if cli.format == OutputFormat::Json {
             eprintln!("{}", error.json());

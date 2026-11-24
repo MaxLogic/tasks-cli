@@ -21,6 +21,7 @@ pub mod remote;
 pub mod server;
 pub mod storage;
 pub mod store;
+pub mod telemetry;
 
 pub use error::AppError;
 

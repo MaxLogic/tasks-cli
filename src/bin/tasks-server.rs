@@ -58,6 +58,7 @@ enum Admin {
     },
 }
 fn main() {
+    let _telemetry = tasks_cli::telemetry::init_server();
     if let Err(error) = run(Cli::parse()) {
         eprintln!("{error}");
         std::process::exit(5);

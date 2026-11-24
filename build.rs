@@ -49,6 +49,8 @@ fn watch_git_state(manifest_dir: &Path) {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=TASKS_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=TASKS_CLI_SENTRY_DSN");
+    println!("cargo:rerun-if-env-changed=TASKS_SERVER_SENTRY_DSN");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     watch_git_state(&manifest_dir);
 

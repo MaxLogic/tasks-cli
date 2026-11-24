@@ -10,3 +10,7 @@
 /*.zip
 .DS_Store
 Thumbs.db
+
+# Sentry CLI local credentials (never commit auth tokens)
+.sentryclirc
+sentry.properties
