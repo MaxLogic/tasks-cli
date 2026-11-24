@@ -41,6 +41,7 @@ dependencies:
   # Windows shell link registration (IShellLink) for "Start with Windows".
   win32: ^6.3.0
   ffi: ^2.1.4
+  sentry_flutter: ^10.6.0
 
 dev_dependencies:
   flutter_test:

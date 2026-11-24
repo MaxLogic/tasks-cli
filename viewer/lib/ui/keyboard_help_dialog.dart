@@ -96,6 +96,7 @@ HelpGroup? _helpGroupForScope(CommandScope scope) {
     case CommandScope.enrichmentPreview:
     case CommandScope.keyboardHelp:
     case CommandScope.slowSaveClose:
+    case CommandScope.crashReport:
     case CommandScope.dialogs:
     case CommandScope.statusBar:
       return HelpGroup.dialogs;

@@ -18,8 +18,10 @@ import 'package:flutter/scheduler.dart';
 import '../app_environment.dart';
 import '../controllers/announcement_controller.dart';
 import '../data/settings_draft.dart';
+import '../platform/crash_reporting.dart';
 import '../platform/viewer_startup.dart';
 import 'accessible_virtual_list.dart';
+import 'crash_report_dialog.dart';
 import 'viewer_icons.dart';
 import 'viewer_motion.dart';
 import 'commands.dart';
@@ -323,6 +325,7 @@ class ViewerShell extends StatefulWidget {
     this.actions = const ViewerShellActions(),
     this.initialSettings,
     this.startup,
+    this.crashReporter,
   });
 
   final ViewerEnvironment environment;
@@ -337,6 +340,10 @@ class ViewerShell extends StatefulWidget {
   /// Startup-registration surface Settings reads and retries; null when this
   /// build must not touch the real Startup folder.
   final ViewerStartupController? startup;
+
+  /// Optional crash-reporting coordinator that surfaces pending reports in
+  /// `ask` mode.
+  final ViewerCrashReporter? crashReporter;
 
   @override
   State<ViewerShell> createState() => ViewerShellState();
@@ -370,6 +377,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   ViewerLayoutMode _layoutMode = ViewerLayoutMode.threePane;
   bool _detailsRequested = false;
   bool _initialSetupOpened = false;
+  bool _showingCrashReport = false;
 
   /// One key per pane, so a layout change *moves* a pane instead of rebuilding
   /// it and losing its selection, filters and scroll position (design.md
@@ -404,6 +412,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   void initState() {
     super.initState();
     _status.regionFocus.addListener(_onStatusFocusChanged);
+    widget.crashReporter?.addListener(_onCrashReporterChanged);
     // design.md section 2: a launch starts in the Projects region, on its
     // selected row, or on the empty list container when it has no rows. Without
     // this the first Tab would be the only way into the window and F1..F3 would
@@ -417,6 +426,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
         unawaited(_openSettings(firstSetup: true));
       } else {
         _focusRegion(ViewerRegion.projects);
+        _schedulePendingCrashReportCheck();
       }
     });
   }
@@ -424,6 +434,11 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
   @override
   void didUpdateWidget(covariant ViewerShell oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(widget.crashReporter, oldWidget.crashReporter)) {
+      oldWidget.crashReporter?.removeListener(_onCrashReporterChanged);
+      widget.crashReporter?.addListener(_onCrashReporterChanged);
+      _schedulePendingCrashReportCheck();
+    }
     if (!identical(widget.initialSettings, oldWidget.initialSettings) &&
         widget.initialSettings != null) {
       _settings = widget.initialSettings!;
@@ -464,6 +479,7 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
 
   @override
   void dispose() {
+    widget.crashReporter?.removeListener(_onCrashReporterChanged);
     _status.regionFocus.removeListener(_onStatusFocusChanged);
     _scopeCommandHandlers.clear();
     _projects.dispose();
@@ -954,6 +970,83 @@ class ViewerShellState extends State<ViewerShell> implements ViewerShellApi {
       if (previousFocus != null && previousFocus.canRequestFocus) {
         previousFocus.requestFocus();
       }
+      _schedulePendingCrashReportCheck();
+    }
+  }
+
+  void _onCrashReporterChanged() {
+    _schedulePendingCrashReportCheck();
+  }
+
+  void _schedulePendingCrashReportCheck() {
+    final reporter = widget.crashReporter;
+    if (!mounted ||
+        _showingCrashReport ||
+        _modalDepth > 0 ||
+        reporter == null ||
+        !reporter.hasPendingReports) {
+      return;
+    }
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {
+      scheduleMicrotask(() {
+        if (mounted) {
+          unawaited(_presentPendingCrashReport());
+        }
+      });
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_presentPendingCrashReport());
+      }
+    });
+    SchedulerBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _presentPendingCrashReport() async {
+    final reporter = widget.crashReporter;
+    if (!mounted ||
+        _showingCrashReport ||
+        _modalDepth > 0 ||
+        reporter == null) {
+      return;
+    }
+    final report = reporter.nextPendingReport;
+    if (report == null) {
+      return;
+    }
+    _showingCrashReport = true;
+    try {
+      final decision = await showModal<CrashReportDecision>(
+        CommandScope.crashReport,
+        (context) => ViewerCrashReportDialog(report: report),
+      );
+      if (!mounted) {
+        return;
+      }
+      switch (decision ?? CrashReportDecision.discard) {
+        case CrashReportDecision.send:
+          await reporter.sendPendingReport(report);
+          announce('Crash report sent.', dynamic: true);
+        case CrashReportDecision.alwaysSend:
+          final updated = _settings.copyWith(
+            crashReporting: ViewerCrashReportingMode.always,
+          );
+          setState(() => _settings = updated);
+          widget.actions.onSettingsChanged?.call(updated);
+          await reporter.sendPendingReport(report);
+          await reporter.applyMode(ViewerCrashReportingMode.always);
+          announce(
+            'Crash report sent. Crash reporting is now set to Always send.',
+            dynamic: true,
+          );
+        case CrashReportDecision.discard:
+          await reporter.discardPendingReport(report);
+          announce('Crash report discarded.', dynamic: true);
+      }
+    } finally {
+      _showingCrashReport = false;
+      _schedulePendingCrashReportCheck();
     }
   }
 

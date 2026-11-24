@@ -16,6 +16,7 @@ import 'controllers/announcement_controller.dart';
 import 'data/settings_draft.dart';
 import 'data/models.dart';
 import 'data/settings_store.dart';
+import 'platform/crash_reporting.dart';
 import 'platform/viewer_startup.dart';
 import 'platform/window_state.dart';
 import 'ui/app_shell.dart';
@@ -37,6 +38,7 @@ class TasksViewerApp extends StatefulWidget {
     this.drafts,
     this.closeGuard,
     this.startup,
+    this.crashReporter,
     this.onSettingsPersist,
     this.windowsAnimationsEnabled,
   });
@@ -78,6 +80,9 @@ class TasksViewerApp extends StatefulWidget {
   /// Startup-registration surface; null when this build must not touch the
   /// real Startup folder (debug, test and `--test-mode` launches).
   final ViewerStartupController? startup;
+
+  /// Optional opt-in crash-reporting coordinator.
+  final ViewerCrashReporter? crashReporter;
 
   /// Persists a saved draft; a failure is reported in the status region.
   final Future<void> Function(ViewerSettingsDraft draft)? onSettingsPersist;
@@ -214,6 +219,7 @@ class _TasksViewerAppState extends State<TasksViewerApp>
     });
     unawaited(_persistSettings(draft));
     unawaited(_applyStartupPreference(draft));
+    unawaited(_applyCrashReportingPreference(draft));
   }
 
   void _applyProjectPreferences(
@@ -257,6 +263,14 @@ class _TasksViewerAppState extends State<TasksViewerApp>
     await startup.applyDesired(draft.startWithWindows);
   }
 
+  Future<void> _applyCrashReportingPreference(ViewerSettingsDraft draft) async {
+    final reporter = widget.crashReporter;
+    if (reporter == null) {
+      return;
+    }
+    await reporter.applyMode(draft.crashReporting);
+  }
+
   Widget _buildShell() {
     final readers = _readers;
     final builder =
@@ -269,6 +283,7 @@ class _TasksViewerAppState extends State<TasksViewerApp>
         initialSettings: _settings,
         workspaceBuilder: builder,
         startup: widget.startup,
+        crashReporter: widget.crashReporter,
         actions: ViewerShellActions(onSettingsChanged: _applySettings),
       );
     }
@@ -286,6 +301,7 @@ class _TasksViewerAppState extends State<TasksViewerApp>
       onSettingsChanged: _applySettings,
       onProjectPreferencesChanged: _applyProjectPreferences,
       startup: widget.startup,
+      crashReporter: widget.crashReporter,
       drafts: widget.drafts,
       closeGuard: widget.closeGuard,
     );

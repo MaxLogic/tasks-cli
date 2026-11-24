@@ -32,6 +32,7 @@ enum CommandScope {
   keyboardHelp,
   statusBar,
   slowSaveClose,
+  crashReport,
 }
 
 /// Whether [scope] belongs to a modal dialog.
@@ -49,6 +50,7 @@ bool isDialogScope(CommandScope scope) {
     case CommandScope.enrichmentPreview:
     case CommandScope.keyboardHelp:
     case CommandScope.slowSaveClose:
+    case CommandScope.crashReport:
       return true;
     case CommandScope.global:
     case CommandScope.projects:
@@ -1160,6 +1162,14 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyG)],
   ),
   CommandSpec(
+    id: 'settings.crashReporting',
+    scope: CommandScope.settings,
+    group: HelpGroup.dialogs,
+    label: 'Crash reporting',
+    description: 'Focus the crash reporting preference selector.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyU)],
+  ),
+  CommandSpec(
     id: 'settings.save',
     scope: CommandScope.settings,
     group: HelpGroup.dialogs,
@@ -1484,5 +1494,40 @@ commandRegistry = List<CommandSpec>.unmodifiable(<CommandSpec>[
         'Keep waiting for the running save. Closing never cancels an atomic '
         'store write.',
     activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyW)],
+  ),
+
+  // ------------------------------------------------------ crash report
+  CommandSpec(
+    id: 'crashReport.details',
+    scope: CommandScope.crashReport,
+    group: HelpGroup.dialogs,
+    label: 'Crash report details',
+    description: 'Focus the scrubbed crash details preview.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyI)],
+  ),
+  CommandSpec(
+    id: 'crashReport.send',
+    scope: CommandScope.crashReport,
+    group: HelpGroup.dialogs,
+    label: 'Send report',
+    description: 'Send this scrubbed crash report to Sentry.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyS)],
+  ),
+  CommandSpec(
+    id: 'crashReport.alwaysSend',
+    scope: CommandScope.crashReport,
+    group: HelpGroup.dialogs,
+    label: 'Always send',
+    description:
+        'Send this crash report and switch Crash reporting to Always send.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyA)],
+  ),
+  CommandSpec(
+    id: 'crashReport.discard',
+    scope: CommandScope.crashReport,
+    group: HelpGroup.dialogs,
+    label: "Don't send",
+    description: 'Discard this crash report without sending it.',
+    activators: <ShortcutActivator>[_alt(LogicalKeyboardKey.keyD)],
   ),
 ]);

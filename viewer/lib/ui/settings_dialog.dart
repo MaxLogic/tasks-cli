@@ -99,12 +99,16 @@ class _SettingsDialogState extends State<SettingsDialog> {
   final FocusNode _startupNode = FocusNode(debugLabel: 'settings startup');
   final FocusNode _modeNode = FocusNode(debugLabel: 'settings announcements');
   final FocusNode _volumeNode = FocusNode(debugLabel: 'settings volume');
+  final FocusNode _crashReportingNode = FocusNode(
+    debugLabel: 'settings crash reporting',
+  );
 
   late ViewerThemeMode _theme = widget.initial.themeMode;
   late int _textScale = widget.initial.textScalePercent;
   late bool _startWithWindows = widget.initial.startWithWindows;
   late AnnouncementMode _mode = widget.initial.announcementMode;
   late int _volume = widget.initial.bellaVolumePercent;
+  late ViewerCrashReportingMode _crashReporting = widget.initial.crashReporting;
   String? _error;
   String? _connectionStatus;
   bool _testingConnection = false;
@@ -127,6 +131,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _startupNode.dispose();
     _modeNode.dispose();
     _volumeNode.dispose();
+    _crashReportingNode.dispose();
     for (final node in _confirmationNodes.values) {
       node.dispose();
     }
@@ -210,6 +215,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
       announcementMode: _mode,
       bellaVolumePercent: _volume,
       skippedConfirmations: _skippedConfirmations,
+      crashReporting: _crashReporting,
     );
     widget.announcements.setMode(_mode);
     widget.announcements.setVolume(draft.bellaVolume);
@@ -397,6 +403,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
         _testVoice();
       case 'settings.retryStartup':
         unawaited(widget.startup?.applyDesired(_startWithWindows));
+      case 'settings.crashReporting':
+        _crashReportingNode.requestFocus();
       case 'settings.resetLayout':
         setState(() {
           _projectsWidth.text = '22';
@@ -848,6 +856,41 @@ class _SettingsDialogState extends State<SettingsDialog> {
                               icon: const Icon(ViewerIcons.voice),
                               label: const Text('Test voice (Alt+Y)'),
                             ),
+                          ),
+                          const Divider(height: 24),
+                          Semantics(
+                            header: true,
+                            child: Text(
+                              'Diagnostics',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          DropdownButtonFormField<ViewerCrashReportingMode>(
+                            initialValue: _crashReporting,
+                            focusNode: _crashReportingNode,
+                            decoration: const InputDecoration(
+                              labelText: 'Crash reporting (Alt+U)',
+                              border: OutlineInputBorder(),
+                            ),
+                            items: <DropdownMenuItem<ViewerCrashReportingMode>>[
+                              for (final mode
+                                  in ViewerCrashReportingMode.values)
+                                DropdownMenuItem<ViewerCrashReportingMode>(
+                                  value: mode,
+                                  child: Text(mode.label),
+                                ),
+                            ],
+                            onChanged: (value) => setState(
+                              () => _crashReporting = value ?? _crashReporting,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            'Crash reports include stack traces and OS details '
+                            'only. Clipboard contents and task text are never '
+                            'included in text crash reports.',
+                            style: Theme.of(context).textTheme.bodySmall,
                           ),
                           const SizedBox(height: 8),
                           Text(

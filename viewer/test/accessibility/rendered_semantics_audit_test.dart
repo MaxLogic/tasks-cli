@@ -16,6 +16,8 @@ import 'package:tasks_viewer/data/editor_models.dart';
 import 'package:tasks_viewer/data/settings_draft.dart';
 import 'package:tasks_viewer/controllers/announcement_controller.dart';
 import 'package:tasks_viewer/controllers/editor_controller.dart';
+import 'package:tasks_viewer/platform/crash_reporting.dart';
+import 'package:tasks_viewer/ui/crash_report_dialog.dart';
 import 'package:tasks_viewer/ui/editor_dialogs.dart';
 import 'package:tasks_viewer/ui/commands.dart';
 import 'package:tasks_viewer/ui/tasks_pane.dart';
@@ -375,6 +377,7 @@ void main() {
             startsWith('Announcements'),
             startsWith('Bella volume'),
             startsWith('Test voice'),
+            startsWith('Crash reporting'),
             startsWith('Cancel'),
             startsWith('Save'),
           ]),
@@ -434,6 +437,13 @@ void main() {
           ),
           'Announcements (Alt+A)',
           'Off',
+        ),
+        (
+          find.byWidgetPredicate(
+            (w) => w is DropdownButtonFormField<ViewerCrashReportingMode>,
+          ),
+          'Crash reporting (Alt+U)',
+          'Always send',
         ),
       ];
       for (final (field, label, option) in menus) {
@@ -507,6 +517,21 @@ void main() {
       'Save still running',
       CommandScope.slowSaveClose,
       const ViewerSlowSaveCloseDialog(identity: 'T-001'),
+    ),
+    (
+      'Tasks Viewer closed unexpectedly',
+      CommandScope.crashReport,
+      ViewerCrashReportDialog(
+        report: PendingCrashReport.nativeMinidump(
+          id: 'native:fixture.dmp',
+          summary: 'Tasks Viewer closed unexpectedly in native code.',
+          details: 'Crash type: Windows native crash minidump',
+          occurredAt: DateTime.utc(2026, 11, 24),
+          minidumpPath: r'C:\temp\fixture.dmp',
+          minidumpFileName: 'fixture.dmp',
+          minidumpBytes: 4096,
+        ),
+      ),
     ),
   ];
   for (final (title, scope, dialog) in editorRoutes) {

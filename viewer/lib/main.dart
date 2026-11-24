@@ -27,6 +27,7 @@ import 'data/settings_store.dart';
 import 'launch_args.dart';
 import 'launch_plan.dart';
 import 'platform/announcement_player.dart';
+import 'platform/crash_reporting.dart';
 import 'platform/single_instance.dart';
 import 'platform/startup_registration.dart';
 import 'platform/window_state.dart';
@@ -95,6 +96,16 @@ Future<void> main(List<String> arguments) async {
   // Keep the Windows accessibility tree available even when the screen reader
   // attaches after the viewer has already started.
   SemanticsBinding.instance.ensureSemantics();
+  final crashReporter = ViewerCrashReporter(
+    settingsRoot: environment.settingsRoot,
+    initialMode: currentSettings.crashReporting,
+    enabledForLaunch: !launchArgs.testMode && !runningUnderTestHarness(),
+  );
+  try {
+    await crashReporter.initialize();
+  } on Object catch (error) {
+    stderr.writeln('Could not initialize optional crash reporting: $error');
+  }
   final startup = await _prepareStartupRegistration(
     launchArgs: launchArgs,
     environment: environment,
@@ -106,7 +117,7 @@ Future<void> main(List<String> arguments) async {
   );
   await _showViewerWindow();
   final closeGuard = ViewerCloseGuard();
-  _installCloseGuard(closeGuard, instance);
+  _installCloseGuard(closeGuard, instance, crashReporter);
   // Recovery drafts are private task content, so they live under the settings
   // root the launch resolved and never under the store itself.
   final drafts = settingsStore.recoveryDrafts;
@@ -123,6 +134,7 @@ Future<void> main(List<String> arguments) async {
       drafts: drafts,
       closeGuard: closeGuard,
       startup: startup,
+      crashReporter: crashReporter,
       onSettingsPersist: (draft) async {
         await settingsStore.save(draft);
         currentSettings = draft;
@@ -135,8 +147,12 @@ Future<void> main(List<String> arguments) async {
 ///
 /// A close with a dirty draft prompts Save / Discard / Cancel, and a write in
 /// flight offers "Keep waiting" instead of pretending to cancel it.
-void _installCloseGuard(ViewerCloseGuard guard, ViewerSingleInstance instance) {
-  final listener = _ViewerCloseListener(guard, instance);
+void _installCloseGuard(
+  ViewerCloseGuard guard,
+  ViewerSingleInstance instance,
+  ViewerCrashReporter crashReporter,
+) {
+  final listener = _ViewerCloseListener(guard, instance, crashReporter);
   try {
     windowManager.addListener(listener);
     unawaited(windowManager.setPreventClose(true));
@@ -147,14 +163,16 @@ void _installCloseGuard(ViewerCloseGuard guard, ViewerSingleInstance instance) {
 
 /// Platform close request, routed to the live workspace model.
 class _ViewerCloseListener extends WindowListener {
-  _ViewerCloseListener(this.guard, this.instance);
+  _ViewerCloseListener(this.guard, this.instance, this.crashReporter);
 
   final ViewerCloseGuard guard;
   final ViewerSingleInstance instance;
+  final ViewerCrashReporter crashReporter;
 
   @override
   Future<void> onWindowClose() async {
     if (await guard()) {
+      await crashReporter.close();
       // The instance lock and the activation port die with this window.
       await instance.dispose();
       await windowManager.destroy();

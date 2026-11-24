@@ -218,6 +218,7 @@ String encodeSettingsDocument(ViewerSettingsDraft draft) {
       for (final choice in ViewerConfirmation.values)
         choice.wireName: draft.confirmationEnabled(choice),
     },
+    'crash_reporting': draft.crashReporting.wireValue,
   });
 }
 
@@ -371,6 +372,12 @@ ViewerSettingsDraft decodeSettingsDocument(String source) {
       'project_direction',
       SortDirection.values,
       defaults.projectDirection,
+      (value) => value.wireValue,
+    ),
+    crashReporting: wired(
+      'crash_reporting',
+      ViewerCrashReportingMode.values,
+      defaults.crashReporting,
       (value) => value.wireValue,
     ),
   );

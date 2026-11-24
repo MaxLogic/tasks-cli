@@ -17,6 +17,7 @@ import '../data/settings_draft.dart';
 import '../data/models.dart';
 import '../data/settings_store.dart';
 import '../platform/clipboard_text.dart';
+import '../platform/crash_reporting.dart';
 import '../platform/file_dialogs.dart';
 import '../platform/viewer_startup.dart';
 import 'app_shell.dart';
@@ -244,6 +245,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
     this.drafts,
     this.closeGuard,
     this.startup,
+    this.crashReporter,
   });
 
   final ViewerEnvironment environment;
@@ -264,6 +266,9 @@ class ViewerWorkspaceHost extends StatelessWidget {
   /// Startup-registration surface shown by Settings; null when this build must
   /// not touch the real Startup folder.
   final ViewerStartupController? startup;
+
+  /// Optional crash-reporting coordinator wired from the application root.
+  final ViewerCrashReporter? crashReporter;
 
   @override
   Widget build(BuildContext context) {
@@ -286,6 +291,7 @@ class ViewerWorkspaceHost extends StatelessWidget {
             initialSettings: initialSettings,
             workspaceBuilder: buildViewerWorkspace,
             startup: startup,
+            crashReporter: crashReporter,
             actions: ViewerShellActions(
               onRefresh: () => unawaited(model.refresh()),
               onBack: () {

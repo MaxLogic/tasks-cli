@@ -18,6 +18,17 @@ enum ViewerThemeMode {
 
 enum ViewerAnimations { followWindows, off }
 
+/// Crash-reporting consent level shared with the Tasks CLI.
+enum ViewerCrashReportingMode {
+  off('off', 'Off'),
+  ask('ask', 'Ask before sending'),
+  always('always', 'Always send');
+
+  const ViewerCrashReportingMode(this.wireValue, this.label);
+  final String wireValue;
+  final String label;
+}
+
 /// Only binary, non-destructive choices can be skipped. Draft/conflict and
 /// overwrite decisions stay mandatory.
 enum ViewerConfirmation {
@@ -49,6 +60,7 @@ class ViewerSettingsDraft {
     this.projectSort = ProjectSort.lastWrite,
     this.projectDirection = SortDirection.descending,
     this.skippedConfirmations = const {},
+    this.crashReporting = ViewerCrashReportingMode.off,
   });
 
   /// Absolute path of the tasks executable, or null when unresolved.
@@ -73,6 +85,7 @@ class ViewerSettingsDraft {
   final ProjectSort projectSort;
   final SortDirection projectDirection;
   final Set<ViewerConfirmation> skippedConfirmations;
+  final ViewerCrashReportingMode crashReporting;
   bool confirmationEnabled(ViewerConfirmation confirmation) =>
       !skippedConfirmations.contains(confirmation);
 
@@ -94,6 +107,7 @@ class ViewerSettingsDraft {
     ProjectSort? projectSort,
     SortDirection? projectDirection,
     Set<ViewerConfirmation>? skippedConfirmations,
+    ViewerCrashReportingMode? crashReporting,
   }) {
     return ViewerSettingsDraft(
       cliPath: clearCliPath ? null : (cliPath ?? this.cliPath),
@@ -113,6 +127,7 @@ class ViewerSettingsDraft {
       skippedConfirmations: Set.unmodifiable(
         skippedConfirmations ?? this.skippedConfirmations,
       ),
+      crashReporting: crashReporting ?? this.crashReporting,
     );
   }
 

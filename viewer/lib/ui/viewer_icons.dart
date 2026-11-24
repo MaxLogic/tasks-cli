@@ -51,4 +51,6 @@ abstract final class ViewerIcons {
   static const IconData voice = Icons.record_voice_over_outlined;
   static const IconData info = Icons.info_outline;
   static const IconData sortArrow = Icons.arrow_upward;
+  static const IconData bugReport = Icons.bug_report_outlined;
+  static const IconData send = Icons.send_outlined;
 }
