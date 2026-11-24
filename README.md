@@ -143,9 +143,15 @@ Limits: 20 MiB per compressed file, 32 attachments or 50 MiB per task, and
 ### Enrich references
 
 `tasks enrich` turns `APP-001` into `APP-001 (Task title)` in plain text, which
-helps when reading agent output. References to other projects under the same
-data root resolve read-only by their key. Unknown IDs stay unchanged and are
-reported on stderr. `enrich-clipboard` does the same to clipboard text.
+helps when reading agent output. Bare numbers in a list such as
+`APP-001, 2 and 3` use the first reference's key and are written as full
+references, `APP-001 (A), APP-2 (B) and APP-3 (C)`. Ranges of up to 50 IDs
+expand into annotated lists; longer ranges annotate their ends. A list stops at
+a parenthetical, a line break or any number glued to other text, so
+`APP-1 (done), 2` and `2-3.json/x` keep their numbers bare.
+References to other projects under the same data root resolve read-only by
+their key. Unknown IDs stay unchanged and are reported on stderr.
+`enrich-clipboard` does the same to clipboard text.
 
 ## Version checks and exit codes
 

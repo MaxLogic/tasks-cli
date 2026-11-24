@@ -31,3 +31,7 @@ ordinary builds omit hook diagnostics, while `test-hooks` builds include them.
 The full-suite matrix covers default features, local-only
 (`--no-default-features`), `test-hooks`, `server`, and `server,test-hooks`.
 Keep each outer target directory exclusive to its gate.
+
+`enrich_base.rs` is a frozen copy of `eligible` and `enrich_using` from commit
+026a3fe (the pre-list enrichment). `tests/enrichment.rs` loads it with
+`#[path]` as the oracle of its base differential. Never edit it.
