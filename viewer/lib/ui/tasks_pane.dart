@@ -1100,6 +1100,9 @@ class _ViewerTasksPaneState extends State<ViewerTasksPane>
     final action = await showMenu<_TaskMenuAction>(
       context: context,
       requestFocus: true,
+      // Dismiss instantly so a lingering exit route cannot overlap post-menu
+      // focus restoration and action semantics updates (Flutter #175041).
+      popUpAnimationStyle: AnimationStyle.noAnimation,
       position: RelativeRect.fromRect(
         Rect.fromLTWH(origin.dx, origin.dy, 1, 1),
         Offset.zero & overlay.size,

@@ -280,20 +280,27 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 ViewerPaneRegion(
+                  key: const ValueKey<String>('projects-header'),
                   maxHeight: budget.header,
                   child: _buildFilters(context, projects),
                 ),
                 ViewerPaneRegion(
+                  key: const ValueKey<String>('projects-status'),
                   maxHeight: budget.status,
                   child: status ?? const SizedBox.shrink(),
                 ),
                 if (hasPendingChange)
                   ViewerPaneRegion(
+                    key: const ValueKey<String>('projects-pending'),
                     maxHeight: pendingBudget,
                     child: _buildPendingRemoteChange(context),
                   ),
-                Expanded(child: _buildList(context, projects)),
+                Expanded(
+                  key: const ValueKey<String>('projects-list'),
+                  child: _buildList(context, projects),
+                ),
                 ConstrainedBox(
+                  key: const ValueKey<String>('projects-footer'),
                   constraints: BoxConstraints(
                     maxHeight: budget.footer < 0 ? 0 : budget.footer,
                   ),
@@ -671,6 +678,9 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
     final action = await showMenu<_ProjectMenuAction>(
       context: context,
       requestFocus: true,
+      // Dismiss instantly so a lingering exit route cannot overlap post-menu
+      // focus restoration and enrichment semantics updates (Flutter #175041).
+      popUpAnimationStyle: AnimationStyle.noAnimation,
       position: RelativeRect.fromRect(
         origin & Size(box.size.width, 24),
         Offset.zero & overlay.size,
@@ -831,8 +841,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              if (projects.totalCount > 0) const ViewerRule(),
+              if (projects.totalCount > 0)
+                const ViewerRule(key: ValueKey<String>('projects-footer-rule')),
               Flexible(
+                key: const ValueKey<String>('projects-footer-summary'),
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.fromLTRB(
                     ViewerSpace.m,
@@ -844,6 +856,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
                 ),
               ),
               ConstrainedBox(
+                key: const ValueKey<String>('projects-footer-actions'),
                 constraints: BoxConstraints(
                   maxHeight: constraints.maxHeight.isFinite
                       ? constraints.maxHeight * 0.7
@@ -968,8 +981,10 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
           runSpacing: ViewerSpace.xs,
           children: <Widget>[
             // One primary action; the rest are tonal, and every label names
-            // its shortcut.
+            // its shortcut. Keys keep each button's semantics node pinned when
+            // Retry appears or disappears.
             FilledButton.icon(
+              key: const ValueKey<String>('projects-copy-id'),
               onPressed: item == null
                   ? null
                   : () => unawaited(_copyProjectId()),
@@ -978,11 +993,13 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
             ),
             if (item != null && item.stats == null)
               FilledButton.tonalIcon(
+                key: const ValueKey<String>('projects-retry'),
                 onPressed: () => unawaited(projects.retry()),
                 icon: const Icon(ViewerIcons.retry),
                 label: const Text('Retry'),
               ),
             Tooltip(
+              key: const ValueKey<String>('projects-enrich-clipboard'),
               message:
                   reason ??
                   'Enrich the clipboard in ${item?.name ?? 'the selected '
@@ -996,6 +1013,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
               ),
             ),
             Tooltip(
+              key: const ValueKey<String>('projects-preview-enrichment'),
               message:
                   reason ?? 'Preview enrichment without writing the clipboard.',
               child: Focus(
@@ -1015,6 +1033,7 @@ class _ViewerProjectsPaneState extends State<ViewerProjectsPane>
         // short footer; each disabled button's tooltip repeats it.
         if (reason != null)
           Padding(
+            key: const ValueKey<String>('projects-clipboard-reason'),
             padding: const EdgeInsets.only(top: ViewerSpace.xs),
             child: Text(
               reason,

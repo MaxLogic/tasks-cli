@@ -120,17 +120,21 @@ class _StatusBarState extends State<StatusBar> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Expanded(
-              child: isLive
-                  ? Semantics(
-                      container: true,
-                      liveRegion: true,
-                      label: _liveText,
-                      child: ExcludeSemantics(child: text),
-                    )
-                  : text,
+              // Keep one permanent Semantics node mounted across live/non-live
+              // transitions so Windows AccessibilityBridge never reparents the
+              // status text (upstream Flutter #175041).
+              child: Semantics(
+                key: const ValueKey<String>('status-bar-text'),
+                container: true,
+                liveRegion: isLive,
+                label: isLive ? _liveText : statusText,
+                excludeSemantics: true,
+                child: text,
+              ),
             ),
             if (controller.audioWarnings.isNotEmpty)
               Padding(
+                key: const ValueKey<String>('status-bar-audio-warnings'),
                 padding: const EdgeInsets.only(left: 8),
                 child: Text(
                   'Audio warning (${controller.audioWarnings.length})',
@@ -139,12 +143,14 @@ class _StatusBarState extends State<StatusBar> {
               ),
             if (widget.onDetails != null)
               TextButton.icon(
+                key: const ValueKey<String>('status-bar-details'),
                 onPressed: widget.onDetails,
                 icon: const Icon(ViewerIcons.info),
                 label: const Text('Details'),
               ),
             if (widget.onRetry != null)
               TextButton.icon(
+                key: const ValueKey<String>('status-bar-retry'),
                 onPressed: widget.onRetry,
                 icon: const Icon(ViewerIcons.retry),
                 label: const Text('Retry'),
