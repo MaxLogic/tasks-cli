@@ -968,13 +968,10 @@ class ViewerEditorController extends ChangeNotifier {
           message: 'The pending task is no longer selected.',
         );
       }
+      final int confirmedVersion;
       try {
         final confirmed = await writer!.reconcileTaskWrite(projectId, taskId);
-        return _reconcile(
-          intended,
-          changes,
-          confirmedVersion: confirmed.version,
-        );
+        confirmedVersion = confirmed.version;
       } on ViewerCliErrorFailure catch (failure) {
         _awaitingReconciliation = false;
         _intendedFields = null;
@@ -1021,6 +1018,7 @@ class ViewerEditorController extends ChangeNotifier {
           message: 'Could not check the pending change: ${failure.message}',
         );
       }
+      return _reconcile(intended, changes, confirmedVersion: confirmedVersion);
     }
     return _reconcile(intended, changes);
   }

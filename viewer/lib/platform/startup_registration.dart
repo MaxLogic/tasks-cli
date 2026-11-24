@@ -370,7 +370,7 @@ class WindowsStartupPolicyProbe implements StartupPolicyProbe {
   @override
   Future<bool?> shortcutDisabledByWindows(String shortcutFileName) async {
     try {
-      return using((arena) {
+      return using<bool?>((arena) {
         final type = arena<Uint32>();
         final size = arena<Uint32>();
         final data = arena<Uint8>(32);
